@@ -45,7 +45,7 @@ async function createMeasurement() {
   const renderer = query.get('renderer');
   if (renderer !== 'cesium' && renderer !== 'maplibre')
     throw new Error('renderer must be cesium or maplibre');
-  const styleUrl = new URL('/performance-local/style.json', location.href).href;
+  const styleUrl = new URL(`${import.meta.env.BASE_URL}performance-local/style.json`, location.href).href;
   const errors: string[] = [];
   const frames: Frame[] = [];
   let phase = 'cold';

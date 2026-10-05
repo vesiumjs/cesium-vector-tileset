@@ -15,7 +15,7 @@ async function createSceneValidation() {
   Object.assign(scene, sceneOptions);
   scene.renderError.addEventListener((_scene, cause) => errors.push(String(cause)));
   scene.camera.setView({ destination: Rectangle.fromDegrees(-0.16, 51.49, -0.1, 51.52) });
-  const tileset = await CesiumVectorTileset.fromUrl('/widget-fixture/style.json') as unknown as TestTileset;
+  const tileset = await CesiumVectorTileset.fromUrl(`${import.meta.env.BASE_URL}widget-fixture/style.json`) as unknown as TestTileset;
   scene.primitives.add(tileset);
   let renderCalls = 0;
   let renderedFrames = 0;

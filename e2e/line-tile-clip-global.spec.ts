@@ -134,7 +134,7 @@ async function serveTiles(page: Page, renderUrl: string, scenario: typeof cases[
 
 async function installLowZoomTileset(page: Page, styleUrl: string) {
   await page.evaluate(async (styleUrl) => {
-    const moduleUrl = '/packages/cesium-vector-tileset/index.ts';
+    const moduleUrl = new URL('../../packages/cesium-vector-tileset/index.ts', location.href).href;
     const { CesiumVectorTileset } = await import(moduleUrl) as typeof import('../packages/cesium-vector-tileset');
     const validation = window.renderValidation;
     const { viewer } = validation;

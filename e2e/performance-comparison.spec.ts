@@ -237,10 +237,10 @@ test('local MVT renderer performance comparison @performance', async ({ browser,
           externalRequests.push(url.href);
           return route.abort();
         }
-        if (url.pathname === '/performance-local/style.json')
+        if (url.href === `${renderUrl}/performance-local/style.json`)
           return route.fulfill({ json: style });
-        if (url.pathname.startsWith('/performance-local/') && url.pathname.endsWith('.pbf')) {
-          const zoom = Number(url.pathname.split('/')[2]);
+        if (url.href.startsWith(`${renderUrl}/performance-local/`) && url.pathname.endsWith('.pbf')) {
+          const zoom = Number(url.pathname.match(/\/(\d+)\/\d+\/\d+\.pbf$/)![1]);
           const bytes = tiles.get(zoom);
           requests.push({ url: url.href, phase: pagePhase, zoom, tileBytes: bytes?.byteLength ?? 0 });
           if (!bytes) {

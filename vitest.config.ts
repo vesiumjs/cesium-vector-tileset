@@ -1,11 +1,14 @@
 import { defineConfig } from 'vitest/config';
 
+const base = '/cesium-vector-tileset/';
+
 export default defineConfig({
+  base,
   test: {
     environment: 'jsdom',
     environmentOptions: {
       jsdom: {
-        url: 'http://localhost/',
+        url: `http://localhost${base}`,
         pretendToBeVisual: true,
       },
     },

@@ -125,7 +125,7 @@ for (const scenario of ['normal', 'cdn', 'missing-create', 'missing-combine']) {
       await page.route('**/Workers/createGeometry.js', route => route.fulfill({ status: 404, body: 'Missing create Worker' }));
     const query = new URLSearchParams();
     if (scenario === 'cdn') {
-      const baseUrl = new URL('/cesiumStatic/', renderUrl);
+      const baseUrl = new URL(`${renderUrl}/cesiumStatic/`);
       baseUrl.hostname = 'localhost';
       query.set('cesiumBaseUrl', baseUrl.href);
     }

@@ -24,7 +24,7 @@ for (const [scenario, mode] of [...['curved', 'dateline', 'short-legs'].flatMap(
     await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
     await expect.poll(() => page.evaluate(() => !!window.renderValidation)).toBe(true);
     await page.evaluate(async ({ mode, scenario }) => {
-      const moduleUrl = '/e2e/fixtures/line-vertex-format-fixture.ts';
+      const moduleUrl = new URL('./line-vertex-format-fixture.ts', location.href).href;
       const { createLineFormatValidation } = await import(moduleUrl) as typeof import('./fixtures/line-vertex-format-fixture');
       window.lineFormatValidation = await createLineFormatValidation(mode as Mode, scenario as Parameters<typeof createLineFormatValidation>[1]);
     }, { mode, scenario });

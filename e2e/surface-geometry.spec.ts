@@ -226,7 +226,7 @@ for (const mode of ['2d', 'cv']) {
       assert.ok(primitive.arrays.every(array => array.attributes.some(attribute => attribute.index === primitive.batchLocation && attribute.type === 0x1403 && attribute.components === 1 && !attribute.normalize)), 'Native instance IDs were not uploaded as exact unsigned SHORT');
     }
     const floatReference = await page.evaluate(async () => {
-      const fixtureUrl = '/e2e/fixtures/surface-float-reference.ts';
+      const fixtureUrl = new URL('./surface-float-reference.ts', location.href).href;
       const fixture = await import(/* @vite-ignore */ fixtureUrl) as typeof import('./fixtures/surface-float-reference');
       return fixture.compareSurfaceFloat(window.renderValidation.viewer, window.renderValidation.tileset);
     });
@@ -319,7 +319,7 @@ test('surface morph uploads both exact position tracks and finishes in the 3D Na
     viewer.scene.morphTo3D(3);
   });
   const floatReference = await page.evaluate(async () => {
-    const fixtureUrl = '/e2e/fixtures/surface-float-reference.ts';
+    const fixtureUrl = new URL('./surface-float-reference.ts', location.href).href;
     const fixture = await import(/* @vite-ignore */ fixtureUrl) as typeof import('./fixtures/surface-float-reference');
     for (let frame = 0; frame < 300; frame++) {
       const scene = window.renderValidation.viewer.scene;

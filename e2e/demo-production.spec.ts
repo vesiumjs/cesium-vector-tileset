@@ -1,7 +1,6 @@
 import type { Page } from 'playwright/test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import process from 'node:process';
 import { createCanvas, loadImage } from 'canvas';
 import { expect } from 'playwright/test';
 import { preview } from 'vite';
@@ -26,7 +25,7 @@ const test = base.extend<object, { productionUrl: string }>({
   ],
 });
 
-const basePath = process.env.VITE_BASE_PATH ?? '/cesium-vector-tileset/';
+const basePath = '/cesium-vector-tileset/';
 
 const tile = fromGeojsonVt({
   land: { features: [{ type: 3, geometry: [[[0, 0], [4096, 0], [4096, 4096], [0, 4096], [0, 0]]], tags: {} }] },

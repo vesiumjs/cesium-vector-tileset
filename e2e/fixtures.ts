@@ -56,7 +56,7 @@ export const test = base.extend<{ cpuThrottle: void }, { renderUrl: string }>({
         const address = server.httpServer?.address();
         if (!address || typeof address === 'string')
           throw new Error('E2E render server did not expose a TCP address');
-        await use(`http://127.0.0.1:${address.port}`);
+        await use(`http://127.0.0.1:${address.port}${server.config.base.replace(/\/$/, '')}`);
       }
       finally {
         await server.close();

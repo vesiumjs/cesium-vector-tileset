@@ -11,7 +11,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 async function createValidation() {
   const query = new URLSearchParams(location.search);
-  const publishedUrl = '/packages/cesium-vector-tileset/dist/index.mjs';
+  const publishedUrl = `${import.meta.env.BASE_URL}packages/cesium-vector-tileset/dist/index.mjs`;
   const { CesiumVectorTileset } = query.has('published')
     ? await import(/* @vite-ignore */ publishedUrl) as typeof import('../../packages/cesium-vector-tileset/index')
     : await import('../../packages/cesium-vector-tileset/index');
