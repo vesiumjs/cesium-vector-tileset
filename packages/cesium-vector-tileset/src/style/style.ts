@@ -984,9 +984,6 @@ export class Style extends Evented<StyleEventType> {
   _getOperationsToPerform(diff: Array<DiffCommand<DiffOperations>>): { operations: Array<() => void>; unimplemented: string[] } {
     const operations: Array<() => void> = [];
     const unimplemented: string[] = [];
-    // `DiffCommand<DiffOperations>` is not a discriminated union: `command` and `args`
-    // are independent unions, so `args` cannot be narrowed by switching on `command`.
-    // Each branch casts `args` to the tuple type produced by `diffStyles` for that command.
     for (const op of diff) {
       switch (op.command) {
         case 'setCenter':
@@ -996,66 +993,66 @@ export class Style extends Evented<StyleEventType> {
         case 'setRoll':
           continue;
         case 'addLayer': {
-          const [layerObject, before] = op.args as [LayerSpecification, string | null];
+          const [layerObject, before] = op.args;
           operations.push(() => this.addLayer(layerObject, before ?? undefined));
           break;
         }
         case 'removeLayer': {
-          const [id] = op.args as [string];
+          const [id] = op.args;
           operations.push(() => this.removeLayer(id));
           break;
         }
         case 'setPaintProperty': {
-          const [layerId, name, value, options] = op.args as [string, string, unknown, string | null];
-          operations.push(() => this.setPaintProperty(layerId, name as keyof AllPaintProperties, value as AllPaintProperties[keyof AllPaintProperties], options as StyleSetterOptions | undefined));
+          const [layerId, name, value] = op.args;
+          operations.push(() => this.setPaintProperty(layerId, name, value));
           break;
         }
         case 'setLayoutProperty': {
-          const [layerId, name, value, options] = op.args as [string, string, unknown, string | null];
-          operations.push(() => this.setLayoutProperty(layerId, name as keyof AllLayoutProperties, value as AllLayoutProperties[keyof AllLayoutProperties], options as StyleSetterOptions | undefined));
+          const [layerId, name, value] = op.args;
+          operations.push(() => this.setLayoutProperty(layerId, name, value));
           break;
         }
         case 'setFilter': {
-          const [layerId, filter] = op.args as [string, unknown];
-          operations.push(() => this.setFilter(layerId, filter as FilterSpecification | null));
+          const [layerId, filter] = op.args;
+          operations.push(() => this.setFilter(layerId, filter));
           break;
         }
         case 'addSource': {
-          const [id, source] = op.args as [string, SourceSpecification];
+          const [id, source] = op.args;
           operations.push(() => this.addSource(id, source));
           break;
         }
         case 'removeSource': {
-          const [id] = op.args as [string];
+          const [id] = op.args;
           operations.push(() => this.removeSource(id));
           break;
         }
         case 'setLayerZoomRange': {
-          const [layerId, minzoom, maxzoom] = op.args as [string, number, number];
+          const [layerId, minzoom, maxzoom] = op.args;
           operations.push(() => this.setLayerZoomRange(layerId, minzoom, maxzoom));
           break;
         }
         case 'setLight':
-          operations.push(() => this.setLight(op.args[0] as LightSpecification));
+          operations.push(() => this.setLight(op.args[0]));
           break;
         case 'setGeoJSONSourceData': {
-          const [id, data] = op.args as [string, unknown];
-          operations.push(() => this.setGeoJSONSourceData(id, data as GeoJSON.GeoJSON | string));
+          const [id, data] = op.args;
+          operations.push(() => this.setGeoJSONSourceData(id, data));
           break;
         }
         case 'setGlyphs': {
-          const [glyphsUrl] = op.args as [string];
+          const [glyphsUrl] = op.args;
           operations.push(() => this.setGlyphs(glyphsUrl));
           break;
         }
         case 'setSprite': {
-          const [sprite] = op.args as [SpriteSpecification];
+          const [sprite] = op.args;
           operations.push(() => this.setSprite(sprite));
           break;
         }
 
         case 'setGlobalState': {
-          const [state] = op.args as [StateSpecification];
+          const [state] = op.args;
           operations.push(() => this.setGlobalState(state));
           break;
         }

@@ -4,7 +4,7 @@
 
 在 Cesium 中使用 MapLibre 风格的 JSON 样式渲染矢量瓦片。库复用 MapLibre GL JS 的代码与设计来处理样式表达式、瓦片数据和标注布局，再通过 Cesium 的 `Buffer*Collection` 与 `Primitive` API 绘制。
 
-仓库包含 `packages/cesium-vector-tileset` 下的 TypeScript 库，以及 `src` 下的 Vue + Vite 演示应用。演示提供地图样式、城市视角，以及建筑、密集标注和日期变更线等场景预设。
+库可接入已有的 Cesium 场景，不依赖前端框架，并提供 TypeScript 类型声明。
 
 ## 功能
 
@@ -20,32 +20,17 @@
 
 本项目是 Cesium 渲染后端，实现了 MapLibre 的部分能力。选择样式前，请阅读[兼容性与限制](#兼容性与限制)。
 
-## 运行演示
-
-使用 **Node.js 22.13 或更新版本**和 pnpm。在仓库根目录执行：
+## 安装
 
 ```bash
-pnpm install
-pnpm dev
+pnpm add cesium@1.146.0 cesium-vector-tileset
 ```
 
-打开 Vite 输出的本地地址。演示默认使用 OpenFreeMap Liberty 样式和上海视角。可以通过控件切换样式、相机和场景模式，也可以输入自己的样式 JSON URL。
-
-通过 URL 参数分享视角：
-
-```text
-/?source=liberty&view=shanghai&mode=3d&angle=oblique
-/?scenario=manhattan&height=60
-/?source=bright&view=world&mode=2d
-```
-
-`source` 选择样式预设；`style` 指定自定义样式 URL；`mode` 支持 `3d`、`2d` 和 `cv`；`angle` 支持 `top`、`oblique` 和 `horizon`。可用样式、城市和场景，以及 `widgetOptions`、`sceneOptions`、`tilesetOptions`，统一定义在 [src/demo-config.ts](./src/demo-config.ts)。Vue 负责切换这些配置，渲染循环和尺寸变化由 CesiumWidget 管理。
-
-预设从外部服务请求数据。自定义样式引用的数据源、sprite 和字形必须可访问，并为应用所在域配置 CORS。请展示数据提供方要求的署名，在演示之外使用预设前核对其服务条款。
+Cesium 需要单独安装，并在应用中配置其静态资源。详见[兼容性与限制](#兼容性与限制)。
 
 ## 接入 Cesium
 
-演示通过 pnpm workspace 导入 `cesium-vector-tileset`。以下示例使用同一公共入口，假定应用已经创建 Cesium `Scene` 并运行渲染循环。
+以下示例假定应用已经创建 Cesium `Scene` 并运行渲染循环。
 
 ### 从 URL 加载样式
 
@@ -138,7 +123,7 @@ export async function addPoint(scene: Scene) {
 
 使用 `setStyle(nextStyle)` 应用新的样式对象，未变化的数据源保留瓦片缓存。通过 `addImage()` / `updateImage()` 注册或替换 RGBA 图片，通过 `removeImage()` 移除图片。
 
-`pick(pickObject)` 将受支持 Primitive 的拾取 ID 解析为 `{ layerId, properties }`。`stats()` 提供瓦片、集合、内存和已提交绘制命令计数。`setGpuMemoryBudgetBytes(bytes)` 调整 GPU 缓存预算；活动瓦片会保留，因此该预算不是内存硬上限。类型与方法签名见[公共入口](./packages/cesium-vector-tileset/index.ts)和[实例实现](./packages/cesium-vector-tileset/src/cesium-vector-tileset.ts)。
+`pick(pickObject)` 将受支持 Primitive 的拾取 ID 解析为 `{ layerId, properties }`。`stats()` 提供瓦片、集合、内存和已提交绘制命令计数。`setGpuMemoryBudgetBytes(bytes)` 调整 GPU 缓存预算；活动瓦片会保留，因此该预算不是内存硬上限。类型与方法签名见[公共入口](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/packages/cesium-vector-tileset/index.ts)和[实例实现](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/packages/cesium-vector-tileset/src/cesium-vector-tileset.ts)。
 
 释放地图时，从场景移除实例；如果所属集合尚未销毁它，再显式释放：
 
@@ -157,60 +142,13 @@ export function removeVectorMap(scene: Scene, tileset: CesiumVectorTileset) {
 
 ## 兼容性与限制
 
-- 当前 workspace 使用 **Cesium 1.146**。后端依赖 Cesium 渲染内部接口，切换 Cesium 版本时需要验证兼容性。
+- 当前已验证 **Cesium 1.146**。后端依赖 Cesium 渲染内部接口，切换 Cesium 版本时需要验证兼容性。
 - 支持的图层与数据源类型见上表。尚未实现 `heatmap`、`hillshade` 和 `raster-dem`；样式校验会明确拒绝 `line-gradient`。
 - 贴地仅适用于普通填充多边形，且需要承载场景的矢量 provider。线、圆点、符号、挤出建筑和图片图案仍使用椭球高度。
 - 文字与图标可以绘制，但符号拾取目前关闭。
 - `fromUrl()` 将相对的数据源 TileJSON URL、瓦片模板、sprite 和字形 URL 按样式 URL 解析。远程 GeoJSON `data`、图片 `url` 和视频 `urls` 请使用绝对 URL。
-- 浏览器渲染需要 WebGL 和 module Worker。部署时需提供 Cesium 静态资源，包括完整的 `Workers` 目录，以及库的 worker 和共享模块产物。演示通过 `unplugin-cesium` 处理 Cesium 资源，见 [vite.config.ts](./vite.config.ts)。
+- 浏览器渲染需要 WebGL 和 module Worker。部署时需提供 Cesium 静态资源，包括完整的 `Workers` 目录，以及库的 worker 和共享模块产物。演示通过 `unplugin-cesium` 处理 Cesium 资源，见 [vite.config.ts](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/vite.config.ts)。
 - 库本身不依赖框架，Vue 用于演示应用。在 Node 中导入包不等于支持服务端地图渲染。
-
-## 开发
-
-| 命令                 | 用途                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| `pnpm dev`           | 启动 Vite 演示服务器                                                                       |
-| `pnpm build`         | 类型检查并构建演示，产物位于根目录 `dist/`                                                 |
-| `pnpm preview`       | 预览构建后的演示                                                                           |
-| `pnpm build:mvt`     | 构建库模块、worker、source map 和类型声明，产物位于 `packages/cesium-vector-tileset/dist/` |
-| `pnpm lint:eslint`   | 运行 ESLint 并自动修复                                                                     |
-| `pnpm lint:tsc`      | 运行 workspace TypeScript 检查                                                             |
-| `pnpm test`          | 运行 Vitest 单元测试                                                                       |
-| `pnpm test:e2e`      | 构建库和演示，再运行默认 Playwright 测试集                                                 |
-| `pnpm test:e2e:live` | 构建库并运行标有 `@live` 的 Playwright 外部服务测试                                        |
-
-运行浏览器测试前，通过 `pnpm exec playwright install chromium` 安装 Chromium。Playwright 报告与失败产物位于 `node_modules/.cache/playwright/`。
-
-修改代码后，依次运行 `pnpm lint:eslint`、`pnpm lint:tsc` 和相关测试。单元测试放在被测试代码同级的 `__test__/` 目录，浏览器测试位于 `e2e/`。
-
-生成的样式属性、struct array 和 Unicode 表应通过命令重新生成，不要手工编辑：
-
-```bash
-pnpm --filter cesium-vector-tileset codegen
-pnpm --filter cesium-vector-tileset generate-unicode-data
-pnpm lint:eslint
-```
-
-在 `vue-tsc` 和 `typescript-eslint` 支持下一版本之前，TypeScript 保持在 `6.0.x`。
-
-## 项目结构与延伸阅读
-
-```text
-packages/cesium-vector-tileset/
-  index.ts           库的公共导出
-  src/               样式、数据源、Worker、瓦片和 Cesium 渲染
-  build/             代码生成器
-src/                 Vue 演示、CesiumWidget 配置和样式
-e2e/                 浏览器集成与渲染测试
-docs/                架构与研究记录
-CONTEXT.md           领域术语
-```
-
-- [架构说明](./docs/architecture.md)：瓦片生命周期、渲染和资源所有权。
-- [模块职责](./docs/module-responsibilities.md)：模块边界与调用方。
-- [领域术语](./CONTEXT.md)：代码库使用的统一词汇。
-
-以上内部文档目前以中文编写。
 
 ## 许可证与致谢
 

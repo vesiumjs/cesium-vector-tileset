@@ -87,7 +87,7 @@ test('packed metadata includes one typed entry, worker, shared module and licens
     types: './dist/index.d.mts',
     default: './dist/index.mjs',
   });
-  assert.equal(metadata.peerDependencies.cesium, '1.146.0');
+  assert.equal(metadata.peerDependencies, undefined);
   assert.equal(metadata.engines.node, '>=22.13.0');
   assert.equal(metadata.dependencies['@maplibre/mlt'], undefined, 'the bundled decoder must not require a consumer dependency');
   assert.deepEqual(Object.keys(metadata.exports), ['.', './package.json']);
@@ -95,7 +95,9 @@ test('packed metadata includes one typed entry, worker, shared module and licens
   assert.equal(shared.length, 1, 'main and worker must share one published module');
   assert.deepEqual(files, [
     'package/LICENSE',
-    'package/THIRD_PARTY_NOTICES.txt',
+    'package/README.md',
+    'package/README.zh-CN.md',
+    'package/dist/THIRD_PARTY_NOTICES.txt',
     'package/dist/index.d.mts',
     'package/dist/index.d.mts.map',
     'package/dist/index.mjs',

@@ -14,6 +14,10 @@ dist-ssr
 
 dist.zip
 
+# Package documentation copied by prepack
+/packages/cesium-vector-tileset/README.md
+/packages/cesium-vector-tileset/README.zh-CN.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

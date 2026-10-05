@@ -4,6 +4,15 @@
   "version": "0.0.1",
   "description": "Render Mapbox Vector Tiles in Cesium",
   "license": "MIT",
+  "homepage": "https://github.com/vesiumjs/cesium-vector-tileset#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vesiumjs/cesium-vector-tileset.git",
+    "directory": "packages/cesium-vector-tileset"
+  },
+  "bugs": {
+    "url": "https://github.com/vesiumjs/cesium-vector-tileset/issues"
+  },
   "exports": {
     ".": "./index.ts",
     "./package.json": "./package.json"
@@ -17,6 +26,7 @@
   },
   "scripts": {
     "build": "tsdown --config ../../tsdown.config.ts",
+    "prepack": "tsx build/prepare-package.ts",
     "codegen": "tsx build/generate-style-code.ts && tsx build/generate-struct-arrays.ts",
     "generate-unicode-data": "tsx build/generate-unicode-data.ts"
   },
@@ -24,11 +34,11 @@
     "@mapbox/point-geometry": "^1.1.0",
     "@mapbox/tiny-sdf": "^2.2.0",
     "@mapbox/vector-tile": "^3.0.0",
-    "@maplibre/geojson-vt": "^6.1.1",
-    "@maplibre/maplibre-gl-style-spec": "^26.4.2",
+    "@maplibre/geojson-vt": "^6.1.2",
+    "@maplibre/maplibre-gl-style-spec": "^26.4.4",
     "@maplibre/vt-pbf": "^4.3.2",
     "@types/geojson": "^7946.0.16",
-    "earcut": "^3.2.3",
+    "earcut": "^3.2.4",
     "gl-matrix": "^3.4.4",
     "murmurhash-js": "^1.0.0",
     "pbf": "^5.1.2",
@@ -40,10 +50,12 @@
     "@types/murmurhash-js": "^1.0.7",
     "@unicode/unicode-17.0.0": "^2.0.7",
     "cesium": "^1.146.0",
-    "regenerate": "^1.4.2",
-    "tsx": "^4.23.13"
+    "regenerate": "^1.5.0",
+    "tsx": "^4.23.15"
   },
   "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
     "exports": {
       ".": {
         "types": "./dist/index.d.mts",
