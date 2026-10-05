@@ -55,7 +55,6 @@ const breakable: {
   [0x2027]: true, // interpunct
   // Many other characters may be reasonable breakpoints
   // Consider "neutral orientation" characters in codePointHasNeutralVerticalOrientation in unicode_properties
-  // See https://github.com/mapbox/mapbox-gl-js/issues/3658
 };
 
 // Allow breaks depending on the following character

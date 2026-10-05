@@ -2,7 +2,7 @@
   "name": "cesium-vector-tileset",
   "type": "module",
   "version": "0.0.1",
-  "description": "Render Mapbox Vector Tiles in Cesium",
+  "description": "Render vector tiles in Cesium with MapLibre styles",
   "license": "MIT",
   "homepage": "https://github.com/vesiumjs/cesium-vector-tileset#readme",
   "repository": {

@@ -141,8 +141,7 @@ async function doImageRequest(itemInQueue: PendingImageRequest) {
   }
   // - If refreshExpiredTiles is false, then we can use HTMLImageElement to download raster images.
   // - Fetch/XHR (via MakeRequest API) will be used to download images for following scenarios:
-  //      1. Style image sprite will had a issue with HTMLImageElement as described
-  //          here: https://github.com/mapbox/mapbox-gl-js/issues/1470
+  //      1. Style sprites need decoded pixel data through the fetch/XHR path.
   //      2. If refreshExpiredTiles is true (default), then in order to read the image cache header,
   //          fetch/XHR request will be required
   // - For any special case handling like use of AddProtocol, worker initiated request or additional headers

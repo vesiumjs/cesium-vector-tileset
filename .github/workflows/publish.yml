@@ -19,7 +19,6 @@ jobs:
     needs: checks
     runs-on: ubuntu-24.04
     environment: Publish Package
-    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write

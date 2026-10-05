@@ -6,6 +6,8 @@
 
 库可接入已有的 Cesium 场景，不依赖前端框架，并提供 TypeScript 类型声明。
 
+[在线演示](https://vesiumjs.github.io/cesium-vector-tileset/)
+
 ## 功能
 
 | 领域         | 当前实现                                                                       |
@@ -23,10 +25,10 @@
 ## 安装
 
 ```bash
-pnpm add cesium@1.146.0 cesium-vector-tileset
+pnpm add cesium cesium-vector-tileset
 ```
 
-Cesium 需要单独安装，并在应用中配置其静态资源。详见[兼容性与限制](#兼容性与限制)。
+在应用中配置 Cesium 的静态资源。
 
 ## 接入 Cesium
 
@@ -142,7 +144,7 @@ export function removeVectorMap(scene: Scene, tileset: CesiumVectorTileset) {
 
 ## 兼容性与限制
 
-- 当前已验证 **Cesium 1.146**。后端依赖 Cesium 渲染内部接口，切换 Cesium 版本时需要验证兼容性。
+- 已验证的 Cesium 版本：1.146.0。
 - 支持的图层与数据源类型见上表。尚未实现 `heatmap`、`hillshade` 和 `raster-dem`；样式校验会明确拒绝 `line-gradient`。
 - 贴地仅适用于普通填充多边形，且需要承载场景的矢量 provider。线、圆点、符号、挤出建筑和图片图案仍使用椭球高度。
 - 文字与图标可以绘制，但符号拾取目前关闭。
@@ -152,4 +154,4 @@ export function removeVectorMap(scene: Scene, tileset: CesiumVectorTileset) {
 
 ## 许可证与致谢
 
-项目采用 [MIT 许可证](./LICENSE)。项目基于 MapLibre GL JS 及相关 MapLibre/Mapbox 库构建，并使用 Cesium 渲染。第三方代码与地图数据仍遵循各自的许可证和署名要求。
+项目采用 [MIT 许可证](./LICENSE)。实现参考 MapLibre GL JS 的代码与设计，并使用 Cesium 渲染。第三方依赖与地图数据仍遵循各自的许可证和署名要求。

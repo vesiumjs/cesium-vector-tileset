@@ -1257,8 +1257,7 @@ export class Style extends Evented<StyleEventType> {
       // need to clear (rather than just reload) the underlying source's
       // tiles.  Otherwise, tiles marked 'reloading' will have buckets /
       // buffers that are set up for the _previous_ version of this
-      // layer, causing, e.g.:
-      // https://github.com/mapbox/mapbox-gl-js/issues/3633
+      // layer and cannot be reused for the new layer type.
       const removed = this._removedLayers[id];
       delete this._removedLayers[id];
       const sourceId = layer.source;
@@ -1607,7 +1606,7 @@ export class Style extends Evented<StyleEventType> {
   _updateLayer(layer: StyleLayer): void {
     this._updatedLayers[layer.id] = true;
     if (layer.source && !this._updatedSources[layer.source]
-    // Skip for raster layers (https://github.com/mapbox/mapbox-gl-js/issues/7865)
+    // Raster tiles do not contain style-dependent geometry buckets to reload.
       && this.tilePyramids[layer.source].getSource().type !== 'raster') {
       this._updatedSources[layer.source] = 'reload';
       this.tilePyramids[layer.source].pause();

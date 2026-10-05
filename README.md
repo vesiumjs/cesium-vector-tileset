@@ -6,6 +6,8 @@ Render vector tiles in Cesium using MapLibre-style JSON. The library reuses MapL
 
 Use the library with an existing Cesium scene. It is framework independent and provides TypeScript declarations.
 
+[Live demo](https://vesiumjs.github.io/cesium-vector-tileset/)
+
 ## Capabilities
 
 | Area               | Current implementation                                                                                      |
@@ -23,10 +25,10 @@ This is a Cesium rendering backend with a subset of MapLibre's capabilities. See
 ## Installation
 
 ```bash
-pnpm add cesium@1.146.0 cesium-vector-tileset
+pnpm add cesium cesium-vector-tileset
 ```
 
-Install Cesium separately and configure its static assets in your application. See [compatibility and limits](#compatibility-and-limits).
+Configure Cesium's static assets in your application.
 
 ## Use with Cesium
 
@@ -142,7 +144,7 @@ export function removeVectorMap(scene: Scene, tileset: CesiumVectorTileset) {
 
 ## Compatibility and limits
 
-- Tested with **Cesium 1.146**. The backend uses Cesium rendering internals, so verify compatibility when changing Cesium versions.
+- Tested with Cesium 1.146.0.
 - Supported layer and source types are listed above. `heatmap`, `hillshade`, and `raster-dem` are not implemented. `line-gradient` is explicitly rejected by style validation.
 - Draping applies only to ordinary fill polygons and requires the hosting scene's vector provider. Lines, circles, symbols, extrusions, and image patterns retain ellipsoid heights.
 - Text and icons render, but symbol picking is currently disabled.
@@ -152,4 +154,4 @@ export function removeVectorMap(scene: Scene, tileset: CesiumVectorTileset) {
 
 ## License and credits
 
-The project is licensed under the [MIT License](./LICENSE). It builds on MapLibre GL JS and related MapLibre/Mapbox libraries, and uses Cesium for rendering. Third-party code and map data retain their respective licenses and attribution requirements.
+The project is licensed under the [MIT License](./LICENSE). Its implementation adapts code and designs from MapLibre GL JS and uses Cesium for rendering. Third-party dependencies and map data retain their respective licenses and attribution requirements.

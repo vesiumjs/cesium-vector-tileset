@@ -24,8 +24,7 @@ export function loadGeometry(feature: VectorTileFeature): Point[][] {
   const geometry = feature.loadGeometry();
   for (const ring of geometry) {
     for (const point of ring) {
-      // round here because mapbox-gl-native uses integers to represent
-      // points and we need to do the same to avoid rendering differences.
+      // Match MapLibre's integer tile coordinates to avoid rendering differences.
       const x = Math.round(point.x * scale);
       const y = Math.round(point.y * scale);
 
@@ -34,7 +33,6 @@ export function loadGeometry(feature: VectorTileFeature): Point[][] {
 
       if (x < point.x || x > point.x + 1 || y < point.y || y > point.y + 1) {
         // warn when exceeding allowed extent except for the 1-px-off case
-        // https://github.com/mapbox/mapbox-gl-js/issues/8992
         warnOnce('Geometry exceeds allowed extent, reduce your vector tile buffer size');
       }
     }

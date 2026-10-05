@@ -304,7 +304,8 @@ const EPSG3857_HALF_CIRCUMFERENCE = Math.PI * EPSG3857_RADIUS;
  * Builds the `{bbox-epsg-3857}` token used in WMS tile URLs: the tile's bounding
  * box in EPSG:3857 meters as a `minX,minY,maxX,maxY` string.
  *
- * Inlined from the archived \@mapbox/whoots-js (ISC, Copyright (c) 2017 Mapbox).
+ * Adapted from MapLibre GL JS's tile URL bounding box calculation.
+ * The inherited ISC notice is included in THIRD_PARTY_NOTICES.txt.
  */
 function getTileBBox(x: number, y: number, z: number): string {
   // for Google/OSM tile scheme we need to alter the y

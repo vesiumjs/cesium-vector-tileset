@@ -185,15 +185,13 @@ export class GlyphSource {
     /**
      * TinySDF's "top" is the distance from the alphabetic baseline to the top of the glyph.
      * Server-generated fonts specify "top" relative to an origin above the em box (the origin
-     * comes from FreeType, but I'm unclear on exactly how it's derived)
-     * ref: https://github.com/mapbox/sdf-glyph-foundry
+     * comes from FreeType).
      *
      * Server fonts don't yet include baseline information, so we can't line up exactly with them
      * (and they don't line up with each other)
-     * ref: https://github.com/mapbox/node-fontnik/pull/160
      *
-     * To approximately align TinySDF glyphs with server-provided glyphs, we use this baseline adjustment
-     * factor calibrated to be in between DIN Pro and Arial Unicode (but closer to Arial Unicode)
+     * Follow MapLibre's baseline adjustment to approximately align TinySDF glyphs with server-provided glyphs,
+     * using a factor calibrated to be between DIN Pro and Arial Unicode (but closer to Arial Unicode).
      */
     const topAdjustment = 27.5;
 

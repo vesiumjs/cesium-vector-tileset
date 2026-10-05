@@ -381,7 +381,7 @@ function addFeature(bucket: SymbolBucket, feature: SymbolFeature, shapedTextOrie
     }
   }
   else if (feature.type === 'LineString') {
-    // https://github.com/mapbox/mapbox-gl-js/issues/3808
+    // Point placement on a line anchors the label at its first vertex.
     for (const line of feature.geometry) {
       const subdividedLine = line;
       addSymbolAtAnchor(subdividedLine, new Anchor(subdividedLine[0].x, subdividedLine[0].y, 0));
@@ -666,7 +666,7 @@ function addSymbol(bucket: SymbolBucket, anchor: Anchor, line: Point[], shapedTe
 
   if (bucket.glyphOffsetArray.length >= SymbolBucket.MAX_GLYPHS) {
     warnOnce(
-      'Too many glyphs being rendered in a tile. See https://github.com/mapbox/mapbox-gl-js/issues/2907',
+      'Too many glyphs being rendered in a tile.',
     );
   }
 

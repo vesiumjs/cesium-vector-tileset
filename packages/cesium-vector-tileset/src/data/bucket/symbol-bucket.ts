@@ -463,7 +463,6 @@ export class SymbolBucket extends SymbolBucketRuntime {
 // this constant is based on the size of StructArray indexes used in a symbol
 // bucket--namely, glyphOffsetArrayStart
 // eg the max valid UInt16 is 65,535
-// See https://github.com/mapbox/mapbox-gl-js/issues/2907 for motivation
 // lineStartIndex and textBoxStartIndex could potentially be concerns
 // but we expect there to be many fewer boxes/lines than glyphs
 SymbolBucket.MAX_GLYPHS = 65535;

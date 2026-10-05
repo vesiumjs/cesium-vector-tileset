@@ -397,9 +397,7 @@ export class TilePyramid extends Evented<SourceEventType> {
   async _reloadTile(id: string, state: TileState): Promise<void> {
     const tile = this._activeTiles.getTileById(id);
 
-    // this potentially does not address all underlying
-    // issues https://github.com/mapbox/mapbox-gl-js/issues/4252
-    // - hard to tell without repro steps
+    // The tile may have left the active set before its reload was scheduled.
     if (!tile)
       return;
 

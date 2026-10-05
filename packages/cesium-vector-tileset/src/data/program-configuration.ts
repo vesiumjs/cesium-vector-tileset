@@ -395,7 +395,7 @@ export class ProgramConfiguration {
         for (const property in this.binders) {
           const binder = this.binders[property];
           if (binder.expression.isStateDependent === true) {
-            // AHM: Remove after https://github.com/mapbox/mapbox-gl-js/issues/6255
+            // Refresh the binder from the layer's current evaluated state expression.
             const value = getPaintProperty(layer, property);
             if (value instanceof PossiblyEvaluatedPropertyValue && value.value.kind !== 'constant') {
               binder.expression = value.value;

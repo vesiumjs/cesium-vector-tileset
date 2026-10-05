@@ -79,7 +79,6 @@ export class CollisionFeature {
 
       if (rotate) {
         // Account for *-rotate in point collision boxes
-        // See https://github.com/mapbox/mapbox-gl-js/issues/6075
         // Doesn't account for icon-text-fit
 
         const tl = new Point(icon.x1, icon.y1);

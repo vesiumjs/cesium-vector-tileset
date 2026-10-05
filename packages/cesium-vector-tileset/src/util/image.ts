@@ -239,7 +239,6 @@ export function arrayBufferToImage(data: ArrayBuffer): Promise<HTMLImageElement>
       URL.revokeObjectURL(img.src);
       // prevent image dataURI memory leak in Safari;
       // but don't free the image immediately because it might be uploaded in the next frame
-      // https://github.com/mapbox/mapbox-gl-js/issues/10226
       img.onload = null;
       window.requestAnimationFrame(() => img.src = transparentPngUrl);
     };

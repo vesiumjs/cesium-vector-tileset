@@ -58,9 +58,8 @@ export type LoadGeoJSONParameters = GeoJSONWorkerOptions & {
  * The {@link WorkerSource} implementation that supports {@link GeoJSONSource}.
  * This class is designed to be easily reused to support custom source types
  * for data formats that can be parsed/converted into an in-memory GeoJSON
- * representation. To do so, create it with
- * `new GeoJSONWorkerSource(channel, layerIndex, customLoadGeoJSONFunction)`.
- * For a full example, see [mapbox-gl-topojson](https://github.com/developmentseed/mapbox-gl-topojson).
+ * representation. Adapted from MapLibre GL JS's GeoJSON worker source;
+ * custom indexing is supplied through the constructor's createGeoJSONIndexFunc.
  */
 export class GeoJSONWorkerSource implements WorkerSource {
   channel: WorkerMessageSender;

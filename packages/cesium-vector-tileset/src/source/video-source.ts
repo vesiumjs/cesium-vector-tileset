@@ -23,8 +23,8 @@ import { ImageSource } from './image-source';
  * map.addSource('some id', {
  *    type: 'video',
  *    url: [
- *        'https://www.mapbox.com/blog/assets/baltimore-smoke.mp4',
- *        'https://www.mapbox.com/blog/assets/baltimore-smoke.webm'
+ *        '/videos/overlay.mp4',
+ *        '/videos/overlay.webm'
  *    ],
  *    coordinates: [
  *        [-76.54, 39.18],

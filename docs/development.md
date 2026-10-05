@@ -56,7 +56,7 @@ pnpm lint:eslint
 
 ## CI 与发布
 
-向 `main`、`dev` 推送或创建 PR 时，GitHub Actions 会执行 lint、类型检查、单元测试、库与演示构建，以及默认 Playwright 测试集。现有测试配置会排除外部服务 live 测试和需要显式启用的性能测试。浏览器测试失败时会上传报告与失败产物。
+向 `main` 推送或创建以 `main` 为目标的 PR 时，GitHub Actions 会执行 lint、类型检查、单元测试、库与演示构建，以及四分片的默认 Playwright 测试集。`dev` 推送不会触发工作流；来源为 `dev` 的 PR 和在 `dev` 上的手动运行会跳过任务。现有测试配置会排除外部服务 live 测试和需要显式启用的性能测试。浏览器测试失败时会上传报告与失败产物。
 
 推送 `v*` 标签后，工作流先执行同一套检查，再通过 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) 将 **cesium-vector-tileset** 发布到 npm。在 npm 包设置中添加 GitHub Actions trusted publisher：
 
@@ -71,7 +71,7 @@ pnpm lint:eslint
 
 发布时，将 `packages/cesium-vector-tileset/package.json` 更新为尚未发布的版本，运行 `pnpm install` 更新锁文件并提交，然后推送对应标签，例如版本 `0.0.2` 使用 `v0.0.2`。标签与包版本不一致时，工作流会失败。正式版本发布到 `latest`，`0.0.3-beta.1` 这样的预发布版本发布到 `next`。工作流使用 pnpm 打包构建产物、文档和许可证，再使用 npm CLI 通过 OIDC 发布 tarball。
 
-演示在推送到 `gh-pages` 时部署到 GitHub Pages，也可手动运行 `deploy-github-pages`。仓库 Pages 的 Source 需设置为 **GitHub Actions**。手动运行时选择要部署的演示所在分支。
+演示在推送到 `gh-pages` 时部署到 GitHub Pages，也可手动运行 `deploy-github-pages`。仓库 Pages 的 Source 需设置为 **GitHub Actions**。手动运行时选择要部署的演示所在分支；选择 `dev` 时跳过部署任务。
 
 ## 项目结构与延伸阅读
 

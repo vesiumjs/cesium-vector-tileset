@@ -23,8 +23,8 @@ const licenses = [
   ['pbf', '../node_modules/pbf/LICENSE'],
   ['potpack', '../node_modules/potpack/LICENSE'],
   ['tinyqueue', '../node_modules/tinyqueue/LICENSE'],
-  // Original text: https://github.com/mapbox/whoots-js/blob/master/LICENSE.md
-  ['@mapbox/whoots-js (inlined tile URL bounding box calculation)', './whoots-license.txt'],
+  // Preserve the upstream ISC notice inherited through MapLibre's tile URL helper.
+  ['MapLibre GL JS tile URL bounding box calculation (upstream ISC notice)', './whoots-license.txt'],
 ];
 
 const notices = licenses.map(([name, file]) => `${name}\n\n${readFileSync(new URL(file, import.meta.url), 'utf8').trim()}`);

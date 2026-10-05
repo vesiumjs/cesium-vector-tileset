@@ -146,8 +146,7 @@ function shapeText(
     }
   }
   else if (processStyledBidirectionalText) {
-    // Need version of mapbox-gl-rtl-text with style support for combining RTL text
-    // with formatting
+    // Styled RTL text requires a plugin that preserves section formatting.
     lines = [];
     // ICU operates on code units.
     lineBreaks = lineBreaks.map(index => logicalInput.toCodeUnitIndex(index));
