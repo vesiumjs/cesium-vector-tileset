@@ -45,9 +45,8 @@
 
 | 模块 | 实际调用方与状态归属 | 命名与拆分理由 |
 | --- | --- | --- |
-| `src/app.vue` | Vue 应用入口；持有预设选择、URL 参数、相机操作和错误展示 | 将只有单一使用者的旧 map viewer 模板合并，减少页面状态跨文件传递 |
-| `src/scene-view.ts` / `SceneView` | `app.vue` 创建；拥有 canvas、credits、Clock、RAF、resize、浏览器事件、Scene 与自己创建的 Moon | 原 `SceneHost` 只说明泛泛的托管关系；采用视图生命周期名称。保留模块以集中创建和释放资源 |
-| `src/tileset-layer.vue` | `app.vue` 按样式参数使用；管理候选与活动 tileset、过期请求取消、ready/tilesLoaded、错误和 credits | 这是实际的异步地图切换模块，保留独立；候选加入 Scene 后可以绘制，待其 tilesLoaded 才释放旧地图 |
-| `src/presets.ts`、`src/styles/` | app 消费城市、样式、压力场景预设；样式 JSON 是资源 | 合并旧两份预设，资源目录用 styles；不额外拆静态配置模块 |
+| `src/app.vue` | Vue 应用入口；持有配置选择与原生 CesiumWidget，展示错误 | 配置变化直接驱动 Cesium 相机和模式切换，渲染循环与尺寸由 Widget 管理 |
+| `src/tileset-layer.vue` | `app.vue` 按地图配置使用；管理当前 tileset、异步加载取消、状态、错误和静态 credits | 新样式初始化成功后替换旧实例，不再维护双地图绘制交接 |
+| `src/demo-config.ts`、`src/styles/` | app 消费 Widget、Scene、tileset 参数与城市、样式、压力场景；样式 JSON 是资源 | 集中维护演示配置与 URL 选择解析，Vue 负责切换配置 |
 
 是否保留模块，取决于移除后复杂度是否真正消失。来源同步、驻留、地图切换、Worker 通信与共享池有独立状态和生命周期，应保留；仅转调请求、单独包装一个单例 getter、单消费者消息调度以及无调用者的功能应合并或删除。

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createCanvas, loadImage } from 'canvas';
 import { expect } from 'playwright/test';
-import { scenarioPresets } from '../src/presets';
+import { scenarioPresets } from '../src/demo-config';
 import buildingsStyle from '../src/styles/buildings.json' with { type: 'json' };
 import { fromGeojsonVt, GeoJSONVT, test } from './fixtures';
 

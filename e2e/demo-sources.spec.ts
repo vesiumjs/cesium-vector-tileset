@@ -116,8 +116,8 @@ for (const id of ['liberty', 'versatiles', 'osm', 'basemap-world', 'waymorphic',
     await page.route(blank, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Source catalog</title>' }));
     await page.goto(blank);
     const stylePreset = await page.evaluate(async (styleId) => {
-      const moduleUrl = '/src/presets.ts';
-      const { stylePresets } = await import(moduleUrl) as typeof import('../src/presets');
+      const moduleUrl = '/src/demo-config.ts';
+      const { stylePresets } = await import(moduleUrl) as typeof import('../src/demo-config');
       return stylePresets.find(preset => preset.id === styleId);
     }, id);
     assert.ok(stylePreset, `missing demo preset ${id}`);

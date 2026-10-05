@@ -18,7 +18,7 @@
 | `render/pattern/`、`render/raster/` | 图案和栅格的几何、材质、绘制及退役缓存 |
 | `render/geometry/` | 各类渲染共用的坐标转换、细分及 Primitive 准备 |
 | `util/` | 按用途命名的错误、数学、对象、图片、事件与请求函数 |
-| 根目录 `src/` | Vue 演示、`SceneView`、地图层加载与统一预设；不属于发布库入口 |
+| 根目录 `src/` | Vue 演示、CesiumWidget 配置与地图层加载；不属于发布库入口 |
 
 `TilePyramid` 选择每个来源的理想瓦片，管理加载、父子替代与离屏缓存；`ActiveTiles` 保存仍参与调度的瓦片，包含加载中、替代和等待淡出的瓦片。`SourceRenderSync.updateSource()` 更新来源选择与 feature-state，按栅格、图案、驻留的顺序同步渲染输入，并缓存输入身份与修订；栅格图片尚未就绪时继续重试。`TileResidency` 负责场景资源的显示、暂留、退役、恢复与替换交接，不保存栅格或图案的输入修订。`VectorTileRenderer` 提供开始、推进、丢弃、提交构建及 paint 更新的方法；构建器和 paint 更新器是私有实现，调用方不直接操作它们。请求转换使用可选 `RequestTransformFunction` 和 `transformRequest()` 函数，默认沿用原 URL。图片请求保留并发队列、取消及解码，不维护没有调用者的额外节流控制。
 
@@ -112,7 +112,7 @@ Worker 的五类 bucket 构建器继承共用 runtime，由 `worker-tile.ts` 按
 
 共享 MVT Worker 池统一监听 error/messageerror，锁存首个失败并只终止一次。每个 WorkerDispatcher 订阅所属 Worker 的失败，WorkerChannel 用同一个普通 Error 拒绝所有待处理与后续请求，Style 通过已有 ErrorEvent 报告；后来加入的客户端收到已记录的失败。正常销毁继续使用 AbortError，健康 Worker 继续工作；失败 Worker 不重试或重选。Vite 启动前扫描 Worker 入口，避免运行中重新优化依赖使已启动的 Worker 收到旧模块 URL 的 504。
 
-演示的 `src/scene-view.ts` 管理原生 Scene、Globe、Clock、天空对象、resize 和 RAF。每个 RAF 先 resize、initializeFrame、Clock.tick，再调用 Scene.render；idle 继续推进控制器和飞行，Native requestRenderMode 决定是否实际绘制。零尺寸跳过绘制，恢复尺寸后请求新帧；渲染错误只报告一次，在退出渲染栈后销毁。`SceneView` 显式释放自己创建的 Moon 与 Material，清理迟到图片请求可能访问的已销毁纹理。FPS 始终开启；生产构建禁止保留 Widget 和 Entity visualizer 的 JS，仅允许原生 FPS 所需的 getElement helper。
+演示使用原生 CesiumWidget 管理 canvas、credits、渲染循环、resize 和浏览器事件。`src/demo-config.ts` 集中定义 Widget 与 Scene 参数、tileset 参数、地图来源、城市和压力场景，并将 URL 选择解析为地图与相机配置。`app.vue` 只保存选择、切换配置和调用 Cesium 原生方法。地图层在新样式初始化完成后替换旧实例；静态 credits 随当前地图增删。FPS 始终开启。
 
 demo 保持 `unplugin-cesium` 的原有集成，由插件管理 `CESIUM_BASE_URL` 与 Workers、ThirdParty、Assets、Widgets 静态目录。样式只引入 shared.css 和 CesiumWidget.css，保留原生 FPS、canvas/touch 与 credits 样式。必要引擎资源保持完整，包括 Globe 地形 Worker、拾取 Worker、天空与默认署名图片；生产浏览器回归检查资源响应、FPS 数字及样式和署名图片加载。
 

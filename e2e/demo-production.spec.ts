@@ -1,6 +1,7 @@
 import type { Page } from 'playwright/test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import process from 'node:process';
 import { createCanvas, loadImage } from 'canvas';
 import { expect } from 'playwright/test';
 import { preview } from 'vite';
@@ -24,6 +25,8 @@ const test = base.extend<object, { productionUrl: string }>({
     { scope: 'worker' },
   ],
 });
+
+const basePath = process.env.VITE_BASE_PATH ?? '/cesium-vector-tileset/';
 
 const tile = fromGeojsonVt({
   land: { features: [{ type: 3, geometry: [[[0, 0], [4096, 0], [4096, 4096], [0, 4096], [0, 0]]], tags: {} }] },
@@ -61,7 +64,7 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
   page.on('request', request => resources.push(request.url()));
   page.on('worker', worker => workers.push(worker.url()));
   page.on('response', (response) => {
-    if (new URL(response.url()).pathname.startsWith('/cesiumStatic/') && response.status() >= 400)
+    if (new URL(response.url()).pathname.includes('/cesiumStatic/') && response.status() >= 400)
       failedAssets.push({ url: response.url(), status: response.status() });
   });
   await page.route('**/*', async (route) => {
@@ -74,7 +77,7 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
     if (url.origin === 'https://tiles.openfreemap.org' && ['/styles/liberty', '/styles/bright'].includes(url.pathname)) {
       return route.fulfill({ json: {
         version: 8,
-        sources: { fixture: { type: 'vector', tiles: [`${productionUrl}/production-fixture/{z}/{x}/{y}.pbf`], maxzoom: 12 } },
+        sources: { fixture: { type: 'vector', tiles: [`${productionUrl}${basePath}production-fixture/{z}/{x}/{y}.pbf`], maxzoom: 12 } },
         layers: [
           { id: 'background', type: 'background', paint: { 'background-color': '#aa2222' } },
           { 'id': 'land', 'type': 'fill', 'source': 'fixture', 'source-layer': 'land', 'paint': { 'fill-color': url.pathname.endsWith('/bright') ? '#22aa55' : '#3366aa', 'fill-antialias': false } },
@@ -86,10 +89,11 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
     return route.abort();
   });
 
-  await page.goto(`${productionUrl}/?view=london`);
+  await page.goto(`${productionUrl}${basePath}?view=london`);
   await expect.poll(() => pixels(page, [51, 102, 170])).toBeGreaterThanOrEqual(0.95);
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
-  await expect(page.locator('.cesium-performanceDisplay-fps')).toHaveText(/\d+ FPS/);
+  // Cesium reports N/A when requestRenderMode has no frame to draw.
+  await expect(page.locator('.cesium-performanceDisplay-fps')).toHaveText(/(?:\d+|N\/A) FPS/);
   await expect(page.locator('.cesium-performanceDisplay')).toHaveCSS('font-size', '12px');
   await expect(page.locator('.cesium-performanceDisplay-fps')).toHaveCSS('color', 'rgb(238, 85, 34)');
   await expect.poll(() => page.locator('.cesium-credit-logoContainer img').evaluate(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0)).toBe(true);
@@ -109,9 +113,11 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
   }
   await expect(page.locator('.cesium-widget-errorPanel')).toHaveCount(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  assert.ok(resources.some(url => new URL(url).pathname.match(/^\/assets\/index-[^/]+\.js$/)), 'no production main module was loaded');
-  assert.ok(workers.some(url => url.startsWith(`${productionUrl}/assets/`) && url.endsWith('.js')), 'the built demo did not execute its bundled worker');
+  assert.ok(resources.some(url => new URL(url).pathname.startsWith(`${basePath}assets/index-`) && url.endsWith('.js')), 'no production main module was loaded');
+  assert.ok(workers.some(url => url.startsWith(`${productionUrl}${basePath}assets/`) && url.endsWith('.js')), 'the built demo did not execute its bundled worker');
   assert.ok(!resources.some(url => /\/(?:src\/|@vite\/|@id\/|@fs\/)/.test(new URL(url).pathname)), 'production requested development modules');
+  assert.ok(resources.filter(url => /\/(?:assets|cesiumStatic)\//.test(new URL(url).pathname))
+    .every(url => new URL(url).pathname.startsWith(basePath)), 'static assets escaped the deployment base path');
   assert.deepEqual(unexpected, []);
   assert.deepEqual(failedAssets, []);
   assert.deepEqual(errors, []);

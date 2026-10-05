@@ -42,7 +42,7 @@ Native Buffer renderer 以自己命令的 pass 判断混合变化。旧样式规
 
 独立描边回归首先发现：circle opacity 最终为零时，原 RGB 仍参与 Native 内缘插值，透明绿色填充与蓝色描边产生 50 个绿色主导像素。颜色提取在 opacity 乘入后将最终零 alpha 的颜色清为零 RGBA，消除了该错色。后续真实 framebuffer 回归进一步证明：Native 分别插值 RGB 与 alpha，使部分透明内缘产生交叉项；纯绿填充 alpha=64/255、纯蓝描边 alpha=192/255 的单通道误差约 33 byte，交换 alpha 后误差方向相反。不透明恢复时误差归零，不能只检查两通道总亮度。现在在原 Native fragment shader 上派生预乘贡献插值，再归一化以保留 Native straight-alpha 混合，3D/2D/CV 的同模式 opaque 参考复测单通道误差均小于 1 byte。原几何、Native coverage/discard/gamma 和拾取继续使用；没有复制一套完整点 shader。该颜色比例结论限于关闭 HDR 与后处理的 SDR 测量，HDR 继续使用 Native gamma/tonemapping。另由这个回归发现并修正标准 PointPrimitive setter 前先 mutate getter 导致 GPU 颜色不上传的问题。[Native shader](https://raw.githubusercontent.com/CesiumGS/cesium/1.146/packages/engine/Source/Shaders/BufferPointMaterialFS.glsl)、[MapLibre 6.11.2 shader](https://raw.githubusercontent.com/maplibre/maplibre-gl-js/v6.11.2/src/shaders/glsl/circle.fragment.glsl)
 
-Demo 已改为原生 Scene 宿主，真实浏览器覆盖 idle、拖拽/滚轮、飞行完成/取消、非零时长 3D/2D/CV morph、DPR2、零尺寸恢复、重复销毁与 Primitive 渲染异常。FPS 保持开启，Moon/Material 在宿主销毁时释放；生产构建守卫排除 Widget 与 Entity visualizer JS。Native Buffer 的 destroy 释放渲染上下文、VA 与拾取颜色，但其 isDestroyed 始终返回 false；GPU 回归以实际资源句柄验证释放。[Buffer lifecycle](https://github.com/CesiumGS/cesium/blob/1.146/packages/engine/Source/Scene/BufferPrimitiveCollection.js#L386)
+Demo 使用原生 CesiumWidget 管理渲染循环、resize 与浏览器输入，配置集中在 `src/demo-config.ts`。真实浏览器覆盖 idle、拖拽/滚轮、飞行完成/取消、非零时长 3D/2D/CV morph、DPR2、零尺寸恢复与 Primitive 渲染异常。FPS 保持开启。Native Buffer 的 destroy 释放渲染上下文、VA 与拾取颜色，但其 isDestroyed 始终返回 false；GPU 回归以实际资源句柄验证释放。[Buffer lifecycle](https://github.com/CesiumGS/cesium/blob/1.146/packages/engine/Source/Scene/BufferPrimitiveCollection.js#L386)
 
 开发服务器另复现了 Worker 依赖运行中重新优化，使旧 tinyqueue 模块请求 504、WorkerChannel 留下 26/33 个 pending 的问题。Vite 现在预扫描 Worker 入口；共享 MVT Worker 池也统一处理 error/messageerror，让所有客户端请求按原 Error 结算，并向 Style 报告。真实 Worker 模块 504 验证待处理请求清空、后来客户端失败回放、健康 Worker 继续响应和终止一次；没有重试或重新选 Worker。
 
@@ -172,7 +172,7 @@ Maptoolkit 是独有 schema，需单独的小样式定义。实测 TileJSON 字�
 
 ### 已落地的全球 demo 预设与建筑白模
 
-`src/presets.ts` 保留原有 source id 与 `cityPresets`，现有 **11 个预设、8 家全球运营方**。新增 `osm`、`basemap-world` 使用完整官方样式；`waymorphic`、`osm-us`、`maptoolkit` 使用 `src/styles/` 下明确维护的简洁 JSON，代码没有自动删除不支持图层的逻辑。每个来源提供 `provider`、`description`、`usage`，供界面显示覆盖与用途限制。Maptoolkit credit 含官方 logo，HTML 明确规定 24px 高度和活动版权链接；界面应始终在地图上显示该 credit。
+`src/demo-config.ts` 保留原有 source id 与 `cityPresets`，现有 **11 个预设、8 家全球运营方**。新增 `osm`、`basemap-world` 使用完整官方样式；`waymorphic`、`osm-us`、`maptoolkit` 使用 `src/styles/` 下明确维护的简洁 JSON，代码没有自动删除不支持图层的逻辑。每个来源提供 `provider`、`description`、`usage`，供界面显示覆盖与用途限制。Maptoolkit credit 含官方 logo，HTML 明确规定 24px 高度和活动版权链接；界面应始终在地图上显示该 credit。
 
 新增 `buildings` 预设仍属于 OpenFreeMap，不计作第 9 家。它只声明 OpenFreeMap vector source，无 glyph/sprite/DEM 请求；白色 `fill-extrusion` 直接读取 `building.render_height` / `building.render_min_height`，保留水面、地面和浅灰道路用于定位。2026-09-30 使用当前 `/planet` TileJSON 取得纽约曼哈顿 z14 `4824/6157` 瓦片，HTTP 200、686,362 bytes；用仓库实际安装的 `@mapbox/vector-tile` 与 `pbf` 解码得到 **1,488 个 building features**，样本真实含 `render_height` 和 `render_min_height`，没有凭建筑层名称猜测高度字段。
 

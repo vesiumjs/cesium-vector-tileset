@@ -1,5 +1,6 @@
 import type { Camera, CullingVolume, MapProjection } from 'cesium';
 import type { TileCovering } from '../../tile/tile-pyramid';
+import type { VectorDrapingProvider } from '../vector/vector-tile-renderer';
 import type { CameraBounds } from './covering';
 import type { GlobeLike } from './globe-covering';
 import { Cartesian3, Math as CesiumMath, SceneMode } from 'cesium';
@@ -16,7 +17,7 @@ export interface RenderFrameState {
   camera: Pick<Camera, 'positionCartographic' | 'positionWC' | 'directionWC' | 'rightWC' | 'upWC' | 'frustum' | 'getPickRay'> & {
     viewMatrix?: ArrayLike<number>;
     /** Camera's owning scene supplies the rendered globe and CSS canvas size. */
-    _scene?: { globe?: GlobeLike; canvas?: HTMLCanvasElement; mapProjection?: MapProjection };
+    _scene?: { globe?: GlobeLike; canvas?: HTMLCanvasElement; mapProjection?: MapProjection; vectorProvider?: VectorDrapingProvider };
   };
   canvasHeight?: number;
   drawingBufferHeight?: number;

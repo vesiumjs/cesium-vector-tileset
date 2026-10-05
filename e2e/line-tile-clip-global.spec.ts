@@ -142,7 +142,6 @@ async function installLowZoomTileset(page: Page, styleUrl: string) {
     viewer.scene.primitives.remove(validation.tileset);
     const tileset = await CesiumVectorTileset.fromUrl(styleUrl, {
       zoomLevelsToOverscale: 0,
-      requestRender: () => viewer.scene.requestRender(),
     });
     validation.tileset = tileset as unknown as typeof validation.tileset;
     viewer.scene.globe.baseColor = Color.fromCssColorString('#224455');

@@ -366,7 +366,7 @@ async function createMeasurement() {
         throw new Error('Cesium failed to project a reference landmark');
       return [point.x, point.y];
     };
-    tileset = await Tileset.fromUrl(styleUrl, { requestRender: () => viewer?.scene.requestRender() });
+    tileset = await Tileset.fromUrl(styleUrl);
     viewer.scene.primitives.add(tileset);
     const work = tileset as unknown as {
       _tilePublishQueue: object;

@@ -64,7 +64,7 @@ async function createValidation() {
   viewer.scene.renderError.addEventListener((_scene, error: Error) => renderErrors.push(error.stack ?? error.message));
 
   const styleUrl = query.get('style') ?? 'https://tiles.openfreemap.org/styles/liberty';
-  const tileset = await CesiumVectorTileset.fromUrl(styleUrl, { requestRender: () => viewer.scene.requestRender() }) as unknown as TestTileset;
+  const tileset = await CesiumVectorTileset.fromUrl(styleUrl) as unknown as TestTileset;
   viewer.scene.primitives.add(tileset);
   let reference: MapLibre | undefined;
   const referenceErrors: string[] = [];

@@ -1,22 +1,21 @@
 import type { TestScene, TestTileset } from './browser-types';
-import { Cartesian3, Primitive, Rectangle, SceneMode } from 'cesium';
+import { Cartesian3, CesiumWidget, Primitive, Rectangle, SceneMode } from 'cesium';
 import { CesiumVectorTileset } from '../../packages/cesium-vector-tileset/index';
-import { SceneView } from '../../src/scene-view';
+import { sceneOptions, widgetOptions } from '../../src/demo-config';
 import 'cesium/Build/Cesium/Widgets/shared.css';
 import 'cesium/Build/Cesium/Widgets/CesiumWidget/CesiumWidget.css';
 
 async function createSceneValidation() {
   const errors: string[] = [];
   const parameters = new URLSearchParams(location.search);
-  const sceneView = new SceneView(document.getElementById('map'), {
-    resolutionRatio: Number(parameters.get('resolutionRatio') ?? 1),
-    onError: cause => errors.push(String(cause)),
-  });
-  const scene = sceneView.scene as unknown as TestScene;
+  const widget = new CesiumWidget(document.getElementById('map'), { ...widgetOptions, showRenderLoopErrors: false });
+  widget.resolutionScale = Number(parameters.get('resolutionRatio') ?? 1);
+  widget.resize();
+  const scene = widget.scene as unknown as TestScene;
+  Object.assign(scene, sceneOptions);
+  scene.renderError.addEventListener((_scene, cause) => errors.push(String(cause)));
   scene.camera.setView({ destination: Rectangle.fromDegrees(-0.16, 51.49, -0.1, 51.52) });
-  const tileset = await CesiumVectorTileset.fromUrl('/scene-view-fixture/style.json', {
-    requestRender: () => scene.requestRender(),
-  }) as unknown as TestTileset;
+  const tileset = await CesiumVectorTileset.fromUrl('/widget-fixture/style.json') as unknown as TestTileset;
   scene.primitives.add(tileset);
   let renderCalls = 0;
   let renderedFrames = 0;
@@ -31,7 +30,7 @@ async function createSceneValidation() {
     pixels = scene.context.readPixels({ width: scene.canvas.width, height: scene.canvas.height });
   });
   const validation = {
-    sceneView: sceneView as unknown as Omit<SceneView, 'scene'> & { scene: TestScene },
+    widget,
     scene,
     tileset,
     errors,
@@ -54,7 +53,7 @@ async function createSceneValidation() {
   return validation;
 }
 
-createSceneValidation().then(validation => window.sceneViewValidation = validation);
+createSceneValidation().then(validation => window.widgetValidation = validation);
 declare global {
-  interface Window { sceneViewValidation: Awaited<ReturnType<typeof createSceneValidation>> }
+  interface Window { widgetValidation: Awaited<ReturnType<typeof createSceneValidation>> }
 }

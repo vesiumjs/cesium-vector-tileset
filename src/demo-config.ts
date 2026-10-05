@@ -1,3 +1,46 @@
+import type { CesiumWidget } from 'cesium';
+import type { CesiumVectorTilesetFromUrlOptions } from 'cesium-vector-tileset';
+import { BoundingSphere, Cartesian3, Math as CesiumMath, HeadingPitchRange, Rectangle, SceneMode, WebMercatorProjection } from 'cesium';
+
+export const widgetOptions = {
+  baseLayer: false,
+  mapProjection: new WebMercatorProjection(),
+  requestRenderMode: true,
+  maximumRenderTimeChange: Infinity,
+} satisfies NonNullable<ConstructorParameters<typeof CesiumWidget>[1]>;
+
+export const sceneOptions = { debugShowFramesPerSecond: true };
+export const tilesetOptions = {} satisfies CesiumVectorTilesetFromUrlOptions;
+export const heightPresets = [15, 60, 120, 250, 350, 700, 900, 1500, 45000];
+export const modePresets = [
+  { id: '3d', name: '3D', value: SceneMode.SCENE3D, morph: 'morphTo3D' },
+  { id: '2d', name: '2D', value: SceneMode.SCENE2D, morph: 'morphTo2D' },
+  { id: 'cv', name: 'Columbus', value: SceneMode.COLUMBUS_VIEW, morph: 'morphToColumbusView' },
+] as const;
+export const anglePresets = [
+  { id: 'top', name: '俯视', pitch: -90 },
+  { id: 'oblique', name: '斜视 45°', pitch: -45 },
+  { id: 'horizon', name: '低角度 20°', pitch: -20 },
+] as const;
+
+export interface DemoSelection {
+  source: string;
+  style: string;
+  view: string;
+  mode: string;
+  angle: string;
+  scenario: string;
+  height: number;
+  scale?: number;
+  resolutionRatio: number;
+}
+
+export interface DemoMapConfig {
+  url: string;
+  credit: string;
+  options: CesiumVectorTilesetFromUrlOptions;
+}
+
 const openFreeMapCredit = '<a href="https://openfreemap.org/">OpenFreeMap</a> · <a href="https://www.openmaptiles.org/">OpenMapTiles</a> · © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 const openFreeMapUsage = '全球 z0–14；免密钥，可商用，保留地图署名；无 SLA。';
 
@@ -43,3 +86,77 @@ export const scenarioPresets = [
   { id: 'cape-town', name: '开普敦 · 城区与海岸交界', longitude: 18.4241, latitude: -33.9249, height: 1500, heading: 300, pitch: -30, styleId: 'versatiles', description: '非洲城区、港口与海岸，检查全球数据 schema、标签和斜视覆盖。' },
   { id: 'dateline', name: '斐济 · 日期变更线', longitude: 179.99, latitude: -16.8, height: 45000, heading: 90, pitch: -70, styleId: 'bright', description: '跨 ±180° 平移和缩放，检查瓦片 wrap、线条和相机边界。' },
 ] as const;
+
+export function readDemoSelection(parameters: URLSearchParams): DemoSelection {
+  const scenario = scenarioPresets.find(preset => preset.id === parameters.get('scenario'));
+  const positiveNumber = (key: string, fallback: number) => {
+    const value = Number(parameters.get(key));
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  };
+  return {
+    source: parameters.get('source') ?? scenario?.styleId ?? 'liberty',
+    style: parameters.get('style') ?? '',
+    view: parameters.get('view') ?? 'shanghai',
+    mode: parameters.get('mode') ?? '3d',
+    angle: parameters.get('angle') ?? 'top',
+    scenario: scenario?.id ?? '',
+    height: positiveNumber('height', scenario?.height ?? 60),
+    scale: parameters.has('scale') ? positiveNumber('scale', 1) : undefined,
+    resolutionRatio: positiveNumber('resolutionRatio', 1),
+  };
+}
+
+export function demoMapConfig(selection: Pick<DemoSelection, 'source' | 'style'>): DemoMapConfig {
+  const preset = stylePresets.find(preset => preset.id === selection.source) ?? stylePresets[0];
+  return { url: selection.style || preset.url, credit: selection.style ? '' : preset.credit, options: tilesetOptions };
+}
+
+export function demoCameraConfig(selection: DemoSelection) {
+  const mode = modePresets.find(preset => preset.id === selection.mode) ?? modePresets[0];
+  const scenario = scenarioPresets.find(preset => preset.id === selection.scenario);
+  if (scenario) {
+    return {
+      mode,
+      view: {
+        destination: Cartesian3.fromDegrees(scenario.longitude, scenario.latitude, selection.height),
+        orientation: { heading: CesiumMath.toRadians(scenario.heading), pitch: CesiumMath.toRadians(scenario.pitch), roll: 0 },
+      },
+    };
+  }
+  const city = cityPresets.find(preset => preset.id === selection.view) ?? cityPresets[0];
+  const size = selection.scale ?? city.scale;
+  const angle = anglePresets.find(preset => preset.id === selection.angle) ?? anglePresets[0];
+  if (mode.value !== SceneMode.SCENE2D && angle.id !== 'top') {
+    return {
+      mode,
+      sphere: new BoundingSphere(Cartesian3.fromDegrees(city.longitude, city.latitude), size * 2500),
+      offset: new HeadingPitchRange(CesiumMath.toRadians(35), CesiumMath.toRadians(angle.pitch), size * 8000),
+    };
+  }
+  return {
+    mode,
+    view: {
+      destination: Rectangle.fromDegrees(
+        city.longitude - 0.0375 * size,
+        Math.max(-85, city.latitude - 0.01575 * size),
+        city.longitude + 0.0375 * size,
+        Math.min(85, city.latitude + 0.01575 * size),
+      ),
+    },
+  };
+}
+
+export function demoSearchParameters(selection: DemoSelection): URLSearchParams {
+  const parameters = new URLSearchParams({ source: selection.source, view: selection.view, mode: selection.mode, angle: selection.angle });
+  if (selection.style)
+    parameters.set('style', selection.style);
+  if (selection.scenario) {
+    parameters.set('scenario', selection.scenario);
+    parameters.set('height', String(selection.height));
+  }
+  if (selection.scale !== undefined)
+    parameters.set('scale', String(selection.scale));
+  if (selection.resolutionRatio !== 1)
+    parameters.set('resolutionRatio', String(selection.resolutionRatio));
+  return parameters;
+}

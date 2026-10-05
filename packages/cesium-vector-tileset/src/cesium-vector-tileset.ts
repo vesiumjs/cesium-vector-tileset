@@ -1,12 +1,11 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import type { Scene } from 'cesium';
 import type { PatternPrimitiveID } from './render/pattern/pattern-renderer';
 import type { RasterPrimitivePickObject } from './render/raster/raster-renderer';
 import type { Budget } from './render/scene/frame-budget';
 import type { RenderFrameState } from './render/scene/render-frame';
 import type { TilePickObject } from './render/vector/tile-conversion';
 import type { VectorPaintFrame } from './render/vector/vector-paint-updater';
-import type { VectorCollection, VectorDrapingProvider } from './render/vector/vector-tile-renderer';
+import type { VectorCollection } from './render/vector/vector-tile-renderer';
 import type { Style } from './style/style';
 import type { Tile } from './tile/tile';
 import type { SourceDataEvent, StyleDataEvent } from './util/events';
@@ -41,7 +40,6 @@ import { VectorTileRenderer } from './render/vector/vector-tile-renderer';
 import { resolveStyleUrls } from './style/resolve-style-urls';
 import { Style as StyleClass } from './style/style';
 import { isRasterStyleLayer } from './style/style-layer/raster-style-layer';
-import { warnOnce } from './util/errors';
 import { RGBAImage } from './util/image';
 import { ResourceType, transformRequest } from './util/request';
 
@@ -49,11 +47,6 @@ export interface CesiumVectorTilesetOptions {
   style: StyleSpecification;
   /** Transforms style, tile, sprite, glyph and source requests before loading. */
   transformRequest?: RequestTransformFunction;
-  /**
-   * Requests a new Cesium scene frame. Pass `() => scene.requestRender()` when
-   * the scene uses `requestRenderMode`; continuous rendering does not need it.
-   */
-  requestRender?: () => void;
   /**
    * Number of zoom levels above a vector source's max zoom for which tiles
    * are re-parsed from the deepest available tile, keeping deep zoom crisp
@@ -73,16 +66,9 @@ export interface CesiumVectorTilesetOptions {
    *
    * Only fill polygons drape: circle points, lines, symbols, extrusions and
    * patterns keep their ellipsoid heights, because Cesium's vector pipeline
-   * only packs polygons and polylines. Requires `scene`.
+   * only packs polygons and polylines.
    */
   heightReference?: HeightReference;
-  /**
-   * The scene hosting this tileset. Required when `heightReference` is a
-   * clamp value; the scene's vector provider drapes the fill collections.
-   * (`Scene.vectorProvider` has no Cesium.d.ts declarations, hence the
-   * structural member.)
-   */
-  scene?: Scene & { vectorProvider?: VectorDrapingProvider };
 }
 
 export type CesiumVectorTilesetFromUrlOptions = Omit<CesiumVectorTilesetOptions, 'style'> & {
@@ -166,7 +152,15 @@ export class CesiumVectorTileset extends PrimitiveCollection {
   private readonly _localIdeographFontFamily: string | false;
   private _sceneCovering: SceneTileCovering;
   private _readyPromise!: Promise<void>;
-  private _requestRender: () => void = () => {};
+  private _afterRender?: RenderFrameState['afterRender'];
+  private readonly _requestNextFrame = () => !this._destroyed;
+  private readonly _requestRender = () => {
+    if (this._afterRender && !this._afterRender.includes(this._requestNextFrame)) {
+      this._afterRender.push(this._requestNextFrame);
+    }
+  };
+
+  private readonly _heightReference: HeightReference;
   private readonly _transformRequest?: RequestTransformFunction;
   private _backgroundRenderer = new BackgroundRenderer();
   private _sceneCollections: SceneCollections;
@@ -232,7 +226,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       }
     });
     this._styleSpec = options.style;
-    this._requestRender = options.requestRender ?? (options.scene ? () => options.scene!.requestRender() : () => {});
+    this._heightReference = options.heightReference ?? HeightReference.NONE;
     this._transformRequest = options.transformRequest;
     this._zoomLevelsToOverscale = Math.max(0, options.zoomLevelsToOverscale ?? 4);
     // MapLibre renders CJK ideographs locally by default; a tileset created
@@ -291,7 +285,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       residency: this._tileResidency,
       scene: this._sceneCollections,
     });
-    this._initDraping(options);
+    this._vectorRenderer.setDraping(undefined, this._heightReference);
 
     this._initStyle(options.style);
   }
@@ -308,28 +302,6 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       lightRevision: this._currentLightRevision,
       budget,
     };
-  }
-
-  /**
-   * Wire fill-polygon draping when the tileset requests a clamp height
-   * reference. The scene's vector provider is the only draping path Cesium
-   * offers; without a scene the option cannot take effect, so warn once and
-   * keep the previous unclamped rendering instead of failing silently.
-   */
-  private _initDraping(options: CesiumVectorTilesetOptions): void {
-    const heightReference = options.heightReference ?? HeightReference.NONE;
-    if (heightReference === HeightReference.NONE) {
-      return;
-    }
-    const vectorProvider = options.scene?.vectorProvider;
-    if (!vectorProvider) {
-      warnOnce(
-        '[cesium-vector-tileset] heightReference requires the hosting scene '
-        + '(pass `scene`); rendering unclamped.',
-      );
-      return;
-    }
-    this._vectorRenderer.setDraping(vectorProvider, heightReference);
   }
 
   private _initStyle(styleSpec: StyleSpecification): void {
@@ -727,6 +699,12 @@ export class CesiumVectorTileset extends PrimitiveCollection {
    * the camera and refreshes the Buffer*Collections for loaded tiles.
    */
   update(frameState: RenderFrameState): void {
+    if (!this._destroyed) {
+      // Cesium consumes this queue even when requestRenderMode skips drawing.
+      // Bind before readiness so asynchronous style loading can wake rendering.
+      this._afterRender = frameState.afterRender;
+      this._vectorRenderer.setDraping(frameState.camera._scene?.vectorProvider, this._heightReference);
+    }
     this._sceneCollections.flushRemovals();
     if (this._destroyed || !this.show || !this._ready) {
       this._lastSubmittedCommands = 0;
@@ -1094,7 +1072,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._readyReject?.(new Error('CesiumVectorTileset was destroyed before it became ready'));
       this._readyReject = undefined;
     }
-    this._requestRender = () => {};
+    this._afterRender = undefined;
     this._tilePublishQueue.clear();
     this._sourceRenderSync.reset();
     this._tileResidency.clear();
