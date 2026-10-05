@@ -1,0 +1,117 @@
+{
+  "version": 8,
+  "name": "OpenFreeMap · 建筑白模",
+  "metadata": {
+    "description": "White building geometry for street-height, tile-boundary and depth-precision inspection. Heights come directly from the OpenMapTiles building attributes."
+  },
+  "sources": {
+    "basemap": {
+      "type": "vector",
+      "url": "https://tiles.openfreemap.org/planet",
+      "attribution": "© OpenMapTiles · © OpenStreetMap contributors"
+    }
+  },
+  "layers": [
+    {
+      "id": "ground",
+      "type": "background",
+      "paint": {
+        "background-color": "#e8ebef"
+      }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "basemap",
+      "source-layer": "water",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "Polygon"
+      ],
+      "paint": {
+        "fill-color": "#cad6e0"
+      }
+    },
+    {
+      "id": "roads",
+      "type": "line",
+      "source": "basemap",
+      "source-layer": "transportation",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "LineString"
+      ],
+      "paint": {
+        "line-color": "#c3c8ce",
+        "line-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          12,
+          1,
+          17,
+          5
+        ]
+      }
+    },
+    {
+      "id": "white-buildings",
+      "type": "fill-extrusion",
+      "source": "basemap",
+      "source-layer": "building",
+      "filter": [
+        "all",
+        [
+          "==",
+          [
+            "geometry-type"
+          ],
+          "Polygon"
+        ],
+        [
+          "!=",
+          [
+            "get",
+            "hide_3d"
+          ],
+          true
+        ],
+        [
+          "has",
+          "render_height"
+        ],
+        [
+          ">",
+          [
+            "get",
+            "render_height"
+          ],
+          0
+        ]
+      ],
+      "minzoom": 13,
+      "paint": {
+        "fill-extrusion-color": "#ffffff",
+        "fill-extrusion-height": [
+          "get",
+          "render_height"
+        ],
+        "fill-extrusion-base": [
+          "get",
+          "render_min_height"
+        ],
+        "fill-extrusion-opacity": 1
+      }
+    }
+  ]
+}

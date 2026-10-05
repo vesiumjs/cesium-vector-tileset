@@ -1,0 +1,17 @@
+minimumReleaseAgeExcludePrune: true
+minimumReleaseAgeExclude:
+  - '@vitejs/plugin-vue@6.0.9'
+  - '@cesium/core@0.1.0'
+  - '@cesium/engine@26.4.0'
+  - '@cesium/widgets@16.3.0'
+  - cesium@1.146.0
+
+trustPolicy: no-downgrade
+shellEmulator: true
+
+packages:
+  - packages/*
+
+allowBuilds:
+  canvas: true
+  esbuild: true

@@ -1,0 +1,127 @@
+{
+  "description": "Two original building polygons from the captured OpenFreeMap Manhattan tile. The 81 metre wall alone has no bright interior pixels; these two polygons reproduce 36 bright pixels in the shaded wall ROI before the demo style fix. Integer coordinates, ring order, feature order, IDs and properties are unchanged.",
+  "provenance": {
+    "tile": "https://tiles.openfreemap.org/planet/20260927_080001_pt/14/4823/6160.pbf",
+    "schema": "https://openmaptiles.org/schema/",
+    "attribution": "OpenFreeMap · © OpenMapTiles · © OpenStreetMap contributors",
+    "dataLicense": "https://www.openstreetmap.org/copyright",
+    "dataLicenseName": "Open Database License (ODbL) 1.0",
+    "schemaLicense": "https://github.com/openmaptiles/openmaptiles/blob/master/LICENSE.md"
+  },
+  "tile": {
+    "z": 14,
+    "x": 4823,
+    "y": 6160,
+    "extent": 4096,
+    "version": 2
+  },
+  "source": {
+    "minzoom": 0,
+    "maxzoom": 14
+  },
+  "camera": {
+    "longitude": -74.01192337274551,
+    "latitude": 40.70752701473173,
+    "height": 15,
+    "heading": 32,
+    "pitch": -12
+  },
+  "roi": {
+    "x": 925,
+    "y": 330,
+    "width": 60,
+    "height": 65
+  },
+  "features": [
+    {
+      "id": 424557760,
+      "type": 3,
+      "tags": {
+        "render_height": 5,
+        "render_min_height": 0,
+        "hide_3d": true
+      },
+      "geometry": [
+        [
+          [
+            2732,
+            1574
+          ],
+          [
+            2671,
+            1525
+          ],
+          [
+            2696,
+            1486
+          ],
+          [
+            2763,
+            1531
+          ],
+          [
+            2732,
+            1574
+          ]
+        ]
+      ]
+    },
+    {
+      "id": 3782634792,
+      "type": 3,
+      "tags": {
+        "colour": "#cac6ba",
+        "render_height": 81,
+        "render_min_height": 0
+      },
+      "geometry": [
+        [
+          [
+            2705,
+            1495
+          ],
+          [
+            2698,
+            1490
+          ],
+          [
+            2675,
+            1525
+          ],
+          [
+            2730,
+            1568
+          ],
+          [
+            2736,
+            1562
+          ],
+          [
+            2739,
+            1564
+          ],
+          [
+            2732,
+            1574
+          ],
+          [
+            2671,
+            1525
+          ],
+          [
+            2696,
+            1486
+          ],
+          [
+            2707,
+            1493
+          ],
+          [
+            2705,
+            1495
+          ]
+        ]
+      ]
+    }
+  ]
+}

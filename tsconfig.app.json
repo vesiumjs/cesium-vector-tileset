@@ -10,7 +10,16 @@
 
     /* Linting */
     "strict": true,
+    /*
+     * The workspace package resolves `cesium-vector-tileset` to its sources, so
+     * the app program type-checks the library too. The library sets its own
+     * strictness in tsconfig.build.json: the MapLibre code it forks compiles
+     * upstream with strict:false, so strictNullChecks and noImplicitAny are off
+     * for those files. The app must not re-apply them to the same sources.
+     */
+    "strictNullChecks": false,
     "noFallthroughCasesInSwitch": true,
+    "noImplicitAny": false,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,

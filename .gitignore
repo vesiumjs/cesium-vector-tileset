@@ -12,14 +12,20 @@ dist
 dist-ssr
 *.local
 
+dist.zip
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
 .idea
+.worktrees/
 .DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+.agents/skills
+skills-lock.json
+docs/agents

@@ -1,25 +1,28 @@
-import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import vue from '@vitejs/plugin-vue';
 import UnpluginCesium from 'unplugin-cesium/vite';
-import { defineConfig } from 'vitest/config';
-import { resolvePublicBase } from './src/build/public-path';
-
-// https://vite.dev/config/
-const base = resolvePublicBase({
-  base: process.env.VITE_BASE,
-  githubPages: process.env.GITHUB_PAGES === 'true',
-});
+import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base,
-  plugins: [vue(), UnpluginCesium({ base })],
+  plugins: [
+    vue(),
+    UnpluginCesium(),
+  ],
   define: {
     global: 'globalThis',
+    globalThis: 'globalThis',
   },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('src', import.meta.url)),
     },
   },
+  optimizeDeps: {
+    // Discover decoder dependencies before live module Workers request them.
+    entries: ['index.html', 'packages/cesium-vector-tileset/src/worker/worker-entry.ts'],
+  },
+  worker: {
+    format: 'es',
+  },
+
 });

@@ -1,48 +1,51 @@
-# 协作约定
+# 项目定位与实现策略
 
-## 1. 基本要求
+本项目大量使用 MapLibre GL JS 相关代码和设计，结合 Cesium 提供的 Buffer\*Collection、各类 Primitive 等能力混合实现。
 
-- 始终使用中文交流。
-- 任何实现都必须走 TDD 流程：先补会失败的测试，再改实现，最后补齐回归验证。
-- 文件、目录命名统一使用小写烤串式。
-- 优先使用仓库现有的技能、脚本和工具链，不重复造轮子。
+## 关键命令
 
-## 2. 设计原则
+```bash
+pnpm dev            # Vite 开发服务器
+pnpm test           # vitest run
+pnpm lint:eslint    # eslint --fix
+pnpm lint:tsc       # vue-tsc --build --force
+pnpm build          # vue-tsc -b && vite build
+```
 
-- 以生产标准为目标，不要为了迁就旧实现而新增兼容层。
-- 先确认根因，再做结构性修复，不要靠不断叠加判断兜底。
-- 不要把逻辑持续堆进单个大文件，优先拆成职责清晰的小模块。
-- 命名要语义清晰，避免过多定语修饰。
-- 对复杂代码补中文注释，说明原因、约束或关键思路，不解释显而易见的动作。
-- 不编写无意义的桥接函数、桥接类、桥接文件。
-- 一旦确认正确模型，就收敛到单一实现，不保留新旧双轨逻辑。
-- 优先复用 Cesium、MapLibre 及其子模块已经提供的能力、状态和语义，不重复实现已有机制。
-- `CesiumVectorTile` 的整体设计应尽量贴近 `Cesium3DTileset` 的 API 形态，同时参考 MapLibre 的 MVT 渲染流程。
-- 例如：
-  - `fromUrl` 优先接收 `Resource | string`。
-  - 缓存策略既要参考 `Cesium3DTileset`，也要参考 MapLibre 的瓦片缓存与替换思路。
-  - 分层渲染可以参考 MapLibre，但实现方式优先采用 Cesium 的语义和生命周期。
-  - 具体行为上，先判断哪一边的语义更贴近当前目标，再决定，不要机械照搬其中任何一方。
+命令链顺序（修改后）：`lint:eslint` → `lint:tsc` → `test`（若有新增测试）。
 
-## 3. 修改策略
+TypeScript 固定在 `6.0.x`：`vue-tsc` 需要 `typescript/lib/tsc`（TS 7 已移除该子路径），
+`typescript-eslint` 的 peer 上限也是 `<6.1.0`。升级 TS 前先确认两者都已支持。
 
-- 修复问题时优先解决根因，不要只修现场症状。
-- 不要盲改；如果无法稳定复现，先补测试或日志定位，再改实现。
-- 涉及缓存、生命周期、GPU 资源时，必须同时检查性能影响和内存泄漏风险。
-- 对外 API、数据模型和缓存语义的变更，必须同步更新测试和文档。
+样式代码生成（`src/**/*.g.ts`，勿手改）：
 
-## 4. 测试与校验
+```bash
+pnpm --filter cesium-vector-tileset codegen                # 样式属性 + struct array
+pnpm --filter cesium-vector-tileset generate-unicode-data  # Unicode 属性表
+```
 
-- 编写测试时，引用 `src` 目录必须使用 `@/` 别名。
-- 新功能必须补测试。
-- 修复 bug 必须补对应回归测试，确保问题不会再次出现。
-- 修改代码后必须运行：
-  - `pnpm lint:eslint --fix`
-  - `pnpm lint:tsc`
+生成物需跑一次 `pnpm lint:eslint` 才会与提交态一致。
 
-## 5. 禁止事项
+## 设计与编码约定
 
-- 不要为了“先跑起来”引入临时兼容代码。
-- 不要保留已经确认错误的数据模型。
-- 不要在没有验证的前提下持续叠加补丁。
-- 不要为了局部方便牺牲整体设计一致性。
+- 禁止临时兼容层、猜测式编码、新旧双轨逻辑
+- 文件名使用 `kebab-case`
+- 命名简洁但勿滥简写（`value` 勿 `val`）
+
+## 测试
+
+- 测试文件放在被测试文件同级的 `__test__/` 目录下
+- Vitest，jsdom 环境，配置文件 `vitest.config.ts`
+- 运行：`pnpm test`
+
+## Agent skills
+
+临时脚本、实验文件放在 `node_modules/.cache/temp/`；测试产物放在 `node_modules/.cache/playwright/`。
+
+### Triage labels
+
+The five canonical triage roles use English labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` at the repo root + `docs/adr/`. See `docs/agents/domain.md`.

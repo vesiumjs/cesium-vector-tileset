@@ -1,0 +1,216 @@
+{
+  "version": 8,
+  "name": "Maptoolkit · 简洁矢量地图",
+  "metadata": {
+    "description": "Project-maintained vector-only cartography using the documented Maptoolkit schema.",
+    "copyright": "Maptoolkit service and schema © Toursprung GmbH. Maptoolkit Community License applies.",
+    "license_url": "https://www.maptoolkit.org/tos/"
+  },
+  "glyphs": "https://fonts.maptoolkit.org/{fontstack}/{range}.pbf",
+  "sources": {
+    "basemap": {
+      "type": "vector",
+      "url": "https://tiles.maptoolkit.org/mtk.json",
+      "attribution": "© Maptoolkit · © OpenStreetMap contributors"
+    }
+  },
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": {
+        "background-color": "#f2f1ed"
+      }
+    },
+    {
+      "id": "natural",
+      "type": "fill",
+      "source": "basemap",
+      "source-layer": "natural",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "Polygon"
+      ],
+      "paint": {
+        "fill-color": "#dce8d4"
+      }
+    },
+    {
+      "id": "landuse",
+      "type": "fill",
+      "source": "basemap",
+      "source-layer": "landuse",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "Polygon"
+      ],
+      "paint": {
+        "fill-color": "#e5e1d7"
+      }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "basemap",
+      "source-layer": "water",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "Polygon"
+      ],
+      "paint": {
+        "fill-color": "#add3df"
+      }
+    },
+    {
+      "id": "waterways",
+      "type": "line",
+      "source": "basemap",
+      "source-layer": "water",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "LineString"
+      ],
+      "paint": {
+        "line-color": "#9cc7d6",
+        "line-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          8,
+          0.6,
+          16,
+          3
+        ]
+      }
+    },
+    {
+      "id": "road-areas",
+      "type": "fill",
+      "source": "basemap",
+      "source-layer": "road",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "Polygon"
+      ],
+      "minzoom": 11,
+      "paint": {
+        "fill-color": "#ffffff"
+      }
+    },
+    {
+      "id": "roads",
+      "type": "line",
+      "source": "basemap",
+      "source-layer": "road",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "LineString"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#ffffff",
+        "line-width": [
+          "interpolate",
+          [
+            "exponential",
+            1.4
+          ],
+          [
+            "zoom"
+          ],
+          5,
+          0.5,
+          12,
+          1.5,
+          17,
+          7
+        ]
+      }
+    },
+    {
+      "id": "buildings",
+      "type": "fill",
+      "source": "basemap",
+      "source-layer": "building",
+      "filter": [
+        "==",
+        [
+          "geometry-type"
+        ],
+        "Polygon"
+      ],
+      "minzoom": 13,
+      "paint": {
+        "fill-color": "#d5cec4",
+        "fill-outline-color": "#b7aea2"
+      }
+    },
+    {
+      "id": "places",
+      "type": "symbol",
+      "source": "basemap",
+      "source-layer": "place_label",
+      "filter": [
+        "<",
+        [
+          "get",
+          "rank"
+        ],
+        8
+      ],
+      "layout": {
+        "text-field": [
+          "get",
+          "name"
+        ],
+        "text-font": [
+          "Noto Sans Regular"
+        ],
+        "text-size": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          3,
+          10,
+          12,
+          14
+        ],
+        "text-max-width": 8
+      },
+      "paint": {
+        "text-color": "#34424e",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1
+      }
+    }
+  ]
+}
