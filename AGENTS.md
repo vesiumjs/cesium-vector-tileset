@@ -9,7 +9,7 @@ pnpm dev            # Vite 开发服务器
 pnpm test           # vitest run
 pnpm lint:eslint    # eslint --fix
 pnpm lint:tsc       # vue-tsc --build --force
-pnpm build          # vue-tsc -b && vite build
+pnpm build          # 构建库与 Vite 演示；类型检查使用 lint:tsc
 ```
 
 命令链顺序（修改后）：`lint:eslint` → `lint:tsc` → `test`（若有新增测试）。

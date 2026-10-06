@@ -30,17 +30,24 @@ pnpm dev
 | 命令                     | 用途                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------ |
 | `pnpm dev`               | 启动 Vite 演示服务器                                                                       |
-| `pnpm build`             | 类型检查并构建演示，产物位于根目录 `dist/`                                                 |
+| `pnpm build`             | 依次构建库和演示                                                                           |
+| `pnpm build:lib`         | 委托库包构建模块、worker、source map 和类型声明，产物位于 `packages/cesium-vector-tileset/dist/` |
+| `pnpm build:demo`        | 构建 Vite 演示，产物位于根目录 `dist/`                                                     |
 | `pnpm preview`           | 预览构建后的演示                                                                           |
-| `pnpm build:mvt`         | 构建库模块、worker、source map 和类型声明，产物位于 `packages/cesium-vector-tileset/dist/` |
+| `pnpm lint`              | 依次检查 ESLint 和 TypeScript，不修改文件                                                   |
 | `pnpm lint:eslint`       | 运行 ESLint 并自动修复                                                                     |
 | `pnpm lint:eslint:check` | 检查 ESLint，不修改文件                                                                    |
 | `pnpm lint:tsc`          | 运行 workspace TypeScript 检查                                                             |
 | `pnpm test`              | 运行 Vitest 单元测试                                                                       |
+| `pnpm test:watch`        | 以 watch 模式运行单元测试                                                                  |
 | `pnpm test:e2e`          | 构建库和演示，再运行默认 Playwright 测试集                                                 |
-| `pnpm test:e2e:live`     | 构建库并运行标有 `@live` 的 Playwright 外部服务测试                                        |
+| `pnpm test:e2e:live`     | 运行标有 `@live` 的外部服务测试，使用 Vite 源码服务器                                      |
+| `pnpm test:e2e:install`  | 安装 Chromium；CI 追加 `--with-deps` 安装系统依赖                                           |
+| `pnpm taze`              | 更新依赖，保留 TypeScript `6.0.x`                                                          |
+| `pnpm release`           | 委托库包选择新版本、提交、创建 `v*` 标签并推送                                              |
+| `pnpm publish:ci`        | 委托库包校验标签、构建、打包并发布，供 npm 发布工作流调用                                   |
 
-运行浏览器测试前，通过 `pnpm exec playwright install chromium` 安装 Chromium。Playwright 报告与失败产物位于 `node_modules/.cache/playwright/`。
+运行浏览器测试前，通过 `pnpm test:e2e:install` 安装 Chromium。Playwright 报告与失败产物位于 `node_modules/.cache/playwright/`。构建命令只负责生成产物，类型检查由 `pnpm lint` 或 `pnpm lint:tsc` 执行。
 
 修改代码后，依次运行 `pnpm lint:eslint`、`pnpm lint:tsc` 和相关测试。单元测试放在被测试代码同级的 `__test__/` 目录，浏览器测试位于 `e2e/`。
 
@@ -69,7 +76,15 @@ pnpm lint:eslint
 
 允许该 publisher 直接发布，无需配置 `NPM_TOKEN` secret。配置所用 npm 账号必须具有该包的权限。如果包尚不存在，先手动发布首个版本，再配置 publisher。
 
-发布时，将 `packages/cesium-vector-tileset/package.json` 更新为尚未发布的版本，运行 `pnpm install` 更新锁文件并提交，然后推送对应标签，例如版本 `0.0.2` 使用 `v0.0.2`。标签与包版本不一致时，工作流会失败。正式版本发布到 `latest`，`0.0.3-beta.1` 这样的预发布版本发布到 `next`。工作流使用 pnpm 打包构建产物、文档和许可证，再使用 npm CLI 通过 OIDC 发布 tarball。
+在已同步的 `main` 分支完成检查后，运行：
+
+```bash
+pnpm release
+```
+
+库包使用 [bumpp](https://github.com/antfu-collective/bumpp) 交互选择尚未发布的新版本。也可以直接指定版本，例如 `pnpm release 0.0.2`。命令要求工作区干净，更新 `packages/cesium-vector-tileset/package.json`，创建版本提交和对应的 `v0.0.2` 标签，然后推送当前分支及标签。根目录是私有演示 workspace，其版本号不参与发布。
+
+标签推送后，CI 调用 `pnpm publish:ci`。库包校验标签与版本是否一致，通过 `pnpm pack` 触发 `prepack`，先构建最新代码，再准备双语 README 和许可证，最后使用 npm CLI 通过 OIDC 发布 tarball。正式版本发布到 `latest`，`0.0.3-beta.1` 这样的预发布版本发布到 `next`。本地核对发布产物时，可以运行 `pnpm --filter cesium-vector-tileset pack`；它同样会自动构建。
 
 演示在推送到 `gh-pages` 时部署到 GitHub Pages，也可手动运行 `deploy-github-pages`。仓库 Pages 的 Source 需设置为 **GitHub Actions**。手动运行时选择要部署的演示所在分支；选择 `dev` 时跳过部署任务。
 

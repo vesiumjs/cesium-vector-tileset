@@ -10,16 +10,22 @@
   },
   "scripts": {
     "dev": "vite --host",
-    "build": "vue-tsc -b && vite build",
-    "build:mvt": "tsdown",
+    "build": "pnpm build:lib && pnpm build:demo",
+    "build:lib": "pnpm --filter cesium-vector-tileset build",
+    "build:demo": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:e2e": "pnpm build:mvt && pnpm build && playwright test",
-    "test:e2e:live": "pnpm build:mvt && E2E_LIVE=1 playwright test",
-    "lint:eslint": "eslint --fix",
+    "test:watch": "vitest",
+    "test:e2e": "pnpm build && playwright test",
+    "test:e2e:live": "E2E_LIVE=1 playwright test",
+    "test:e2e:install": "playwright install chromium",
+    "lint": "pnpm lint:eslint:check && pnpm lint:tsc",
+    "lint:eslint": "eslint . --fix",
     "lint:eslint:check": "eslint .",
     "lint:tsc": "vue-tsc --build --force",
-    "taze": "taze -w -r latest --include-locked --peer --exclude typescript"
+    "taze": "taze -w -r latest --include-locked --peer --exclude typescript",
+    "release": "pnpm --filter cesium-vector-tileset release",
+    "publish:ci": "pnpm --filter cesium-vector-tileset publish:ci"
   },
   "dependencies": {
     "cesium": "^1.146.0",

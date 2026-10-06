@@ -43,8 +43,11 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
-      - name: Build
-        run: pnpm build
+      - name: Type check
+        run: pnpm lint:tsc
+
+      - name: Build demo
+        run: pnpm build:demo
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

@@ -192,7 +192,7 @@ Maptoolkit 是独有 schema，需单独的小样式定义。实测 TileJSON 字�
 
 | 来源 | 实际区域 | 验证边界 |
 | --- | --- | --- |
-| OpenFreeMap | London；另有 Manhattan 60m/15m 白模 | 完整 Liberty 与实际建筑挤出 |
+| OpenFreeMap | London；另有 Manhattan 60m/15m 白模 | 完整 Liberty 与实际建筑白模 |
 | VersaTiles | Cape Town | 完整官方 Colorful，包含原始 sky/projection |
 | OSMF | Tokyo | 官方 Shortbread 数据及样式 |
 | BKG | Berlin、London | 分别取得德国与世界源覆盖目标位置的 MVT |

@@ -10,7 +10,6 @@
 pnpm lint:eslint
 pnpm lint:tsc
 pnpm test
-pnpm build:mvt
 pnpm build
 E2E_GPU=hardware pnpm exec playwright test --grep-invert '@live|@performance'
 E2E_GPU=hardware E2E_PERF_GPU=1 E2E_PERFORMANCE=1 pnpm exec playwright test e2e/performance-comparison.spec.ts --grep '@performance'

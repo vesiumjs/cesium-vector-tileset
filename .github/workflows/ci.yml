@@ -44,10 +44,10 @@ jobs:
         run: pnpm test
 
       - name: Build library
-        run: pnpm build:mvt
+        run: pnpm build:lib
 
       - name: Build demo
-        run: pnpm build
+        run: pnpm build:demo
 
   e2e:
     name: Playwright (${{ matrix.shard }}/4)
@@ -76,7 +76,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm test:e2e:install --with-deps
 
       - name: Browser and packed package tests
         run: pnpm test:e2e --shard=${{ matrix.shard }}/4
