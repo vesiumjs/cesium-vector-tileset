@@ -27,6 +27,6 @@
     "tsdown.config.ts",
     "eslint.config.js",
     "packages/cesium-vector-tileset/build/prepare-package.ts",
-    "packages/cesium-vector-tileset/build/publish-package.ts"
+    "scripts/**/*.ts"
   ]
 }

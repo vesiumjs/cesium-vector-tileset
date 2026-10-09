@@ -14,7 +14,7 @@ dist-ssr
 
 dist.zip
 
-# Package documentation copied by prepack
+# Package documentation copied by the library build
 /packages/cesium-vector-tileset/README.md
 /packages/cesium-vector-tileset/README.zh-CN.md
 

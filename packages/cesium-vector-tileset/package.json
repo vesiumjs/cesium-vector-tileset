@@ -25,9 +25,6 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "scripts": {
-    "prepack": "pnpm --dir ../.. prepare:package"
-  },
   "peerDependencies": {
     "cesium": "^1.146.0"
   },

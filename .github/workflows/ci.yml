@@ -35,7 +35,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: ESLint
-        run: pnpm lint:eslint:check
+        run: pnpm exec eslint .
 
       - name: Type check
         run: pnpm lint:tsc
@@ -44,10 +44,10 @@ jobs:
         run: pnpm test
 
       - name: Build library
-        run: pnpm build:lib
+        run: pnpm build:ci
 
       - name: Build demo
-        run: pnpm build:demo
+        run: pnpm build
 
   e2e:
     name: Playwright (${{ matrix.shard }}/4)

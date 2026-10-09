@@ -22,7 +22,8 @@ let consumerUrl: string;
 
 test.beforeAll(async () => {
   directory = await mkdtemp(path.join(tmpdir(), 'cesium-vector-tileset-published-'));
-  await run('pnpm', ['pack:lib', '--pack-destination', directory], { cwd: fileURLToPath(new URL('../', import.meta.url)) });
+  await run('pnpm', ['build:ci'], { cwd: fileURLToPath(new URL('../', import.meta.url)) });
+  await run('pnpm', ['pack', '--pack-destination', directory], { cwd: library });
   const metadata = JSON.parse(await readFile(path.join(library, 'package.json'), 'utf8'));
   const archive = path.join(directory, `${metadata.name}-${metadata.version}.tgz`);
   const listing = await run('tar', ['-tf', archive]);
@@ -74,7 +75,8 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  if (server)
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   await rm(directory, { recursive: true, force: true });
 });
 

@@ -32,13 +32,11 @@ pnpm dev
 | 命令                     | 用途                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------ |
 | `pnpm dev`               | 启动 Vite 演示服务器                                                                       |
-| `pnpm build`             | 依次构建库和演示                                                                           |
-| `pnpm build:lib`         | 构建普通与 `.min.mjs` 模块/Worker 及类型声明，产物位于 `packages/cesium-vector-tileset/dist/` |
-| `pnpm build:demo`        | 构建 Vite 演示，产物位于根目录 `dist/`                                                     |
+| `pnpm build`             | 构建 Vite 演示，产物位于根目录 `dist/`                                                     |
+| `pnpm build:ci`          | tsdown 构建普通与 `.min.mjs` 模块/Worker、类型声明及发布文件，产物位于 `packages/cesium-vector-tileset/dist/` |
 | `pnpm preview`           | 预览构建后的演示                                                                           |
-| `pnpm lint`              | 依次检查 ESLint 和 TypeScript，不修改文件                                                   |
+| `pnpm lint`              | 依次运行 ESLint 自动修复和 TypeScript 检查                                                   |
 | `pnpm lint:eslint`       | 运行 ESLint 并自动修复                                                                     |
-| `pnpm lint:eslint:check` | 检查 ESLint，不修改文件                                                                    |
 | `pnpm lint:tsc`          | 运行 workspace TypeScript 检查                                                             |
 | `pnpm test`              | 运行 Vitest 单元测试                                                                       |
 | `pnpm test:watch`        | 以 watch 模式运行单元测试                                                                  |
@@ -49,7 +47,7 @@ pnpm dev
 | `pnpm release`           | 同步更新根包与库包版本、提交、创建 `v*` 标签并推送                                          |
 | `pnpm publish:ci`        | 校验版本与标签、构建、打包并发布，供 npm 发布工作流调用                             |
 
-构建、生成和发布命令统一在根目录运行。子包仅保留 `prepack` 生命周期入口，调用根目录的 `prepare:package` 完成构建与 README、许可证准备。
+构建、生成和发布命令统一在根目录运行，子包不配置 scripts。`pnpm build:ci` 同时准备双语 README 和许可证，无需额外执行准备命令。
 
 运行浏览器测试前，通过 `pnpm test:e2e:install` 安装 Chromium。Playwright 报告与失败产物位于 `node_modules/.cache/playwright/`。构建命令只负责生成产物，类型检查由 `pnpm lint` 或 `pnpm lint:tsc` 执行。
 
@@ -96,7 +94,7 @@ pnpm release
 
 `pnpm release` 直接运行 [bumpp](https://github.com/antfu-collective/bumpp) 的 `bumpp -r`，递归更新根包与库包的 `package.json`，两个包共用一个版本。命令交互选择尚未发布的新版本，也可以直接指定，例如 `pnpm release 0.0.2`。更新版本后创建版本提交和对应的 `v0.0.2` 标签，然后推送当前分支及标签。
 
-标签推送后，CI 调用 `pnpm publish:ci`。发布前校验根包、库包版本和标签是否一致，通过 `pnpm pack` 触发 `prepack`，先构建最新代码，再准备双语 README 和许可证，最后使用 npm CLI 通过 OIDC 发布 tarball。正式版本发布到 `latest`，`0.0.3-beta.1` 这样的预发布版本发布到 `next`。本地核对发布产物时，在根目录运行 `pnpm pack:lib`；它同样会自动构建。
+标签推送后，CI 调用 `pnpm publish:ci`，执行根目录的 `scripts/publish.ts`。脚本先校验根包、库包版本和标签是否一致，再执行 `pnpm build:ci`、`pnpm pack`，最后使用 npm CLI 通过 OIDC 发布 tarball。正式版本发布到 `latest`，`0.0.3-beta.1` 这样的预发布版本发布到 `next`。本地核对发布产物时，在根目录依次运行 `pnpm build:ci` 和 `pnpm --filter cesium-vector-tileset pack`。
 
 演示在推送到 `gh-pages` 时部署到 GitHub Pages，也可手动运行 `deploy-github-pages`。仓库 Pages 的 Source 需设置为 **GitHub Actions**。手动运行时选择要部署的演示所在分支；选择 `dev` 时跳过部署任务。
 
@@ -108,6 +106,7 @@ packages/cesium-vector-tileset/
   src/               样式、数据源、Worker、瓦片和 Cesium 渲染
   build/             代码生成器
 src/                 Vue 演示、CesiumWidget 配置和样式
+scripts/             发布脚本
 e2e/                 浏览器集成与渲染测试
 docs/                架构与研究记录
 CONTEXT.md           领域术语

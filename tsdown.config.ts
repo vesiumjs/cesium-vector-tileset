@@ -2,6 +2,7 @@ import type { UserConfig } from 'tsdown';
 import { fileURLToPath } from 'node:url';
 import { replacePlugin } from 'rolldown/plugins';
 import { defineConfig } from 'tsdown';
+import { preparePackage } from './packages/cesium-vector-tileset/build/prepare-package.ts';
 
 const packageDirectory = fileURLToPath(new URL('./packages/cesium-vector-tileset', import.meta.url));
 
@@ -18,6 +19,7 @@ export default defineConfig([false, true].flatMap<UserConfig>((minify) => {
     entry: 'index.ts',
     dts: !minify,
     tsconfig: '../../tsconfig.build.json',
+    hooks: minify ? undefined : { 'build:done': preparePackage },
     deps: {
       alwaysBundle: [/^(?!cesium(?:\/|$))/],
       dts: { alwaysBundle: [] },

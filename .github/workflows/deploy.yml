@@ -47,7 +47,7 @@ jobs:
         run: pnpm lint:tsc
 
       - name: Build demo
-        run: pnpm build:demo
+        run: pnpm build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
