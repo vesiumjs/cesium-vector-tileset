@@ -15,6 +15,7 @@ interface Entry {
   glyphs: Record<number, StyleGlyph>;
   requests: Record<number, Promise<Record<number, StyleGlyph>>>;
   ranges: Record<number, boolean>;
+  localRequests?: Record<number, Promise<StyleGlyph>>;
   tinySDF?: Promise<TinySDF>;
   ideographTinySDF?: Promise<TinySDF>;
 }
@@ -105,7 +106,7 @@ export class GlyphSource {
     // If the style hasn’t opted into server-side fonts or this codepoint is CJK, draw the glyph locally and cache it.
     const url = this.url;
     if (!url || this._charUsesLocalIdeographFontFamily(id)) {
-      glyph = entry.glyphs[id] = await this._drawGlyph(entry, stack, id);
+      glyph = await this._loadLocalGlyph(entry, stack, id);
       return { stack, id, glyph };
     }
 
@@ -150,9 +151,23 @@ export class GlyphSource {
       delete entry.requests[range];
       this._warnOnMissingGlyphRange(range, id, ensureError(e));
       // Fall back to drawing the glyph locally and caching it.
-      const glyph = entry.glyphs[id] = await this._drawGlyph(entry, stack, id);
+      const glyph = await this._loadLocalGlyph(entry, stack, id);
       return { stack, id, glyph };
     }
+  }
+
+  /** Tiles share a font's pending draw while retaining independent response bitmaps. */
+  private _loadLocalGlyph(entry: Entry, stack: string, id: number): Promise<StyleGlyph> {
+    const glyph = entry.glyphs[id];
+    if (glyph)
+      return Promise.resolve(glyph);
+    const requests = entry.localRequests ??= {};
+    return requests[id] ??= this._drawGlyph(entry, stack, id).then((glyph) => {
+      entry.glyphs[id] = glyph;
+      return glyph;
+    }).finally(() => {
+      delete requests[id];
+    });
   }
 
   _warnOnMissingGlyphRange(range: number, id: number, err: Error): void {

@@ -103,7 +103,10 @@ describe('sprite request ownership', () => {
       expect(style.getImage('new').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
       expect(changed).toHaveBeenCalledOnce();
     }
-    finally { tileset.destroy(); }
+    finally {
+      if (!tileset.isDestroyed())
+        tileset.destroy();
+    }
   });
 
   it('makes a public style without a sprite ready and ignores the unloaded sprites late result', async () => {
@@ -122,7 +125,10 @@ describe('sprite request ownership', () => {
       expect(tileset.tilesLoaded).toBe(true);
       expect(changed).not.toHaveBeenCalled();
     }
-    finally { tileset.destroy(); }
+    finally {
+      if (!tileset.isDestroyed())
+        tileset.destroy();
+    }
   });
 
   it('cancels every superseded sprite and prevents late commits after the tileset is destroyed', async () => {
@@ -143,7 +149,10 @@ describe('sprite request ownership', () => {
       expect(broadcast).not.toHaveBeenCalled();
       expect(tileset.isDestroyed()).toBe(true);
     }
-    finally { tileset.destroy(); }
+    finally {
+      if (!tileset.isDestroyed())
+        tileset.destroy();
+    }
   });
 
   it('keeps the existing sprite namespace when another sprite is added', async () => {
@@ -167,7 +176,10 @@ describe('sprite request ownership', () => {
       expect(style.getImage('extra:icon').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
       expect(complete).toHaveBeenCalledExactlyOnceWith(undefined);
     }
-    finally { tileset.destroy(); }
+    finally {
+      if (!tileset.isDestroyed())
+        tileset.destroy();
+    }
   });
 
   it.each([false, true])('prevents a removed namespace from returning after a pending sprite load (retains another: %s)', async (retainBase) => {
@@ -199,6 +211,9 @@ describe('sprite request ownership', () => {
         expect(style.getImage('base:icon').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
       }
     }
-    finally { tileset.destroy(); }
+    finally {
+      if (!tileset.isDestroyed())
+        tileset.destroy();
+    }
   });
 });

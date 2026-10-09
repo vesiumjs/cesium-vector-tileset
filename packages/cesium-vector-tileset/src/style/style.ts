@@ -55,6 +55,22 @@ import { ZoomHistory } from './zoom-history';
 const empty = emptyStyle();
 
 let styleIdCounter = 0;
+
+/** A source's bucket schema and the synchronization barrier for that schema. */
+export interface SourceParseState {
+  ready: Promise<void>;
+}
+
+interface PendingSourceParseState extends SourceParseState {
+  workerReady: boolean;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+interface PaintTransition {
+  value: { isDataDriven: () => boolean };
+  prior?: PaintTransition;
+}
 /**
  * A feature identifier that is bound to a source
  */
@@ -259,6 +275,64 @@ export class Style extends Evented<StyleEventType> {
   renderRevision = 0;
   /** Revision for style mutations, excluding a camera-only zoom change. */
   styleRevision = 0;
+  private readonly _sourceParseStates = new Map<string, PendingSourceParseState>();
+  private readonly _pendingSourceParses = new Map<string, PendingSourceParseState>();
+  private readonly _awaitingSourceParses = new Map<string, PendingSourceParseState>();
+
+  /** Identity changes immediately when worker bucket construction must change. */
+  getSourceParseState(source: string): SourceParseState {
+    let state = this._sourceParseStates.get(source);
+    if (!state) {
+      state = { ready: Promise.resolve(), workerReady: true, resolve: () => {}, reject: () => {} };
+      this._sourceParseStates.set(source, state);
+    }
+    return state;
+  }
+
+  private _invalidateSourceParse(source: string): void {
+    // Superseded waiters must wake so their source lease can seek the new schema.
+    this._sourceParseStates.get(source)?.resolve();
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const ready = new Promise<void>((resolveReady, rejectReady) => {
+      resolve = resolveReady;
+      reject = rejectReady;
+    });
+    void ready.catch(() => {});
+    const state = { ready, workerReady: false, resolve, reject };
+    this._sourceParseStates.set(source, state);
+    this._pendingSourceParses.set(source, state);
+    this._awaitingSourceParses.set(source, state);
+  }
+
+  private _hasSourcePaintTransition(source: string): boolean {
+    for (const id of this._order) {
+      const layer = this._layers[id];
+      if (layer.source !== source)
+        continue;
+      const transitions = Object.values(layer._transitioningPaint._values) as unknown as PaintTransition[];
+      for (const transition of transitions) {
+        if (!transition.prior)
+          continue;
+        // An interrupted transition can retain a data expression deeper in
+        // its prior chain. Constant-only transitions keep the same schema.
+        for (let value: PaintTransition | undefined = transition; value; value = value.prior) {
+          if (value.value.isDataDriven())
+            return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private _settleSourceParses(): void {
+    for (const [source, state] of this._awaitingSourceParses) {
+      if (state.workerReady && !this._hasSourcePaintTransition(source)) {
+        this._awaitingSourceParses.delete(source);
+        state.resolve();
+      }
+    }
+  }
 
   constructor(transformRequest?: RequestTransformFunction, options: StyleOptions = {}) {
     super();
@@ -762,6 +836,10 @@ export class Style extends Evented<StyleEventType> {
     }
 
     const changed = this._changed;
+    const pendingSourceParses = changed ? [...this._pendingSourceParses.entries()] : [];
+    if (changed)
+      this._pendingSourceParses.clear();
+    let workerLayersReady: Promise<void> = Promise.resolve();
     // Exact comparison would treat the tileset's float-noise zoom wiggle (~1e-11
     // during pans) as a real zoom change; see PAINT_ZOOM_EPSILON.
     const zoomChanged = !samePaintZoom(this.z, parameters.zoom);
@@ -790,7 +868,7 @@ export class Style extends Evented<StyleEventType> {
       const removedIds = Object.keys(this._removedLayers);
 
       if (updatedIds.length || removedIds.length) {
-        this._updateWorkerLayers(updatedIds, removedIds);
+        workerLayersReady = this._updateWorkerLayers(updatedIds, removedIds);
       }
       for (const id in this._updatedSources) {
         const action = this._updatedSources[id];
@@ -857,6 +935,23 @@ export class Style extends Evented<StyleEventType> {
     }
 
     this.light?.recalculate(parameters);
+    // A worker acknowledgment survives subsequent frames while old
+    // data-driven paint is still transitioning to the new constant schema.
+    this._settleSourceParses();
+    void workerLayersReady.then(
+      () => {
+        for (const [, state] of pendingSourceParses)
+          state.workerReady = true;
+        this._settleSourceParses();
+      },
+      (error) => {
+        for (const [source, state] of pendingSourceParses) {
+          if (this._awaitingSourceParses.get(source) === state)
+            this._awaitingSourceParses.delete(source);
+          state.reject(error);
+        }
+      },
+    );
     this.z = parameters.zoom;
     if (changed) {
       this.styleRevision++;
@@ -907,11 +1002,11 @@ export class Style extends Evented<StyleEventType> {
     }
   }
 
-  _updateWorkerLayers(updatedIds: string[], removedIds: string[]): void {
-    void this.dispatcher.broadcast(MessageType.updateLayers, {
+  _updateWorkerLayers(updatedIds: string[], removedIds: string[]): Promise<void> {
+    return this.dispatcher.broadcast(MessageType.updateLayers, {
       layers: this._serializeByIds(updatedIds, false),
       removedIds,
-    }).catch(() => {});
+    }).then(() => {});
   }
 
   _resetUpdates(): void {
@@ -1330,6 +1425,11 @@ export class Style extends Evented<StyleEventType> {
     this._changed = true;
     this._removedLayers[id] = layer;
     delete this._layers[id];
+    if (layer.source && this.tilePyramids[layer.source]?.getSource().type !== 'raster') {
+      this._invalidateSourceParse(layer.source);
+      this._updatedSources[layer.source] ||= 'reload';
+      this.tilePyramids[layer.source].pause();
+    }
 
     if (this._serializedLayers) {
       delete this._serializedLayers[id];
@@ -1605,6 +1705,9 @@ export class Style extends Evented<StyleEventType> {
 
   _updateLayer(layer: StyleLayer): void {
     this._updatedLayers[layer.id] = true;
+    if (layer.source && this.tilePyramids[layer.source].getSource().type !== 'raster') {
+      this._invalidateSourceParse(layer.source);
+    }
     if (layer.source && !this._updatedSources[layer.source]
     // Raster tiles do not contain style-dependent geometry buckets to reload.
       && this.tilePyramids[layer.source].getSource().type !== 'raster') {
@@ -1874,6 +1977,11 @@ export class Style extends Evented<StyleEventType> {
     }
 
     // reset internal state
+    for (const state of this._sourceParseStates.values())
+      state.resolve();
+    this._sourceParseStates.clear();
+    this._pendingSourceParses.clear();
+    this._awaitingSourceParses.clear();
     Object.assign(this, this._getInitialValues());
 
     // Remove event listeners

@@ -111,6 +111,12 @@ type AtlasCanvas = HTMLCanvasElement | OffscreenCanvas;
  * a shared material never pays the per-material upload it was created with.
  */
 export class SharedAtlasTextures {
+  private readonly _options: { premultiplyAlpha: boolean };
+
+  constructor(options: { premultiplyAlpha: boolean } = { premultiplyAlpha: false }) {
+    this._options = options;
+  }
+
   private _records = new Map<string, SharedAtlasRecord>();
   private _dirty = new Set<SharedAtlasRecord>();
   private _bindings = new WeakMap<Material, Map<string, AtlasBinding>>();
@@ -234,6 +240,7 @@ export class SharedAtlasTextures {
           : new Texture({
               context: context as never,
               source: record.canvas as never,
+              preMultiplyAlpha: this._options.premultiplyAlpha,
             });
         record.sampler = borrowedTexture(record.texture);
       }
