@@ -1,7 +1,8 @@
 import type { GeometryInstanceAttribute } from 'cesium';
 import { BufferPointCollection, BufferPolygonCollection, ComponentDatatype, PointPrimitiveCollection, Primitive, PrimitiveCollection } from 'cesium';
 import { geometryBytes } from '../geometry/geometry-bytes';
-import { GeometryPrimitive, lineInputs } from '../geometry/geometry-primitive';
+import { GeometryPrimitive } from '../geometry/geometry-primitive';
+import { lineInputs } from '../geometry/line-input';
 
 const primitiveBytes = new WeakMap<object, number>();
 const uploadedPrimitives = new WeakSet<Primitive>();
@@ -17,7 +18,7 @@ interface NativeVertexArray {
   getAttribute: (index: number) => { vertexBuffer?: NativeBuffer };
 }
 
-// Public at runtime in Cesium 1.146; omitted from the generated declarations.
+// Public at runtime in Cesium; omitted from the generated declarations.
 const componentBytes = (ComponentDatatype as unknown as { getSizeInBytes: (datatype: ComponentDatatype) => number }).getSizeInBytes;
 
 /** Reserve input geometry bytes before upload; this is not an exact GPU allocation. */
@@ -61,7 +62,7 @@ export function primitiveResourceOwner(owner: object): Primitive | undefined {
 }
 
 /**
- * Cesium 1.146's private Primitive._va contract, read once after Native ready.
+ * Cesium's private Primitive._va contract, read once after Native ready.
  * Buffer.sizeInBytes is its bufferData allocation. Buffer identity de-duplicates
  * interleaved attributes and repeated VAs without retaining their GL handles.
  * Immutable line position textures are included. Feature batch-table textures,
@@ -74,7 +75,7 @@ export function captureUploadedPrimitiveBytes(primitive: Primitive): boolean {
   }
   const vertexArrays = (primitive as Primitive & { _va: NativeVertexArray[] })._va;
   if (!Array.isArray(vertexArrays)) {
-    throw new TypeError('Cesium 1.146 Primitive._va buffer contract is unavailable');
+    throw new TypeError('Cesium Primitive._va buffer contract is unavailable');
   }
   const buffers = new Set<NativeBuffer>();
   let bytes = 0;
@@ -83,7 +84,7 @@ export function captureUploadedPrimitiveBytes(primitive: Primitive): boolean {
       return;
     }
     if (!Number.isFinite(buffer.sizeInBytes) || buffer.sizeInBytes < 0) {
-      throw new TypeError('Cesium 1.146 Buffer.sizeInBytes contract is unavailable');
+      throw new TypeError('Cesium Buffer.sizeInBytes contract is unavailable');
     }
     buffers.add(buffer);
     bytes += buffer.sizeInBytes;
@@ -91,7 +92,7 @@ export function captureUploadedPrimitiveBytes(primitive: Primitive): boolean {
   for (const vertexArray of vertexArrays) {
     if (!Number.isInteger(vertexArray.numberOfAttributes) || vertexArray.numberOfAttributes < 0
       || typeof vertexArray.getAttribute !== 'function') {
-      throw new TypeError('Cesium 1.146 VertexArray attribute contract is unavailable');
+      throw new TypeError('Cesium VertexArray attribute contract is unavailable');
     }
     for (let index = 0; index < vertexArray.numberOfAttributes; index++) {
       add(vertexArray.getAttribute(index).vertexBuffer);

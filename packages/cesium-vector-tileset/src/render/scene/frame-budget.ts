@@ -2,8 +2,13 @@
 export class FrameBudget {
   private readonly deadline: number;
 
-  constructor(budgetMs: number) {
-    this.deadline = performance.now() + budgetMs;
+  /** Reuse a physical frame deadline instead of allocating more time. */
+  static until(deadline: number): FrameBudget {
+    return new FrameBudget(0, deadline);
+  }
+
+  constructor(budgetMs: number, deadline = performance.now() + budgetMs) {
+    this.deadline = deadline;
   }
 
   /** Whether the frame's heavy-work allowance is spent. */
@@ -19,10 +24,12 @@ export const UNBOUNDED_BUDGET: { readonly exhausted: boolean } = {
   },
 };
 
-export type Budget = FrameBudget | typeof UNBOUNDED_BUDGET;
+export interface Budget {
+  readonly exhausted: boolean;
+  /** Scene-selected cooperative admission, consumable by one heavy work unit. */
+  takeMinimumProgress?: () => boolean;
+}
 
 /** Bound line instance/paint setup alongside the line renderer's vertex caps. */
 export const MAX_LINE_INSTANCES = 512;
-/** Shared by source preparation, Native first updates, building and paint. */
-export const TILE_WORK_BUDGET_MS = 12;
 export const MAX_TILE_COMMITS = 4;

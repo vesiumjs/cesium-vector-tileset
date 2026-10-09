@@ -145,7 +145,7 @@ describe('per-tile memory accounting', () => {
     const reservation = collectionGpuBytes(upload.primitive);
     upload.ready();
     Object.assign(upload.primitive, { _va: undefined });
-    expect(() => captureUploadedPrimitiveBytes(upload.primitive)).toThrow('Cesium 1.146 Primitive._va');
+    expect(() => captureUploadedPrimitiveBytes(upload.primitive)).toThrow('Cesium Primitive._va');
     expect(collectionGpuBytes(upload.primitive)).toBe(reservation);
     Object.assign(upload.primitive, { _va: [upload.vertexArray] });
     expect(captureUploadedPrimitiveBytes(upload.primitive)).toBe(true);

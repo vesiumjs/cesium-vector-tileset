@@ -1,3 +1,4 @@
+import type { SourceTileLod } from './source-tile-lod';
 import { mercatorYfromLat } from '../../geo/mercator-coordinate';
 import { MAX_TILE_ZOOM } from '../../geo/world-bounds';
 import { OverscaledTileID } from '../../tile/tile-id';
@@ -61,18 +62,20 @@ export function globeVisibleTileIDs(
   globe: GlobeLike,
   minZoom: number,
   targetZoom: number,
+  lod?: SourceTileLod,
 ): OverscaledTileID[] {
   if (globe.show === false) {
     return [];
   }
   const seen = new Set<string>();
   const result: OverscaledTileID[] = [];
-  const zoom = Math.min(targetZoom, MAX_TILE_ZOOM);
+  const zoom = Math.min(lod?.maxZoom ?? targetZoom, MAX_TILE_ZOOM);
   for (const tile of globe._surface._tilesToRender) {
     for (const web of tilesForRectangle(tile.rectangle, minZoom, zoom)) {
-      if (!seen.has(web.key)) {
-        seen.add(web.key);
-        result.push(web);
+      const selected = lod ? lod.select(web) : web;
+      if (selected && !seen.has(selected.key)) {
+        seen.add(selected.key);
+        result.push(selected);
       }
     }
   }

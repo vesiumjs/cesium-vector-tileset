@@ -6,9 +6,11 @@ import type { Budget } from './frame-budget';
 import type { RenderFrameState } from './render-frame';
 import type { TilePublishResult } from './tile-publish-queue';
 import { BufferPolygonCollection, PrimitiveCollection as CesiumPrimitiveCollection, Primitive } from 'cesium';
+import { GeometryPrimitive, hasRunnableGeometryUpdate, updateGeometryWithBudget } from '../geometry/geometry-primitive';
 import { destroyPatternResources } from '../pattern/pattern-renderer';
 import { destroyRasterResources } from '../raster/raster-renderer';
-import { allDrawLayersHidden, drawBatchForOwner } from './draw-batch';
+import { isClampHeightReference } from '../vector/vector-tile-renderer';
+import { allDrawLayersHidden, drawBatchForOwner, drawLayersForOwner } from './draw-batch';
 import { captureUploadedPrimitiveBytes, primitiveResourceOwner } from './resource-memory';
 
 export type SceneCollection = VectorCollection | PrimitiveCollection | Primitive;
@@ -64,6 +66,93 @@ function readyPrimitives(collection: SceneCollection, submitted?: ReadonlySet<Pr
   return true;
 }
 
+function drawablePrimitives(collection: SceneCollection): boolean {
+  const owner = primitiveResourceOwner(collection);
+  if (owner)
+    return owner instanceof GeometryPrimitive ? owner.hasDrawableGeometry : owner.ready;
+  if (collection instanceof CesiumPrimitiveCollection) {
+    for (let index = 0; index < collection.length; index++) {
+      if (drawablePrimitives(collection.get(index)))
+        return true;
+    }
+    return false;
+  }
+  // Buffer collections expose no separate cold/draw timing boundary.
+  return true;
+}
+
+function pendingUploads(collection: SceneCollection): boolean {
+  const owner = primitiveResourceOwner(collection);
+  if (owner)
+    return owner instanceof GeometryPrimitive && owner.hasPendingUpload;
+  if (collection instanceof CesiumPrimitiveCollection) {
+    for (let index = 0; index < collection.length; index++) {
+      if (pendingUploads(collection.get(index)))
+        return true;
+    }
+  }
+  return false;
+}
+
+function runnablePrimitives(collection: SceneCollection): boolean {
+  const owner = primitiveResourceOwner(collection);
+  if (owner)
+    return hasRunnableGeometryUpdate(owner);
+  if (collection instanceof CesiumPrimitiveCollection) {
+    for (let index = 0; index < collection.length; index++) {
+      if (runnablePrimitives(collection.get(index)))
+        return true;
+    }
+    return false;
+  }
+  // Buffer collections retain their synchronous Native upload path.
+  return true;
+}
+
+/** Replay wrappers share their physical owner's one CPU continuation. */
+function preparationOwners(collection: SceneCollection, owners: Set<GeometryPrimitive>): void {
+  const owner = primitiveResourceOwner(collection);
+  if (owner) {
+    if (owner instanceof GeometryPrimitive && owner.hasRunnableIdlePreparation)
+      owners.add(owner);
+  }
+  else if (collection instanceof CesiumPrimitiveCollection) {
+    for (let index = 0; index < collection.length; index++)
+      preparationOwners(collection.get(index), owners);
+  }
+}
+
+function resourceUploadOwners(collection: SceneCollection, owners: Set<GeometryPrimitive>): void {
+  const owner = primitiveResourceOwner(collection);
+  if (owner) {
+    if (owner instanceof GeometryPrimitive && owner.hasRunnableResourceUpload)
+      owners.add(owner);
+  }
+  else if (collection instanceof CesiumPrimitiveCollection) {
+    for (let index = 0; index < collection.length; index++)
+      resourceUploadOwners(collection.get(index), owners);
+  }
+}
+
+function renderPrimitives(collection: SceneCollection): boolean {
+  const owner = primitiveResourceOwner(collection);
+  if (owner) {
+    // Ready siblings draw on real viewports; CPU preparation alone does not
+    // require repeatedly rendering them while a cold sibling advances.
+    if (owner.ready)
+      return false;
+    return owner instanceof GeometryPrimitive ? owner.needsRenderUpdate : hasRunnableGeometryUpdate(owner);
+  }
+  if (collection instanceof CesiumPrimitiveCollection) {
+    for (let index = 0; index < collection.length; index++) {
+      if (renderPrimitives(collection.get(index)))
+        return true;
+    }
+    return false;
+  }
+  return true;
+}
+
 function captureUploadedBytes(collection: SceneCollection): void {
   const owner = primitiveResourceOwner(collection);
   if (owner) {
@@ -82,6 +171,8 @@ function captureUploadedBytes(collection: SceneCollection): void {
  * budgets first GPU updates, and destroys replaced resources after the frame.
  */
 export class SceneCollections {
+  /** Enabled by a Scene that services idle ticks without drawing. */
+  idlePreparationsEnabled = false;
   private readonly _root: PrimitiveCollection;
   private readonly _requestRender: () => void;
   private readonly _releaseDrapedCollection: (collection: VectorCollection) => void;
@@ -89,9 +180,13 @@ export class SceneCollections {
   private readonly _preparePaint: (collection: SceneCollection, budget?: Budget) => boolean;
   private readonly _pendingDestroy = new Set<SceneCollection>();
   private readonly _firstUpdates = [new Map<SceneCollection, FirstUpdate>(), new Map<SceneCollection, FirstUpdate>()];
+  private _resourceUploadTurn?: object;
   private readonly _parents = new WeakMap<SceneCollection, PrimitiveCollection>();
   private readonly _replacements = new Set<SceneReplacement>();
   private readonly _replacementForCollection = new WeakMap<SceneCollection, SceneReplacement>();
+  private readonly _vectorVisibility = new WeakMap<SceneCollection, boolean>();
+  private _layerVisibility: ReadonlyMap<string, boolean> = new Map();
+  private _hiddenLayers: TileVisibility['hiddenLayers'] = new Map();
   private readonly _pendingRelease: Array<() => void> = [];
   private _pendingRaster: RasterTileUpdate = { removed: [], added: [], removedMaterials: [] };
   private _pendingPattern: PatternTileUpdate = { removed: [], added: [], removedMaterials: [] };
@@ -114,6 +209,59 @@ export class SceneCollections {
     if (!this._root.contains(collection)) {
       this._root.add(collection);
     }
+  }
+
+  /** Cached CPU-complete tiles can still own unfinished Native preparation. */
+  restoreVector(collections: readonly VectorCollection[]): void {
+    const pending: VectorCollection[] = [];
+    for (const collection of collections) {
+      this.setVectorVisibility(collection, true);
+      this.add(collection);
+      if (!readyPrimitives(collection))
+        pending.push(collection);
+    }
+    this.queueFirstUpdate(pending);
+  }
+
+  /** Early symbol publications can retire before their first Native upload. */
+  restoreSymbols(collections: readonly PrimitiveCollection[]): void {
+    for (const collection of collections) {
+      collection.show = true;
+      this.add(collection);
+    }
+    this.queueFirstUpdate(collections.filter(collection => !readyPrimitives(collection)), false);
+  }
+
+  /** Coverage intent survives style hiding and hidden successor uploads. */
+  setVectorVisibility(collection: SceneCollection, visible: boolean): void {
+    this._vectorVisibility.set(collection, visible);
+    collection.show = visible && !this._replacementForCollection.has(collection)
+      && !this._pendingDestroy.has(collection);
+    if (collection instanceof BufferPolygonCollection && isClampHeightReference(collection.heightReference)) {
+      this._syncDrapedCollection(collection);
+    }
+  }
+
+  /** Native discovers draped polygons from show before the next tileset update. */
+  syncDrapedVisibility(layerVisibility: ReadonlyMap<string, boolean>): void {
+    this._layerVisibility = layerVisibility;
+    for (let index = 0; index < this._root.length; index++) {
+      const collection = this._root.get(index);
+      if (collection instanceof BufferPolygonCollection && isClampHeightReference(collection.heightReference)) {
+        this._syncDrapedCollection(collection);
+      }
+    }
+  }
+
+  private _syncDrapedCollection(collection: BufferPolygonCollection): void {
+    if (!this._vectorVisibility.has(collection)) {
+      this._vectorVisibility.set(collection, true);
+    }
+    const layers = drawLayersForOwner(collection);
+    const styleVisible = layers.size === 0 || [...layers].some(id => this._layerVisibility.get(id) !== false);
+    collection.show = (this._vectorVisibility.get(collection) ?? true)
+      && styleVisible && !this._replacementForCollection.has(collection)
+      && !this._pendingDestroy.has(collection);
   }
 
   detach(collection: SceneCollection): void {
@@ -165,6 +313,8 @@ export class SceneCollections {
       this._applyVectorPublication(result);
     }
     this.applyRasterUpdate(result.raster);
+    if (result.pattern)
+      this.applyPatternUpdate(result.pattern);
     if (result.removedSymbols.length > 0 || result.addedSymbols.length > 0 || result.retainedSymbols) {
       this._applySymbolPublication(result);
     }
@@ -233,6 +383,7 @@ export class SceneCollections {
   }
 
   private _applySymbolPublication(result: TilePublishResult): void {
+    const firstUpdates = result.firstUpdateSymbols.filter(collection => !readyPrimitives(collection));
     const old = new Set<PrimitiveCollection>();
     const abandoned = new Set<PrimitiveCollection>();
     const release: Array<() => void> = [];
@@ -261,8 +412,8 @@ export class SceneCollections {
       (held ? release : this._pendingRelease).push(result.retainedSymbols.release);
     }
     this.queueSymbolRemoval(result.removedSymbols.filter(collection => !old.has(collection)));
-    if (old.size > 0 && result.firstUpdateSymbols.length > 0) {
-      this._beginReplacement('symbol', result.tileId, old, new Set(result.addedSymbols), new Set(result.firstUpdateSymbols), release);
+    if (old.size > 0 && result.addedSymbols.length > 0) {
+      this._beginReplacement('symbol', result.tileId, old, new Set(result.addedSymbols), new Set(firstUpdates), release);
     }
     else {
       this.queueSymbolRemoval([...old]);
@@ -274,7 +425,7 @@ export class SceneCollections {
       }
       this.add(collection);
     }
-    this.queueFirstUpdate(result.firstUpdateSymbols, false);
+    this.queueFirstUpdate(firstUpdates, false);
   }
 
   private _applyVectorPublication(result: TilePublishResult): void {
@@ -321,7 +472,7 @@ export class SceneCollections {
       }
     }
     for (const collection of result.previousVector) {
-      if (!abandoned.has(collection) && collection.show && this._root.contains(collection)) {
+      if (!abandoned.has(collection) && this._root.contains(collection)) {
         old.add(collection);
       }
     }
@@ -364,7 +515,7 @@ export class SceneCollections {
       old,
       next,
       waiting,
-      visible: [...old].some(collection => collection.show),
+      visible: [...old].some(collection => this._vectorVisibility.get(collection) ?? collection.show),
       release,
     };
     this._replacements.add(replacement);
@@ -412,7 +563,7 @@ export class SceneCollections {
       this._replacementForCollection.set(next, replacement);
       next.show = false;
     }
-    else if (old.show && this._root.contains(old)) {
+    else if (this._root.contains(old)) {
       this._beginReplacement('vector', tileId, new Set([old]), new Set([next]));
     }
     else {
@@ -424,6 +575,7 @@ export class SceneCollections {
 
   /** Apply one tile policy to every pending owner, including owners added since the previous call. */
   syncTileVisibility(current: TileVisibility, previous: TileVisibility): void {
+    this._hiddenLayers = current.hiddenLayers;
     for (const replacement of this._replacements) {
       const tileId = replacement.tileId;
       if (replacement.kind === 'vector') {
@@ -433,8 +585,9 @@ export class SceneCollections {
         const hidden = current.hiddenLayers.get(tileId);
         let visible = false;
         for (const collection of replacement.old) {
-          collection.show = !allDrawLayersHidden(collection, hidden);
-          visible = collection.show || visible;
+          const covered = !allDrawLayersHidden(collection, hidden);
+          this.setVectorVisibility(collection, covered);
+          visible = covered || visible;
         }
         if (replacement.old.size === 0) {
           for (const collection of replacement.next) {
@@ -524,6 +677,129 @@ export class SceneCollections {
     return this._firstUpdates[0].size + this._firstUpdates[1].size;
   }
 
+  /** Waiting for worker results is excluded from overload admission turns. */
+  get hasRunnableFirstUpdates(): boolean {
+    for (const queue of this._firstUpdates) {
+      for (const collection of queue.keys()) {
+        if (readyPrimitives(collection))
+          return true;
+        if (!this.idlePreparationsEnabled) {
+          if (runnablePrimitives(collection))
+            return true;
+          continue;
+        }
+        // Resource-only work retains the upload stage's admission for post-draw.
+        if (renderPrimitives(collection))
+          return true;
+        const owners = new Set<GeometryPrimitive>();
+        preparationOwners(collection, owners);
+        if (owners.size > 0)
+          return true;
+      }
+    }
+    return false;
+  }
+
+  get hasRunnablePreparations(): boolean {
+    const owners = new Set<GeometryPrimitive>();
+    for (const queue of this._firstUpdates) {
+      for (const collection of queue.keys()) {
+        if (!collection.isDestroyed() && this._contains(collection)) {
+          preparationOwners(collection, owners);
+          if (owners.size > 0)
+            return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  get hasRunnableResourceUploads(): boolean {
+    for (const queue of this._firstUpdates) {
+      for (const collection of queue.keys()) {
+        if (collection.isDestroyed() || !this._contains(collection))
+          continue;
+        const owners = new Set<GeometryPrimitive>();
+        resourceUploadOwners(collection, owners);
+        if (owners.size > 0)
+          return true;
+      }
+    }
+    return false;
+  }
+
+  /** Safe post-draw/idle boundary: Native update and presentation stay in render. */
+  advanceResourceUploads(frameState: RenderFrameState, budget: Budget, turn: object, measure: <T>(operation: () => T) => T, minimumProgress: boolean): { units: number; renderNeeded: boolean } {
+    let units = 0;
+    let renderNeeded = false;
+    if (this._resourceUploadTurn === turn)
+      return { units, renderNeeded };
+    const visited = new Set<GeometryPrimitive>();
+    for (const queue of this._firstUpdates) {
+      for (const collection of queue.keys()) {
+        if (collection.isDestroyed() || !this._contains(collection))
+          continue;
+        const owners = new Set<GeometryPrimitive>();
+        resourceUploadOwners(collection, owners);
+        for (const owner of owners) {
+          if (visited.has(owner) || owner.isDestroyed())
+            continue;
+          if (budget.exhausted && (!minimumProgress || units > 0))
+            return { units, renderNeeded };
+          visited.add(owner);
+          this._resourceUploadTurn = turn;
+          renderNeeded = measure(() => Reflect.apply(owner.advanceResourceUpload, owner, [frameState, budget, turn])) || renderNeeded;
+          units++;
+        }
+      }
+    }
+    return { units, renderNeeded };
+  }
+
+  private _hasRenderFirstUpdates(): boolean {
+    for (const queue of this._firstUpdates) {
+      for (const collection of queue.keys()) {
+        // A whole-ready queue still needs render-time cleanup and handoff.
+        if (!collection.isDestroyed() && this._contains(collection)
+          && (readyPrimitives(collection) || renderPrimitives(collection))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private _requestFirstUpdateContinuation(): void {
+    if (!this.idlePreparationsEnabled || this._hasRenderFirstUpdates())
+      this._requestRender();
+  }
+
+  /** CPU only: no paint refresh, Native update, command submission or handoff. */
+  advancePreparations(frameState: RenderFrameState, budget: Budget, measurePreparation: <T>(operation: () => T) => T, minimumProgress: boolean): { units: number; renderNeeded: boolean } {
+    let units = 0;
+    const visited = new Set<GeometryPrimitive>();
+    for (const queue of this._firstUpdates) {
+      for (const collection of queue.keys()) {
+        if (collection.isDestroyed() || !this._contains(collection))
+          continue;
+        const owners = new Set<GeometryPrimitive>();
+        preparationOwners(collection, owners);
+        for (const owner of owners) {
+          if (visited.has(owner) || owner.isDestroyed() || !owner.hasRunnableIdlePreparation)
+            continue;
+          if (budget.exhausted && (!minimumProgress || units > 0))
+            return { units, renderNeeded: this._hasRenderFirstUpdates() };
+          visited.add(owner);
+          // Native's frame has geometry context/projection fields omitted by
+          // the scene collection interface; idle retains that same frame.
+          measurePreparation(() => Reflect.apply(owner.advancePreparation, owner, [frameState, budget]));
+          units++;
+        }
+      }
+    }
+    return { units, renderNeeded: this._hasRenderFirstUpdates() };
+  }
+
   private _removeFirstUpdate(collection: SceneCollection): void {
     for (const queue of this._firstUpdates) {
       queue.delete(collection);
@@ -539,11 +815,11 @@ export class SceneCollections {
     return false;
   }
 
-  pumpFirstUpdates(frameState: RenderFrameState, budget: Budget): SceneCollection[] {
+  pumpFirstUpdates(frameState: RenderFrameState, budget: Budget, measurePreparation: <T>(operation: () => T) => T = operation => operation(), minimumProgress = false, resourceTurn?: object): SceneCollection[] {
     const pumped: SceneCollection[] = [];
     const readyToDraw = new Set<SceneCollection>();
     for (const replacement of this._replacements) {
-      this._finishReplacement(replacement, readyToDraw, budget);
+      measurePreparation(() => this._finishReplacement(replacement, readyToDraw, budget));
     }
     // Native emits commands before afterRender makes public ready true.
     // Those resources must draw in every viewport of the physical frame,
@@ -556,11 +832,13 @@ export class SceneCollections {
         }
       }
     }
+    let admitted = false;
     const updatedCollections = new Set<SceneCollection>();
+    const updatedChildren = new Map<SceneCollection, Set<number>>();
     const prepared = new Map<SceneCollection, boolean>();
     const preparePaint = (collection: SceneCollection): boolean => {
       if (!prepared.has(collection)) {
-        prepared.set(collection, this._preparePaint(collection, budget));
+        prepared.set(collection, measurePreparation(() => this._preparePaint(collection, budget)));
       }
       return prepared.get(collection)!;
     };
@@ -577,6 +855,8 @@ export class SceneCollections {
           if (!this._visible(collection) || collection.isDestroyed() || !this._contains(collection))
             continue;
           for (const index of indices) {
+            if (updatedChildren.get(collection)?.has(index))
+              continue;
             if (collection instanceof CesiumPrimitiveCollection)
               collection.get(index).update(frameState);
             else
@@ -598,10 +878,17 @@ export class SceneCollections {
           }
           continue;
         }
-        if (budget.exhausted) {
-          this._requestRender();
+        if (!readyPrimitives(collection) && !runnablePrimitives(collection))
+          continue;
+        const length = collection instanceof CesiumPrimitiveCollection ? collection.length : 1;
+        // Native marks public ready after a frame that already submitted all
+        // these children. Completing its bookkeeping needs no cold admission.
+        const completed = readyPrimitives(collection) && upload.drawable.size === length;
+        if (!completed && budget.exhausted && (!minimumProgress || admitted)) {
+          this._requestFirstUpdateContinuation();
           return finishUpdates();
         }
+        admitted ||= !completed;
         if (!preparePaint(collection)) {
           this._requestRender();
           continue;
@@ -611,15 +898,26 @@ export class SceneCollections {
         let updated = false;
         do {
           const length = collection instanceof CesiumPrimitiveCollection ? collection.length : 1;
-          if (upload.staged ? upload.drawable.has(upload.index) : upload.drawable.size === length) {
+          const uploadTarget = upload.staged ? (collection as CesiumPrimitiveCollection).get(upload.index) : collection;
+          if ((upload.staged ? upload.drawable.has(upload.index) : upload.drawable.size === length)
+            && !pendingUploads(uploadTarget)) {
             upload.index++;
             continue;
+          }
+          if (upload.staged) {
+            const child = (collection as CesiumPrimitiveCollection).get(upload.index);
+            // A runnable sibling does not admit this worker-waiting owner.
+            // Preserve the one minimum unit for a child that can advance.
+            if (!readyPrimitives(child) && !runnablePrimitives(child)) {
+              upload.index++;
+              continue;
+            }
           }
           // Required paint and the first Native update form one progress
           // unit. Yielding between them can repeat paint every frame without
           // ever starting an upload during a transition.
           if (updated && budget.exhausted) {
-            this._requestRender();
+            this._requestFirstUpdateContinuation();
             return finishUpdates();
           }
           // Hidden replacements must upload before the held tile is released.
@@ -630,13 +928,28 @@ export class SceneCollections {
             collection.show = true;
           }
           try {
-            if (upload.staged) {
-              (collection as CesiumPrimitiveCollection).get(upload.index).update(frameState);
-            }
-            else {
-              (collection as { update: (frameState: unknown) => void }).update(frameState);
-              updatedCollections.add(collection);
-            }
+            const update = (): void => updateGeometryWithBudget(frameState, budget, () => {
+              if (upload.staged) {
+                (collection as CesiumPrimitiveCollection).get(upload.index).update(frameState);
+                let indices = updatedChildren.get(collection);
+                if (!indices) {
+                  indices = new Set();
+                  updatedChildren.set(collection, indices);
+                }
+                indices.add(upload.index);
+              }
+              else {
+                (collection as { update: (frameState: unknown) => void }).update(frameState);
+                updatedCollections.add(collection);
+              }
+            }, { turn: resourceTurn, deferred: this.idlePreparationsEnabled });
+            // Subtract only fully cold admissions. Ready draws and opaque
+            // Buffer collection updates stay in the mandatory estimate.
+            const target = upload.staged ? (collection as CesiumPrimitiveCollection).get(upload.index) : collection;
+            if (!drawablePrimitives(target) && (upload.staged || upload.drawable.size === 0))
+              measurePreparation(update);
+            else
+              update();
             const submitted = new Set<Primitive>();
             for (const command of frameState.commandList?.slice(commandCount) ?? []) {
               if (command.owner) {
@@ -670,7 +983,8 @@ export class SceneCollections {
         } while (upload.staged && upload.index < (collection as CesiumPrimitiveCollection).length);
         if (!readyPrimitives(collection)) {
           upload.index = 0;
-          this._requestRender();
+          if (runnablePrimitives(collection))
+            this._requestFirstUpdateContinuation();
           continue;
         }
         // The tileset marked its memory budget dirty while this first-update
@@ -682,7 +996,7 @@ export class SceneCollections {
         const replacement = this._replacementForCollection.get(collection);
         if (replacement) {
           replacement.waiting.delete(collection);
-          this._finishReplacement(replacement, readyToDraw, budget);
+          measurePreparation(() => this._finishReplacement(replacement, readyToDraw, budget));
         }
       }
     }
@@ -720,7 +1034,12 @@ export class SceneCollections {
     }
     this._forgetReplacement(replacement);
     for (const next of replacement.next) {
-      next.show = replacement.visible;
+      if (replacement.kind === 'vector') {
+        this.setVectorVisibility(next, replacement.visible && !allDrawLayersHidden(next, this._hiddenLayers.get(replacement.tileId)));
+      }
+      else {
+        next.show = replacement.visible;
+      }
       readyToDraw?.add(next);
     }
     for (const old of replacement.old) {

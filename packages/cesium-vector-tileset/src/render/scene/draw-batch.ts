@@ -5,6 +5,7 @@ import { rememberPrimitiveBytes } from './resource-memory';
 /** Cesium commands keep their owner across primitive updates and module replacement. */
 const batchKey = Symbol.for('cesium-vector-tileset.draw-batch');
 const linePaintKey = Symbol.for('cesium-vector-tileset.line-paint');
+const lineExtentKey = Symbol.for('cesium-vector-tileset.uniform-line-extent');
 const layerOwners = new WeakMap<object, ReadonlySet<string>>();
 const NO_LAYERS: ReadonlySet<string> = new Set();
 
@@ -18,9 +19,18 @@ export interface LinePaintUniforms {
   width: number;
   color: Color;
   offset: number;
+  /** Mercator meters per CSS pixel, independent of source tile LOD. */
+  metersPerPixel: number;
   widthUniform: () => number;
   colorUniform: () => Color;
   offsetUniform: () => number;
+  metersPerPixelUniform: () => number;
+}
+
+/** Proven construction/upload factors; absence includes all instance paint. */
+export interface UniformLineExtent {
+  widthFactor: number;
+  miterLimit: number;
 }
 
 export function registerDrawBatch(owner: object, batch: DrawBatch): void {
@@ -55,8 +65,19 @@ export function drawBatchForOwner(owner: object | undefined): DrawBatch | undefi
   return owner && (owner as Record<symbol, DrawBatch | undefined>)[batchKey];
 }
 
-export function registerLinePaint(owner: object, uniforms: LinePaintUniforms): void {
+export function registerLinePaint(owner: object, uniforms: LinePaintUniforms, extent?: UniformLineExtent): void {
   (owner as Record<symbol, LinePaintUniforms>)[linePaintKey] = uniforms;
+  registerUniformLineExtent(owner, extent);
+}
+
+export function registerUniformLineExtent(owner: object, extent: UniformLineExtent | undefined): void {
+  if (extent)
+    (owner as Record<symbol, UniformLineExtent>)[lineExtentKey] = extent;
+  else delete (owner as Record<symbol, UniformLineExtent>)[lineExtentKey];
+}
+
+export function uniformLineExtentForOwner(owner: object | undefined): UniformLineExtent | undefined {
+  return owner && (owner as Record<symbol, UniformLineExtent | undefined>)[lineExtentKey];
 }
 
 export function linePaintForOwner(owner: object | undefined): LinePaintUniforms | undefined {

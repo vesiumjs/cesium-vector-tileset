@@ -8,7 +8,7 @@ import type { SymbolTileRenderer } from '../symbol/symbol-renderer';
 import type { VectorPaintFrame } from '../vector/vector-paint-updater';
 import type { VectorTileRenderer } from '../vector/vector-tile-renderer';
 import type { SceneCollection, SceneCollections } from './scene-collections';
-import type { TilePublishQueue, TilePublishResult } from './tile-publish-queue';
+import type { TilePublicationProgress, TilePublishQueue, TilePublishResult } from './tile-publish-queue';
 import { compareTileId } from '../../tile/tile-id';
 import { allDrawLayersHidden, drawLayersForOwner } from './draw-batch';
 import { GpuMemoryBudget } from './gpu-memory-budget';
@@ -34,7 +34,10 @@ interface SceneTile {
   featureIndex?: FeatureIndex;
   previousGenerationId?: number;
   previousFeatureIndex?: FeatureIndex;
-  publicationStage?: TilePublishResult['stage'];
+  publication?: TilePublicationProgress;
+  publicationBuckets?: Tile['buckets'];
+  publicationStyleRevision?: number;
+  publicationMode?: SceneMode;
   /** A completed generation actually published drawable symbol resources. */
   hasSymbols?: boolean;
 }
@@ -82,6 +85,9 @@ export class TileResidency {
   private _sourceReplacement?: SourceReplacement;
   private readonly _tiles = new Map<string, SceneTile>();
   private readonly _pendingFeatureIndexRelease = new Set<string>();
+  /** Symbols can keep their current coverage after the surface stage retires. */
+  private readonly _pendingSymbolRetirements = new Map<string, number>();
+  private _visibleSymbolTiles = new Set<string>();
   private _drawRanks?: ReadonlyMap<string, number>;
   private _visibility = {
     hiddenLayers: new Map<string, ReadonlySet<string>>(),
@@ -115,10 +121,13 @@ export class TileResidency {
     this._sourceReplacement = undefined;
     this._tiles.clear();
     this._pendingFeatureIndexRelease.clear();
+    this._pendingSymbolRetirements.clear();
+    this._visibleSymbolTiles.clear();
     this._drawRanks = undefined;
   }
 
   resetSourceState(): void {
+    this._pendingSymbolRetirements.clear();
     for (const tileId of this._visibility.hiddenLayers.keys()) {
       this._setHiddenSurfaceLayers(tileId, undefined);
     }
@@ -215,6 +224,8 @@ export class TileResidency {
     this._sceneCollections.applyRasterUpdate(this._rasterRenderer.removeTile(tileId));
     this._tiles.delete(tileId);
     this._pendingFeatureIndexRelease.delete(tileId);
+    this._pendingSymbolRetirements.delete(tileId);
+    this._visibleSymbolTiles.delete(tileId);
     this._visibility.hiddenSymbols.delete(tileId);
     this._visibility.hiddenLayers.delete(tileId);
     this._sources.delete(sourceId);
@@ -223,6 +234,7 @@ export class TileResidency {
 
   published(sourceId: string, tileID: OverscaledTileID): void {
     const tileId = renderTileId(sourceId, tileID.key);
+    this._pendingSymbolRetirements.delete(tileId);
     if (this._sourceReplacement?.staged.has(sourceId))
       this._sourceReplacement.hiddenTiles.add(tileId);
     const previous = this._tiles.get(tileId);
@@ -237,7 +249,10 @@ export class TileResidency {
       featureIndex: previous?.featureIndex,
       previousGenerationId: previous?.previousGenerationId,
       previousFeatureIndex: previous?.previousFeatureIndex,
-      publicationStage: previous?.publicationStage,
+      publication: previous?.publication,
+      publicationBuckets: previous?.publicationBuckets,
+      publicationStyleRevision: previous?.publicationStyleRevision,
+      publicationMode: previous?.publicationMode,
       hasSymbols: previous?.hasSymbols,
     });
   }
@@ -256,20 +271,27 @@ export class TileResidency {
     this.published(result.sourceId, result.tileID);
     this._sources.get(result.sourceId)?.hydrated.add(result.tileID.key);
     this._sceneCollections.applyPublication(result);
+    // A prepared replacement must never draw just because its opacity upload
+    // finished. The complete visible-owner layout decides its activation.
+    if (!this._visibleSymbolTiles.has(result.tileId))
+      this._setTileSymbolVisible(result.tileId, false);
     this._setFeatureIndex(result);
   }
 
   private _setFeatureIndex(result: TilePublishResult): void {
     const tile = this._tiles.get(result.tileId);
     if (tile) {
-      tile.publicationStage = result.stage;
-      if (result.stage === 'complete') {
+      tile.publication = { ...result.progress };
+      tile.publicationBuckets = result.buckets;
+      tile.publicationStyleRevision = result.styleRevision;
+      tile.publicationMode = result.mode;
+      if (result.progress.symbol) {
         tile.hasSymbols = this._symbolRenderer.getTileCollections(result.tileId).length > 0;
       }
       if (result.retainPreviousGeneration || this._sceneCollections.hasPendingReplacement(result.tileId)) {
         // A vector stage may be superseded before symbols finish. Keep the
         // oldest generation, which is the one still visible in the scene.
-        if (tile.previousGenerationId === undefined) {
+        if (tile.generationId !== result.generationId && tile.previousGenerationId === undefined) {
           tile.previousGenerationId = tile.generationId;
           tile.previousFeatureIndex = tile.featureIndex;
         }
@@ -455,14 +477,16 @@ export class TileResidency {
 
   private _syncCollections(sourceId: string, renderableIds: readonly string[], held: Set<string>, mode: SceneMode): void {
     const inView = new Set(renderableIds.map(tileId => renderTileId(sourceId, tileId)));
+    const replacements = renderableIds.flatMap(key => this._tiles.get(renderTileId(sourceId, key))?.tileID ?? []);
     for (const [tileId, tile] of this._tiles) {
       if (tile.sourceId !== sourceId) {
         continue;
       }
-      this._symbolRenderer.setTilePlacementEligible(tileId, !held.has(tileId));
+      this._symbolRenderer.setTilePlacementEligible(tileId, inView.has(tileId) && !held.has(tileId));
       if (!tile.live || inView.has(tileId) || held.has(tileId)) {
         continue;
       }
+      this._symbolRenderer.setTilePlacementEligible(tileId, false);
       tile.live = false;
       this._drawRanks = undefined;
       const collections = this._vectorRenderer.getTileCollections(tileId);
@@ -476,7 +500,17 @@ export class TileResidency {
       }
       this._sceneCollections.applyRasterUpdate(this._rasterRenderer.removeTile(tileId));
       this._sceneCollections.applyPatternUpdate(this._patternRenderer.retireTile(tileId));
-      const { retired, fading, evicted } = this._symbolRenderer.retireTile(tileId, this._fadeDuration());
+      const replaced = replacements.some(id => id.isChildOf(tile.tileID) || tile.tileID.isChildOf(id));
+      // Replacement owns the same region; fading both generations doubles
+      // its labels. A pan away can still fade its outgoing symbols normally.
+      this._pendingSymbolRetirements.set(tileId, replaced ? 0 : this._fadeDuration());
+    }
+    this._tilePublishQueue.cancelPatternRefreshesOutside(sourceId, new Set([...inView, ...held]));
+  }
+
+  private _retireSymbols(): void {
+    for (const [tileId, fadeDuration] of this._pendingSymbolRetirements) {
+      const { retired, fading, evicted } = this._symbolRenderer.retireTile(tileId, fadeDuration);
       for (const collection of retired) {
         collection.show = false;
         this._sceneCollections.detach(collection);
@@ -486,7 +520,7 @@ export class TileResidency {
       }
       this._sceneCollections.queueSymbolRemoval(evicted);
     }
-    this._tilePublishQueue.cancelPatternRefreshesOutside(sourceId, new Set([...inView, ...held]));
+    this._pendingSymbolRetirements.clear();
   }
 
   get hiddenSurfaceLayers(): ReadonlyMap<string, ReadonlySet<string>> {
@@ -508,7 +542,7 @@ export class TileResidency {
 
   private _setHiddenSurfaceLayers(tileId: string, hidden: ReadonlySet<string> | undefined): void {
     this._vectorRenderer.someTileCollection(tileId, (collection) => {
-      collection.show = !allDrawLayersHidden(collection, hidden);
+      this._sceneCollections.setVectorVisibility(collection, !allDrawLayersHidden(collection, hidden));
       return false;
     });
     let hasPattern = false;
@@ -520,6 +554,7 @@ export class TileResidency {
   }
 
   private _setTileSymbolVisible(tileId: string, visible: boolean): void {
+    this._symbolRenderer.setTilePlacementVisible(tileId, visible);
     for (const collection of this._symbolRenderer.getTileCollections(tileId)) {
       collection.show = visible;
     }
@@ -613,9 +648,6 @@ export class TileResidency {
           hideLayers(tileId, ownedLayers);
         }
         for (const { tileId: replacementId } of covering) {
-          if (sync.held.has(tileId)) {
-            hiddenSymbols.add(replacementId);
-          }
           if (hasSurfaces && !replaceSurfaces) {
             hideLayers(replacementId, ownedLayers);
           }
@@ -630,24 +662,68 @@ export class TileResidency {
           }
         }
       }
+      // Surface holds can come from levels below a symbol layer's minzoom.
+      // Only a drawable symbol generation can mask prospective symbol owners.
+      const symbolGates = [...sync.held].flatMap((tileId) => {
+        const tile = this._tiles.get(tileId);
+        return tile?.live && this._hasDrawableSymbols(tileId) ? [{ tileId, tileID: tile.tileID }] : [];
+      }).sort((a, b) => a.tileID.overscaledZ - b.tileID.overscaledZ);
+      for (const { tileId, tileID } of symbolGates) {
+        if (hiddenSymbols.has(tileId)) {
+          continue;
+        }
+        for (const replacement of replacements) {
+          if (replacement.tileID.isChildOf(tileID) || tileID.isChildOf(replacement.tileID)) {
+            hiddenSymbols.add(replacement.tileId);
+          }
+        }
+        // A masked finer hold cannot reverse the same coverage decision and
+        // hide its ancestor, including finer holds outside the renderable set.
+        for (const gate of symbolGates) {
+          if (gate.tileID.isChildOf(tileID)) {
+            hiddenSymbols.add(gate.tileId);
+          }
+        }
+      }
     }
     for (const tileId of this._visibility.hiddenLayers.keys()) {
       if (!hiddenLayers.has(tileId)) {
         this._setHiddenSurfaceLayers(tileId, undefined);
       }
     }
-    for (const tileId of this._visibility.hiddenSymbols) {
-      if (!hiddenSymbols.has(tileId)) {
-        this._setTileSymbolVisible(tileId, true);
-      }
-    }
     for (const [tileId, layers] of hiddenLayers) {
       this._setHiddenSurfaceLayers(tileId, layers);
     }
-    for (const tileId of hiddenSymbols) {
-      this._setTileSymbolVisible(tileId, false);
+    const desiredSymbols = new Set([...this._tiles].flatMap(([tileId, tile]) =>
+      tile.live && !hiddenSymbols.has(tileId) && !this.hiddenStyleTiles.has(tileId)
+      && this._symbolRenderer.getTileCollections(tileId).length > 0
+        ? [tileId]
+        : []));
+    const ownersChanged = !sameStringSet(desiredSymbols, this._visibleSymbolTiles);
+    const symbolsUploaded = [...desiredSymbols].every(tileId =>
+      !this._symbolRenderer.getTileCollections(tileId).some(collection => this._sceneCollections.hasPendingFirstUpdate(collection)));
+    if (symbolsUploaded && this._symbolRenderer.prepareVisiblePlacement(desiredSymbols)) {
+      this._retireSymbols();
+      for (const tileId of this._visibleSymbolTiles) {
+        if (!desiredSymbols.has(tileId))
+          this._setTileSymbolVisible(tileId, false);
+      }
+      for (const tileId of desiredSymbols)
+        this._setTileSymbolVisible(tileId, true);
+      this._visibleSymbolTiles = desiredSymbols;
+      changed = this._symbolRenderer.activatePreparedPlacement() || ownersChanged || changed;
     }
-    const visibility = { hiddenLayers, hiddenSymbols };
+    else {
+      // Surfaces can already hand off. Keep the old complete symbol layout
+      // while the prospective global owners (including other held regions)
+      // prepare their own collision result. A recency-only layout wait uses
+      // the tileset's deadline wake instead of continuously requesting frames.
+      changed = !symbolsUploaded || this._symbolRenderer.hasRunnableWork || changed;
+    }
+    const committedHiddenSymbols = new Set([...this._symbolRenderer.tileIds].filter(id => !this._visibleSymbolTiles.has(id)));
+    for (const tileId of committedHiddenSymbols)
+      this._setTileSymbolVisible(tileId, false);
+    const visibility = { hiddenLayers, hiddenSymbols: committedHiddenSymbols };
     this._sceneCollections.syncTileVisibility(visibility, this._visibility);
     this._visibility = visibility;
     return changed;
@@ -669,7 +745,13 @@ export class TileResidency {
     return symbols.length > 0
       ? this._symbolRenderer.isTilePlaced(tileId)
       && !symbols.some(collection => this._sceneCollections.hasPendingFirstUpdate(collection))
-      : !this._tilePublishQueue.has(tileId);
+      : !this._tilePublishQueue.hasPendingSymbols(tileId);
+  }
+
+  private _hasDrawableSymbols(tileId: string): boolean {
+    return this._symbolRenderer.hasTileVisibleSymbols(tileId)
+      && this._sceneCollections.someDrawableCollection(tileId, 'symbol', predicate =>
+        this._symbolRenderer.getTileCollections(tileId).some(predicate), () => true);
   }
 
   /**
@@ -770,7 +852,12 @@ export class TileResidency {
       // paths on the next _syncPatternTiles.
       let symbolStale = false;
       let restoredOther = false;
-      const cancelled = this._symbolRenderer.cancelFade(tileId, tile.buckets);
+      const published = this._tiles.get(tileId);
+      const matchingPublication = !!published?.publication
+        && published.publicationBuckets === tile.buckets
+        && published.publicationStyleRevision === this._paintFrame().styleRevision
+        && published.publicationMode === mode;
+      const cancelled = matchingPublication ? this._symbolRenderer.cancelFade(tileId, tile.buckets) : undefined;
       restoredOther = cancelled?.live ?? false;
       if (cancelled && !cancelled.live) {
         for (const collection of cancelled.collections) {
@@ -779,15 +866,12 @@ export class TileResidency {
         this._sceneCollections.queueSymbolRemoval(cancelled.collections);
         symbolStale = true;
       }
-      const restoredSymbol = this._symbolRenderer.restoreTile(tileId, tile.buckets);
+      const restoredSymbol = matchingPublication ? this._symbolRenderer.restoreTile(tileId, tile.buckets) : undefined;
       if (restoredSymbol) {
         restoredOther = true;
-        for (const collection of restoredSymbol) {
-          collection.show = true;
-          this._sceneCollections.add(collection);
-        }
+        this._sceneCollections.restoreSymbols(restoredSymbol);
       }
-      restoredOther = this._patternRenderer.restoreTile(tileId) || restoredOther;
+      restoredOther = (matchingPublication && this._patternRenderer.restoreTile(tileId)) || restoredOther;
       // A tile retired by _syncCollections keeps its collections cached; re-
       // attaching them skips the publish pipeline entirely (no ECEF, no style
       // evaluation, no collection build). Old-mode live geometry remains
@@ -796,7 +880,7 @@ export class TileResidency {
         ? this._vectorRenderer.tileBuildLayers(tileId)
         : undefined;
       const hasVector = build?.mode === mode && !build.frozen;
-      const restoredVector = !symbolStale && (hasVector || this._vectorRenderer.restoreTile(tileId, mode));
+      const restoredVector = matchingPublication && !symbolStale && (hasVector || this._vectorRenderer.restoreTile(tileId, mode));
       if (restoredVector) {
         const paint = hasVector ? { replacements: [], ready: true } : this._vectorRenderer.refreshTilePaint(tileId, this._paintFrame());
         for (const { old, replacement } of paint.replacements) {
@@ -807,28 +891,25 @@ export class TileResidency {
           this._sceneCollections.restoreWhenReady(tileId, collections);
         }
         else {
-          for (const collection of collections) {
-            collection.show = true;
-            this._sceneCollections.add(collection);
-          }
+          this._sceneCollections.restoreVector(collections);
         }
         hydrated.add(tileKey);
         this.published(sourceId, tile.tileID);
         const record = this._tiles.get(tileId)!;
         // Symbol resources retire independently of vector geometry. A cache
         // miss invalidates only a detail stage that actually drew symbols.
-        if (record.publicationStage === 'complete' && record.hasSymbols
+        if (record.publication?.symbol && record.hasSymbols
           && this._symbolRenderer.getTileCollections(tileId).length === 0) {
-          record.publicationStage = 'vector';
+          record.publication.symbol = false;
         }
         // Cached vector completion says nothing about its later publication
         // stages. Resume cancelled details within the same generation;
         // only an unfinished vector stage needs full conversion again.
-        if (record.publicationStage === 'surface') {
-          this._tilePublishQueue.enqueue(sourceId, tile);
+        if (record.publication?.vector !== 'complete') {
+          this._tilePublishQueue.enqueueDetails(sourceId, tile, record.generationId!, record.publication!);
         }
-        else if (record.publicationStage === 'vector') {
-          this._tilePublishQueue.enqueueDetails(sourceId, tile, record.generationId!);
+        else if (!record.publication.pattern || !record.publication.symbol) {
+          this._tilePublishQueue.enqueueDetails(sourceId, tile, record.generationId!, record.publication);
         }
         continue;
       }
@@ -837,7 +918,15 @@ export class TileResidency {
       // instead: TilePublishQueue spreads the builds across frames within
       // its per-frame budget. Marking hydrated now is safe — the diff above
       // re-queues a tile whose key leaves the renderable set before publish.
-      this._tilePublishQueue.enqueue(sourceId, tile);
+      if (matchingPublication && published!.generationId !== undefined) {
+        const progress = { ...published!.publication!, vector: 'pending' as const };
+        if (published!.hasSymbols && this._symbolRenderer.getTileCollections(tileId).length === 0)
+          progress.symbol = false;
+        this._tilePublishQueue.enqueueDetails(sourceId, tile, published!.generationId, progress);
+      }
+      else {
+        this._tilePublishQueue.enqueue(sourceId, tile);
+      }
       if (restoredOther) {
         this.published(sourceId, tile.tileID);
       }
