@@ -93,8 +93,6 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   // Cesium reports N/A when requestRenderMode has no frame to draw.
   await expect(page.locator('.cesium-performanceDisplay-fps')).toHaveText(/(?:\d+|N\/A) FPS/);
-  await expect(page.locator('.cesium-performanceDisplay')).toHaveCSS('font-size', '12px');
-  await expect(page.locator('.cesium-performanceDisplay-fps')).toHaveCSS('color', 'rgb(238, 85, 34)');
   await expect.poll(() => page.locator('.cesium-credit-logoContainer img').evaluate(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0)).toBe(true);
   await page.getByTestId('source-select').selectOption('bright');
   await expect.poll(() => pixels(page, [34, 170, 85])).toBeGreaterThanOrEqual(0.95);

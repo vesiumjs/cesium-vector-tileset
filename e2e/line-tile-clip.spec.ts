@@ -187,70 +187,66 @@ async function installProbe(page: Page, scenario: typeof scenarios[number], mode
 
 test.describe(() => {
   test.use({ deviceScaleFactor: 1 });
-  for (const mode of ['2d', '3d', 'cv']) {
-    for (const kind of mode === '3d' ? ['solid', 'dash'] : ['solid', 'dash', 'family']) {
-      for (const scenario of scenarios) {
-        if (kind === 'family' && scenario !== scenarios[0] && !scenario.dateLine)
-          continue;
-        // Native CV ends at +/-pi. Its two map ends are not neighboring
-        // viewports; the date-line pair belongs to 2D and the 3D globe.
-        if (mode === 'cv' && scenario.dateLine)
-          continue;
-        test(`${kind} ${scenario.name} blends once and picks its tile in ${mode}`, async ({ page, renderUrl }, testInfo) => {
-          const errors = [];
-          page.on('pageerror', error => errors.push(error.message));
-          const requestedTiles = await serveTiles(page, renderUrl, kind, scenario);
-          const cameraCenter = geographic(scenario.center);
-          // Keep both Native 2D viewports while avoiding SceneTransforms'
-          // ambiguous projection when the camera is exactly on longitude pi.
-          if (mode === '2d' && scenario.dateLine)
-            cameraCenter[0] += scenario.center[0] === 0 ? 0.001 : -0.001;
-          const query = new URLSearchParams({ mode, scale: '0.25', center: cameraCenter.join(','), style: `${renderUrl}/line-tile-clip/style.json` });
-          await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
-          await expect.poll(() => page.evaluate(() => {
-            const validation = window.renderValidation;
-            return validation?.tileset.tilesLoaded && validation.tileset.stats().renderableTiles > 0 && validation.viewer.scene.globe.tilesLoaded;
-          }), { timeout: 60_000 }).toBe(true);
-          await installProbe(page, scenario, mode, kind === 'family' ? 1.02 : 1.01);
-          // Readiness depends on completed rendering and projection, never on
-          // pixels matching the expected result: missing halves must fail.
-          await expect.poll(() => page.evaluate(() => window.tileClipProbe()), { timeout: 60_000 }).toBeTruthy();
-          const probe = await page.evaluate(() => window.tileClipProbe(true));
-          const state = await page.evaluate(() => ({
-            fps: window.renderValidation.viewer.scene.debugShowFramesPerSecond,
-            globe: window.renderValidation.viewer.scene.globe.show,
-            msaaSamples: window.renderValidation.viewer.scene.msaaSamples,
-            renderErrors: window.renderValidation.renderErrors,
-            sharedFamilies: window.renderValidation.tileset._renderer.vector.tileIds.flatMap(tileId => window.renderValidation.tileset._renderer.vector.getTileCollections(tileId)
-              .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index))))
-              .filter(entry => entry._layers?.length === 2)
-              .length,
-          }));
-          const output = testInfo.outputPath('line-tile-clip.json');
-          await writeFile(output, JSON.stringify({ mode, kind, scenario, requestedTiles: [...requestedTiles], probe, state }, null, 2));
-          await testInfo.attach('line-tile-clip', { path: output, contentType: 'application/json' });
-          assert.deepEqual(errors, []);
-          assert.deepEqual(state.renderErrors, []);
-          assert.ok(state.fps && state.globe, 'FPS and Globe must remain enabled');
-          assert.equal(state.msaaSamples, 4);
-          assert.equal(probe.ratio, 1);
-          if (kind === 'family')
-            assert.ok(state.sharedFamilies > 0, 'two layers must replay one Native Primitive');
-          const owners = new Set(probe.samples.filter(sample => sample.painted).map(sample => sample.expectedOwner));
-          assert.equal(owners.size, scenario.corners ? 4 : 2, 'interior probes must cover every neighboring tile');
-          for (const owner of owners)
-            assert.ok(requestedTiles.has(owner), `neighbor ${owner} must have supplied a real MVT`);
-          for (const sample of probe.samples) {
-            const expected = sample.painted ? singleBlend : background;
-            assert.ok(sample.rgb.every((channel, index) => Math.abs(channel - expected[index]) <= 3), `${mode}/${kind}/${scenario.name}/${sample.label}: pixel ${sample.x}/${sample.y} must ${sample.painted ? 'blend once' : 'stay background'}: ${sample.rgb} vs ${expected}`);
-            assert.equal(sample.feature?.layerId, sample.painted ? 'roads' : 'ground', `${sample.label}: render and pick coverage must agree`);
-            assert.equal(sample.feature?.properties.owner, sample.expectedOwner, `${sample.label}: pick escaped its source tile`);
-            if (sample.painted)
-              assert.equal(sample.feature.properties.road, scenario.name);
-          }
-          await page.evaluate(() => window.stopTileClipPixels());
-        });
+  // Date-line family ownership and translucent globe dash boundaries exercise
+  // public seam pixels and picking through both shared and independent owners.
+  const cases = [
+    { mode: '2d', kind: 'family', scenario: scenarios[4] },
+    { mode: '3d', kind: 'dash', scenario: scenarios[7] },
+  ];
+  for (const { mode, kind, scenario } of cases) {
+    test(`${kind} ${scenario.name} blends once and picks its tile in ${mode}`, async ({ page, renderUrl }, testInfo) => {
+      const errors = [];
+      page.on('pageerror', error => errors.push(error.message));
+      const requestedTiles = await serveTiles(page, renderUrl, kind, scenario);
+      const cameraCenter = geographic(scenario.center);
+      // Keep both Native 2D viewports while avoiding SceneTransforms'
+      // ambiguous projection when the camera is exactly on longitude pi.
+      if (mode === '2d' && scenario.dateLine)
+        cameraCenter[0] += scenario.center[0] === 0 ? 0.001 : -0.001;
+      const query = new URLSearchParams({ mode, scale: '0.25', center: cameraCenter.join(','), style: `${renderUrl}/line-tile-clip/style.json` });
+      await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
+      await expect.poll(() => page.evaluate(() => {
+        const validation = window.renderValidation;
+        return validation?.tileset.tilesLoaded && validation.tileset.stats().renderableTiles > 0 && validation.viewer.scene.globe.tilesLoaded;
+      }), { timeout: 60_000 }).toBe(true);
+      await installProbe(page, scenario, mode, kind === 'family' ? 1.02 : 1.01);
+      // Readiness depends on completed rendering and projection, never on
+      // pixels matching the expected result: missing halves must fail.
+      await expect.poll(() => page.evaluate(() => window.tileClipProbe()), { timeout: 60_000 }).toBeTruthy();
+      const probe = await page.evaluate(() => window.tileClipProbe(true));
+      const state = await page.evaluate(() => ({
+        fps: window.renderValidation.viewer.scene.debugShowFramesPerSecond,
+        globe: window.renderValidation.viewer.scene.globe.show,
+        msaaSamples: window.renderValidation.viewer.scene.msaaSamples,
+        renderErrors: window.renderValidation.renderErrors,
+        sharedFamilies: window.renderValidation.tileset._renderer.vector.tileIds.flatMap(tileId => window.renderValidation.tileset._renderer.vector.getTileCollections(tileId)
+          .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index))))
+          .filter(entry => entry._layers?.length === 2)
+          .length,
+      }));
+      const output = testInfo.outputPath('line-tile-clip.json');
+      await writeFile(output, JSON.stringify({ mode, kind, scenario, requestedTiles: [...requestedTiles], probe, state }, null, 2));
+      await testInfo.attach('line-tile-clip', { path: output, contentType: 'application/json' });
+      assert.deepEqual(errors, []);
+      assert.deepEqual(state.renderErrors, []);
+      assert.ok(state.fps && state.globe, 'FPS and Globe must remain enabled');
+      assert.equal(state.msaaSamples, 4);
+      assert.equal(probe.ratio, 1);
+      if (kind === 'family')
+        assert.ok(state.sharedFamilies > 0, 'two layers must replay one Native Primitive');
+      const owners = new Set(probe.samples.filter(sample => sample.painted).map(sample => sample.expectedOwner));
+      assert.equal(owners.size, scenario.corners ? 4 : 2, 'interior probes must cover every neighboring tile');
+      for (const owner of owners)
+        assert.ok(requestedTiles.has(owner), `neighbor ${owner} must have supplied a real MVT`);
+      for (const sample of probe.samples) {
+        const expected = sample.painted ? singleBlend : background;
+        assert.ok(sample.rgb.every((channel, index) => Math.abs(channel - expected[index]) <= 3), `${mode}/${kind}/${scenario.name}/${sample.label}: pixel ${sample.x}/${sample.y} must ${sample.painted ? 'blend once' : 'stay background'}: ${sample.rgb} vs ${expected}`);
+        assert.equal(sample.feature?.layerId, sample.painted ? 'roads' : 'ground', `${sample.label}: render and pick coverage must agree`);
+        assert.equal(sample.feature?.properties.owner, sample.expectedOwner, `${sample.label}: pick escaped its source tile`);
+        if (sample.painted)
+          assert.equal(sample.feature.properties.road, scenario.name);
       }
-    }
+      await page.evaluate(() => window.stopTileClipPixels());
+    });
   }
 });

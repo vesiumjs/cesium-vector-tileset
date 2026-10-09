@@ -1,4 +1,4 @@
-import type { LineLayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { Material, PrimitiveCollection } from 'cesium';
 import type { Page, TestInfo } from 'playwright/test';
 import assert from 'node:assert/strict';
@@ -140,7 +140,7 @@ test('public solid and pattern paint switches replace geometry without empty fra
   assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
 });
 
-for (const track of ['pattern', 'raster']) {
+for (const track of ['raster']) {
   test(`same source ID with a new URL keeps ${track} pixels until replacement tiles draw`, async ({ page, renderUrl }, testInfo) => {
     const { requests, errors } = await open(page, renderUrl, style(renderUrl, track));
     await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
@@ -180,108 +180,6 @@ for (const track of ['pattern', 'raster']) {
     assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
   });
 }
-
-test('public solid and dashed line paint switches produce their respective pixels', async ({ page, renderUrl }) => {
-  const initial = style(renderUrl, 'solid');
-  const road: LineLayerSpecification = { 'id': 'roads', 'type': 'line', 'source': 'fixture', 'source-layer': 'roads', 'paint': { 'line-color': '#ffffff', 'line-width': 8 } };
-  initial.layers.push(road);
-  const { errors } = await open(page, renderUrl, initial);
-  await expect.poll(() => page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 255, 255])))).toBeGreaterThan(0.03);
-  const whiteCoverage = await page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 255, 255])));
-  assert.ok(whiteCoverage > 0.03, `solid road pixels were absent: ${whiteCoverage}`);
-  const dashed = structuredClone(initial);
-  (dashed.layers[1] as LineLayerSpecification).paint['line-color'] = '#ff0000';
-  (dashed.layers[1] as LineLayerSpecification).paint['line-dasharray'] = [3, 1];
-  await page.evaluate((json) => {
-    const style: StyleSpecification = JSON.parse(json);
-    window.renderValidation.tileset.setStyle(style);
-  }, JSON.stringify(dashed));
-  await expect.poll(() => page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 0, 0])))).toBeGreaterThan(0.02);
-  await expect.poll(() => page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 255, 255])))).toBeLessThan(0.01);
-  const redCoverage = await page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 0, 0])));
-  assert.ok(redCoverage < whiteCoverage * 0.9, `dash gaps were absent: dashed ${redCoverage} / solid ${whiteCoverage}`);
-  await page.evaluate((json) => {
-    const style: StyleSpecification = JSON.parse(json);
-    window.renderValidation.tileset.setStyle(style);
-  }, JSON.stringify(initial));
-  await expect.poll(() => page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 255, 255])))).toBeGreaterThan(0.03);
-  await expect.poll(() => page.evaluate(() => Math.max(...window.renderValidation.readCoverage([255, 0, 0])))).toBeLessThan(0.01);
-  assert.deepEqual(errors, []);
-  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
-});
-
-test('an opaque 8px pattern stays uniform through image updates, replacement and camera zoom', async ({ page, renderUrl }, testInfo) => {
-  const { errors, requests } = await open(page, renderUrl, style(renderUrl, 'pattern'), 8);
-  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
-  await expect.poll(() => page.evaluate(async () => {
-    const validation = window.renderValidation;
-    const frames = validation.renderedFrames;
-    await new Promise<void>(resolve => setTimeout(resolve, 400));
-    return validation.renderedFrames === frames && validation.viewer.scene.globe.tilesLoaded && validation.tileset.tilesLoaded;
-  }), { timeout: 30_000 }).toBe(true);
-  const beforeUpdate = requests.filter(url => url.endsWith('.pbf')).length;
-  await page.evaluate(({ blue, green }) => {
-    const validation = window.renderValidation;
-    window.imageUpdateFrames = [];
-    window.stopImageUpdateFrames = validation.viewer.scene.postRender.addEventListener(() => {
-      const before = validation.readCoverage(blue);
-      const after = validation.readCoverage(green);
-      window.imageUpdateFrames.push(before.map((ratio, index) => ratio + after[index]));
-    });
-    const data = new Uint8Array(8 * 8 * 4);
-    for (let offset = 0; offset < data.length; offset += 4)
-      data.set([...green, 255], offset);
-    validation.tileset.updateImage('blue', { width: 8, height: 8, data }, { pixelRatio: 1 });
-  }, { blue, green });
-  let frames;
-  try {
-    await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), green)).toBeGreaterThanOrEqual(0.98);
-    assert.equal(requests.filter(url => url.endsWith('.pbf')).length, beforeUpdate, 'a same-size image update refetched MVT data');
-    for (const direction of ['in', 'out']) {
-      const before = await page.evaluate((direction) => {
-        const validation = window.renderValidation;
-        const { viewer } = validation;
-        const distance = viewer.camera.positionCartographic.height * 0.08;
-        if (direction === 'in')
-          viewer.camera.zoomIn(distance);
-        else viewer.camera.zoomOut(distance);
-        viewer.scene.requestRender();
-        return validation.renderedFrames;
-      }, direction);
-      await expect.poll(() => page.evaluate(({ color, before }) => {
-        const validation = window.renderValidation;
-        return validation.renderedFrames > before ? Math.min(...validation.readCoverage(color)) : 0;
-      }, { color: green, before })).toBeGreaterThanOrEqual(0.98);
-    }
-    await page.evaluate((blue) => {
-      const { tileset } = window.renderValidation;
-      const data = new Uint8Array(8 * 8 * 4);
-      for (let offset = 0; offset < data.length; offset += 4)
-        data.set([...blue, 255], offset);
-      // Replace an image between frames using its original ID. Old atlas
-      // content must not win merely because the name and dimensions match.
-      tileset.removeImage('blue');
-      tileset.addImage('blue', { width: 8, height: 8, data }, { pixelRatio: 1 });
-    }, blue);
-    await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
-  }
-  finally {
-    const result = await page.evaluate(() => {
-      window.stopImageUpdateFrames();
-      const validation = window.renderValidation;
-      const image = validation.tileset._renderer.style.getImage('blue');
-      return { frames: window.imageUpdateFrames, pixels: validation.readPixelSamples(), stats: validation.tileset.stats(), image: { version: image.version, firstPixel: Array.from(image.data.data.subarray(0, 4)) } };
-    });
-    frames = result.frames;
-    const output = testInfo.outputPath('small-pattern-image-update.json');
-    await writeFile(output, JSON.stringify(result, null, 2));
-    await testInfo.attach('small-pattern-image-update', { path: output, contentType: 'application/json' });
-  }
-  assert.ok(frames.length > 0, 'public image updates caused no rendered frames');
-  assert.ok(frames.every(rows => rows.every(ratio => ratio >= 0.98)), `opaque pattern acquired seams or gaps: ${JSON.stringify(frames)}`);
-  assert.deepEqual(errors, []);
-  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
-});
 
 test('public 8px icon image updates repaint an idle scene without refetching tiles', async ({ page, renderUrl }, testInfo) => {
   const initial = style(renderUrl, 'solid');

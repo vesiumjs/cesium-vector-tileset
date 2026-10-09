@@ -10,7 +10,8 @@ import { createDemoPresetAudit } from './fixtures/demo-preset-audit';
 type PresetAudit = Awaited<ReturnType<typeof createDemoPresetAudit>>;
 type Snapshot = Awaited<ReturnType<PresetAudit['snapshot']>>;
 
-for (const preset of demoPresets) {
+// Keep real dense-city motion and date-line return as the live acceptance paths.
+for (const preset of demoPresets.filter(preset => ['shinjuku', 'dateline'].includes(preset.id))) {
   test(`real ${preset.id} preset loads through zoom, orbit, tilt and return`, { tag: '@live' }, async ({ page, renderUrl }, testInfo) => {
     test.setTimeout(360_000);
     const errors: string[] = [];

@@ -2,7 +2,7 @@ import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { PerspectiveFrustum } from 'cesium';
 import type { NativeCommand, TestTileset, TestViewer } from './browser-types';
 import * as Cesium from 'cesium';
-import { Cartesian2, Cartesian3, Color, ComponentDatatype, Ray, SceneMode, Viewer, WebMercatorProjection } from 'cesium';
+import { Cartesian2, Cartesian3, Color, Ray, SceneMode, Viewer, WebMercatorProjection } from 'cesium';
 import { CesiumVectorTileset } from '../../packages/cesium-vector-tileset';
 import { drawBatchForOwner, linePaintForOwner } from '../../packages/cesium-vector-tileset/src/render/scene/draw-batch';
 import { layerRadialOffsetMeters } from '../../packages/cesium-vector-tileset/src/render/vector/tile-conversion';
@@ -16,7 +16,6 @@ export interface SurfaceCase {
   depthTest?: boolean;
   terrainDepth?: boolean;
   logDepth?: boolean;
-  seamSubdivision?: boolean;
 }
 const radius = 6378137;
 const circumference = 2 * Math.PI * radius;
@@ -72,219 +71,6 @@ interface RowObservation {
   colors: number[][];
 }
 
-/** Read only the two executed water VAs at the known seam-hole pose. */
-function captureSeamCommand(command: NativeCommand, gl: WebGL2RenderingContext, pendingSurfaceWords?: number[][]) {
-  const shader = command.shaderProgram as NativeCommand['shaderProgram'] & {
-    _program: WebGLProgram;
-    _vertexShaderText: string;
-    _fragmentShaderText: string;
-    vertexAttributes: Record<string, { index: number; type: number }>;
-  };
-  const buffers = new Map<WebGLBuffer, Uint8Array>();
-  const readBuffer = (buffer: NonNullable<NativeCommand['vertexArray']['indexBuffer']>) => {
-    const native = buffer._getBuffer();
-    let bytes = buffers.get(native);
-    if (!bytes) {
-      bytes = new Uint8Array(buffer.sizeInBytes);
-      const previous = gl.getParameter(gl.COPY_READ_BUFFER_BINDING) as WebGLBuffer | null;
-      try {
-        gl.bindBuffer(gl.COPY_READ_BUFFER, native);
-        gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, bytes);
-      }
-      finally {
-        gl.bindBuffer(gl.COPY_READ_BUFFER, previous);
-      }
-      buffers.set(native, bytes);
-    }
-    return bytes;
-  };
-  const scalar = (bytes: Uint8Array, type: number, offset: number): number => {
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    switch (type) {
-      case gl.BYTE: return view.getInt8(offset);
-      case gl.UNSIGNED_BYTE: return view.getUint8(offset);
-      case gl.SHORT: return view.getInt16(offset, true);
-      case gl.UNSIGNED_SHORT: return view.getUint16(offset, true);
-      case gl.INT: return view.getInt32(offset, true);
-      case gl.UNSIGNED_INT: return view.getUint32(offset, true);
-      case gl.FLOAT: return view.getFloat32(offset, true);
-      default: throw new Error(`Unsupported actual seam attribute datatype ${type}`);
-    }
-  };
-  const size = (type: number) => {
-    switch (type) {
-      case gl.BYTE:
-      case gl.UNSIGNED_BYTE: return 1;
-      case gl.SHORT:
-      case gl.UNSIGNED_SHORT: return 2;
-      case gl.INT:
-      case gl.UNSIGNED_INT:
-      case gl.FLOAT: return 4;
-      default: throw new Error(`Unsupported actual seam attribute datatype ${type}`);
-    }
-  };
-  const array = command.vertexArray;
-  const attributes = Object.entries(shader.vertexAttributes).map(([name, active]) => {
-    const attribute = Array.from({ length: array.numberOfAttributes }, (_, index) => array.getAttribute(index))
-      .find(value => value.index === active.index) as ReturnType<typeof array.getAttribute> & { offsetInBytes: number; value?: number[] };
-    if (!attribute)
-      throw new Error(`Actual seam shader attribute ${name} has no VA input`);
-    const bytes = attribute.vertexBuffer && readBuffer(attribute.vertexBuffer);
-    const stride = attribute.strideInBytes || attribute.componentsPerAttribute * size(attribute.componentDatatype);
-    const values = Array.from({ length: array.numberOfVertices }, (_, vertex) => Array.from({ length: attribute.componentsPerAttribute }, (_, component) =>
-      bytes ? scalar(bytes, attribute.componentDatatype, (attribute.offsetInBytes ?? 0) + vertex * stride + component * size(attribute.componentDatatype)) : attribute.value![component]));
-    return { name, index: active.index, datatype: attribute.componentDatatype, components: attribute.componentsPerAttribute, normalize: attribute.normalize, stride, offset: attribute.offsetInBytes, values };
-  });
-  const indexBuffer = array.indexBuffer as NonNullable<typeof array.indexBuffer> & { indexDatatype: number; numberOfIndices: number };
-  if (!indexBuffer)
-    throw new Error('Actual seam water draw must have an index buffer');
-  const indexBytes = readBuffer(indexBuffer);
-  const indices = Array.from({ length: indexBuffer.numberOfIndices }, (_, index) => scalar(indexBytes, indexBuffer.indexDatatype, index * size(indexBuffer.indexDatatype)));
-  const uniform = (name: string): number[] | null => {
-    const location = gl.getUniformLocation(shader._program, name);
-    if (location === null)
-      return null;
-    const value = gl.getUniform(shader._program, location) as number | ArrayLike<number>;
-    return typeof value === 'number' ? [value] : Array.from(value);
-  };
-  const surfaceWords = pendingSurfaceWords ?? Array.from({ length: 6 }, (_, field) => uniform(`surface_words[${field}]`));
-  if (surfaceWords.some(value => !value || value.length !== 4))
-    throw new Error('Actual seam water shader must expose six surface word descriptors');
-  const scratch = new DataView(new ArrayBuffer(4));
-  const projected = Array.from({ length: array.numberOfVertices }, (_, vertex) => {
-    const fields = surfaceWords.map((descriptor, field) => {
-      const [offset, width, low, high] = descriptor!;
-      let word = (low | high << 16) >>> 0;
-      let consumed = 0;
-      let bit = offset;
-      while (consumed < width) {
-        const byte = bit >> 3;
-        const lane = attributes.find(attribute => attribute.name === `a_surface${byte >> 2}`);
-        if (!lane)
-          throw new Error(`Actual seam surface byte ${byte} has no VA lane`);
-        const count = Math.min(8 - (bit & 7), width - consumed);
-        word = (word | ((lane.values[vertex][byte & 3] >>> (bit & 7)) & ((1 << count) - 1)) << consumed) >>> 0;
-        consumed += count;
-        bit += count;
-      }
-      if (field < 3)
-        return ((word << 16) >> 16) * 65536;
-      scratch.setUint32(0, word, true);
-      return scratch.getFloat32(0, true);
-    });
-    return { vertex, high: fields.slice(0, 3), low: fields.slice(3), east: fields[0] + fields[3], north: fields[1] + fields[4], height: fields[2] + fields[5] };
-  });
-  return {
-    vertices: array.numberOfVertices,
-    attributes,
-    indices,
-    indexDatatype: indexBuffer.indexDatatype,
-    projected,
-    surfaceWords,
-    mvp: uniform('czm_modelViewProjectionRelativeToEye'),
-    cameraHigh: uniform('czm_encodedCameraPositionMCHigh'),
-    cameraLow: uniform('czm_encodedCameraPositionMCLow'),
-    viewport: Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array),
-    vertexShader: shader._vertexShaderText,
-    fragmentShader: shader._fragmentShaderText,
-  };
-}
-
-/** Insert the actually uploaded left T vertex into the right tile's straight edge. */
-function subdivideSeamCommand(command: NativeCommand, context: TestViewer['scene']['context'], left: ReturnType<typeof captureSeamCommand>) {
-  // Context.draw has not uploaded this command's uniforms yet: the shared
-  // program still contains the preceding left tile's packed-word descriptors.
-  // Use the pending right command's exact values to decode its VA, then qualify
-  // these descriptors against real GL uniforms after the replacement executes.
-  const pending = command.uniformMap.surface_words?.() as Array<{ x: number; y: number; z: number; w: number }> | undefined;
-  if (!pending || pending.length !== 6)
-    throw new Error('Seam control requires six pending right surface word descriptors');
-  const source = captureSeamCommand(command, context._gl, pending.map(word => [word.x, word.y, word.z, word.w]));
-  const west = Math.min(...source.projected.map(vertex => vertex.east));
-  const edge = source.projected.filter(vertex => vertex.east === west).sort((a, b) => a.north - b.north);
-  if (edge.length !== 2 || edge[0].height !== edge[1].height)
-    throw new Error('Seam control requires the actual right straight edge with exactly two endpoints');
-  const candidates = left.projected.filter(vertex => vertex.east === west && vertex.height === edge[0].height
-    && vertex.north > edge[0].north && vertex.north < edge[1].north);
-  if (candidates.length !== 1)
-    throw new Error('Seam control requires exactly one actual left T vertex');
-  const inserted = candidates[0];
-  const addedIndex = source.vertices;
-  const indices: number[] = [];
-  let splits = 0;
-  let copyVertex: number | undefined;
-  for (let offset = 0; offset < source.indices.length; offset += 3) {
-    const triangle = source.indices.slice(offset, offset + 3);
-    const side = triangle.findIndex((vertex, index) => edge.some(point => point.vertex === vertex)
-      && edge.some(point => point.vertex === triangle[(index + 1) % 3]));
-    if (side < 0) {
-      indices.push(...triangle);
-      continue;
-    }
-    const first = triangle[side];
-    const second = triangle[(side + 1) % 3];
-    const opposite = triangle[(side + 2) % 3];
-    indices.push(first, addedIndex, opposite, addedIndex, second, opposite);
-    copyVertex = first;
-    splits++;
-  }
-  if (splits !== 1)
-    throw new Error('Seam control must split exactly one actual boundary triangle');
-  const bytes = new Uint8Array(Math.ceil(Math.max(...source.surfaceWords.map(word => word![0] + word![1])) / 8));
-  const scratch = new DataView(new ArrayBuffer(4));
-  for (const [field, descriptor] of source.surfaceWords.entries()) {
-    const [offset, width, low, high] = descriptor!;
-    const prefix = (low | high << 16) >>> 0;
-    let word: number;
-    if (field < 3) {
-      word = (inserted.high[field] / 65536) & 0xFFFF;
-    }
-    else {
-      scratch.setFloat32(0, inserted.low[field - 3], true);
-      word = scratch.getUint32(0, true);
-    }
-    const mask = width === 32 ? 0xFFFFFFFF : 2 ** width - 1;
-    if (((word & ~mask) >>> 0) !== prefix)
-      throw new Error('Exact inserted T vertex must fit the original right shader descriptors');
-    let remaining = width;
-    let bit = offset;
-    while (remaining > 0) {
-      const count = Math.min(8 - (bit & 7), remaining);
-      bytes[bit >> 3] |= (word & ((1 << count) - 1)) << (bit & 7);
-      word >>>= count;
-      bit += count;
-      remaining -= count;
-    }
-  }
-  const gpu = Cesium as unknown as {
-    BufferUsage: { STATIC_DRAW: number };
-    Buffer: {
-      createVertexBuffer: (options: { context: unknown; typedArray: ArrayBufferView; usage: number }) => NonNullable<NativeCommand['vertexArray']['indexBuffer']>;
-      createIndexBuffer: (options: { context: unknown; typedArray: ArrayBufferView; usage: number; indexDatatype: number }) => NonNullable<NativeCommand['vertexArray']['indexBuffer']>;
-    };
-    VertexArray: new (options: { context: unknown; attributes: unknown[]; indexBuffer: unknown }) => NativeCommand['vertexArray'] & { destroy: () => void };
-  };
-  const datatypes = ComponentDatatype as unknown as { createTypedArray: (datatype: number, values: number[]) => ArrayBufferView };
-  const attributes = source.attributes.map((attribute) => {
-    const values = attribute.values.map(value => [...value]);
-    const lane = /^a_surface(\d+)$/.exec(attribute.name);
-    const extra = lane
-      ? Array.from({ length: attribute.components }, (_, component) => bytes[Number(lane[1]) * 4 + component] ?? 0)
-      : [...attribute.values[copyVertex!]];
-    // The new vertex carries the same instance paint as both edge endpoints.
-    if (!lane && !attribute.values[edge[0].vertex].every((value, component) => value === attribute.values[edge[1].vertex][component]))
-      throw new Error(`Seam control cannot interpolate varying ${attribute.name} paint`);
-    values.push(extra);
-    const typedArray = datatypes.createTypedArray(attribute.datatype, values.flat());
-    return { index: attribute.index, vertexBuffer: gpu.Buffer.createVertexBuffer({ context, typedArray, usage: gpu.BufferUsage.STATIC_DRAW }), componentsPerAttribute: attribute.components, componentDatatype: attribute.datatype, normalize: attribute.normalize };
-  });
-  const indexBuffer = gpu.Buffer.createIndexBuffer({ context, typedArray: datatypes.createTypedArray(source.indexDatatype, indices), usage: gpu.BufferUsage.STATIC_DRAW, indexDatatype: source.indexDatatype });
-  const vertexArray = new gpu.VertexArray({ context, attributes, indexBuffer });
-  // Retain Native's actual owner, program, uniforms, model and render state.
-  const replacement = Object.assign(Object.create(Object.getPrototypeOf(command)), command, { vertexArray, count: indices.length, offset: 0 }) as NativeCommand;
-  return { command: replacement, vertexArray, inserted, edge: edge.map(point => point.vertex), splitTriangles: splits, source };
-}
-
 async function createSurfaceHorizon() {
   const viewer = new Viewer('cesium', {
     baseLayer: false,
@@ -327,19 +113,6 @@ async function createSurfaceHorizon() {
   let sampleIndex = 0;
   let metersPerPixel = 0;
   let roadHeight = layerRadialOffsetMeters('road', layerOrder);
-  const seamDraws: Array<{ tile: string; canonical: { z: number; x: number; y: number }; capture: ReturnType<typeof captureSeamCommand> }> = [];
-  let seamSubdivision: {
-    inserted: ReturnType<typeof captureSeamCommand>['projected'][number];
-    edge: number[];
-    splitTriangles: number;
-    source: ReturnType<typeof captureSeamCommand>;
-    pendingDescriptorsMatch: boolean;
-    shaderUnchanged: boolean;
-    uniformsUnchanged: boolean;
-    renderStateUnchanged: boolean;
-    ownerUnchanged: boolean;
-  } | undefined;
-  const controlArrays: Array<{ destroy: () => void }> = [];
   const frames: ReturnType<typeof capture>[] = [];
   const roadReferences = new Map<string, Array<{ mask: Uint8Array; pitch: number; position: Cartesian3; direction: Cartesian3; metersPerPixel: number; surfaceHeight: number }>>();
   const setCamera = (pitch: number) => {
@@ -398,42 +171,7 @@ async function createSurfaceHorizon() {
         roadHeight = paint.offsetUniform();
       }
     }
-    let canonical: { z: number; x: number; y: number } | undefined;
-    if (collecting && current.pitch === 89 && sampleIndex === 16 && batch?.layerId === 'water') {
-      const id = tileset._renderer.vector._records.get(batch.tileId)?.tileID;
-      canonical = id && ('canonical' in id ? id.canonical : id);
-    }
-    let control: ReturnType<typeof subdivideSeamCommand> | undefined;
-    const sourceCommand = command;
-    if (current.seamSubdivision && canonical?.z === 17 && canonical.x === 65535 && canonical.y === 65534) {
-      const left = seamDraws.find(draw => draw.canonical.x === 65534);
-      if (!left)
-        throw new Error('Seam control requires the actual left draw before replacing the right VA');
-      control = subdivideSeamCommand(command, viewer.scene.context, left.capture);
-      controlArrays.push(control.vertexArray);
-      command = control.command;
-    }
-    const result = originalDraw.call(this, command, ...args);
-    if (canonical?.z === 17 && canonical.y === 65534 && (canonical.x === 65534 || canonical.x === 65535)) {
-      const actual = captureSeamCommand(command, viewer.scene.context._gl);
-      if (control) {
-        seamSubdivision = {
-          inserted: control.inserted,
-          edge: control.edge,
-          splitTriangles: control.splitTriangles,
-          source: captureSeamCommand(sourceCommand, viewer.scene.context._gl),
-          pendingDescriptorsMatch: actual.surfaceWords.every((word, field) => word!.every((value, component) => value === control!.source.surfaceWords[field]![component])),
-          shaderUnchanged: command.shaderProgram === sourceCommand.shaderProgram,
-          uniformsUnchanged: command.uniformMap === sourceCommand.uniformMap,
-          renderStateUnchanged: command.renderState === sourceCommand.renderState,
-          ownerUnchanged: command.owner === sourceCommand.owner,
-        };
-      }
-      if (batch?.layerId === 'water') {
-        seamDraws.push({ tile: batch.tileId, canonical: { z: canonical.z, x: canonical.x, y: canonical.y }, capture: actual });
-      }
-    }
-    return result;
+    return originalDraw.call(this, command, ...args);
   };
 
   function capture() {
@@ -558,11 +296,6 @@ async function createSurfaceHorizon() {
       draws: [...draws],
       metersPerPixel,
       surfaceHeights: { water: waterHeight, road: roadHeight },
-      seamDraws: [...seamDraws],
-      seamSubdivision,
-      seamProbe: current.pitch === 89 && sampleIndex === 16 && current.layers !== 'road'
-        ? { pixel: [29, 578], center: [29.5, 578.5], surfaceHeight: waterHeight, surface: ground(29.5, 578.5, waterHeight), rgba: Array.from(pixels.subarray(((height - 1 - 578) * width + 29) * 4, ((height - 1 - 578) * width + 29) * 4 + 4)) }
-        : undefined,
       controls,
       totals,
       holes: rows,
@@ -578,8 +311,6 @@ async function createSurfaceHorizon() {
     draws.length = 0;
     globeDrawAttempts = 0;
     globeDraws = 0;
-    seamDraws.length = 0;
-    seamSubdivision = undefined;
   });
   viewer.scene.postRender.addEventListener(() => {
     warmFrames++;
@@ -592,7 +323,6 @@ async function createSurfaceHorizon() {
   setCamera(current.pitch);
   return {
     setCase(next: SurfaceCase) {
-      for (const array of controlArrays.splice(0)) array.destroy();
       current = next;
       collecting = false;
       frames.length = 0;

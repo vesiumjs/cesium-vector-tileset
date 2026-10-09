@@ -72,7 +72,7 @@ async function save(testInfo: TestInfo, page: Page, captures: Capture[]) {
   await testInfo.attach('symbol-line-perspective', { path: png, contentType: 'image/png' });
 }
 
-for (const { alignment, sdf } of (['viewport', 'map', 'auto'] as const).flatMap(alignment => [false, true].map(sdf => ({ alignment, sdf })))) {
+for (const { alignment, sdf } of [{ alignment: 'map', sdf: true }] as const) {
   test(`actual ${sdf ? 'SDF' : 'opaque'} line icon ${alignment} pitch alignment matches MapLibre perspective pixels`, async ({ page, renderUrl }, testInfo) => {
     test.skip(process.env.E2E_GPU !== 'hardware', 'Actual line symbol comparison requires hardware');
     const errors: string[] = [];

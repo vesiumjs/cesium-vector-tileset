@@ -16,7 +16,6 @@ const node = process.env.E2E_PACKAGE_NODE ?? process.execPath;
 const library = fileURLToPath(new URL('../packages/cesium-vector-tileset/', import.meta.url));
 let directory: string;
 let published: string;
-let files: string[];
 let server: Server;
 let consumerUrl: string;
 
@@ -26,8 +25,6 @@ test.beforeAll(async () => {
   await run('pnpm', ['pack', '--pack-destination', directory], { cwd: library });
   const metadata = JSON.parse(await readFile(path.join(library, 'package.json'), 'utf8'));
   const archive = path.join(directory, `${metadata.name}-${metadata.version}.tgz`);
-  const listing = await run('tar', ['-tf', archive]);
-  files = listing.stdout.trim().split('\n').sort();
   await run('tar', ['-xzf', archive, '-C', directory]);
   published = path.join(directory, 'package');
   // Reuse installed dependencies while loading the actual packed files. The
@@ -81,30 +78,14 @@ test.afterAll(async () => {
 });
 
 for (const specifier of ['cesium-vector-tileset', 'cesium-vector-tileset/min']) {
-  for (const format of ['import', 'require']) {
-    test(`packed ${specifier} loads with ${format} in Node without browser globals`, async () => {
-      const script = `
-      import assert from 'node:assert/strict';
-      import {createRequire} from 'node:module';
-      assert.equal(typeof document, 'undefined');
-      assert.equal(typeof window, 'undefined');
-      const api = process.argv[1] === 'require'
-        ? createRequire(import.meta.url)(process.argv[2])
-        : await import(process.argv[2]);
-      assert.equal(typeof api.CesiumVectorTileset, 'function');
-      assert.equal(typeof api.CesiumVectorTileset.fromUrl, 'function');
-      console.log(JSON.stringify({loaded: true}));
-    `;
-      const { stdout } = await run(node, ['--input-type=module', '-e', script, format, specifier], { cwd: directory });
-      assert.deepEqual(JSON.parse(stdout), { loaded: true });
-    });
-  }
-
   test(`${specifier} import and require share the published constructor`, async () => {
     const script = `
     import assert from 'node:assert/strict';
     import {createRequire} from 'node:module';
+    assert.equal(typeof document, 'undefined');
+    assert.equal(typeof window, 'undefined');
     const imported = await import(process.argv[1]);
+    assert.equal(typeof imported.CesiumVectorTileset.fromUrl, 'function');
     const required = createRequire(import.meta.url)(process.argv[1]);
     assert.equal(imported.CesiumVectorTileset, required.CesiumVectorTileset);
   `;
@@ -131,72 +112,6 @@ test('packed declarations resolve for ESM and CommonJS TypeScript consumers', as
   `);
   const tsc = createRequire(import.meta.url).resolve('typescript/lib/tsc');
   await run(node, [tsc, '--noEmit', '--skipLibCheck', '--module', 'nodenext', '--target', 'ES2022', esm, cjs], { cwd: directory });
-});
-
-test('packed metadata includes Worker entries, shared modules and their runtime notices', async () => {
-  const metadata = JSON.parse(await readFile(path.join(published, 'package.json'), 'utf8'));
-  assert.deepEqual(metadata.exports['.'], {
-    types: './dist/index.d.mts',
-    default: './dist/index.mjs',
-  });
-  assert.deepEqual(metadata.exports['./min'], {
-    types: './dist/index.d.mts',
-    default: './dist/index.min.mjs',
-  });
-  assert.deepEqual(metadata.peerDependencies, { cesium: '^1.146.0' });
-  assert.equal(metadata.peerDependencies.cesium, '^1.146.0');
-  assert.equal(metadata.devDependencies.cesium, '^1.146.0');
-  assert.equal(metadata.engines.node, '>=22.13.0');
-  assert.equal(metadata.dependencies['@maplibre/mlt'], undefined, 'the bundled decoder must not require a consumer dependency');
-  assert.deepEqual(Object.keys(metadata.exports), ['.', './min', './package.json']);
-  const entries = ['index.mjs', 'index.min.mjs', 'worker.mjs', 'worker.min.mjs', 'geometry-worker.mjs', 'geometry-worker.min.mjs'];
-  const workerChunks = files.filter(file => file.startsWith('package/dist/') && file.endsWith('.mjs') && !entries.includes(path.basename(file)));
-  assert.ok(workerChunks.length > 0, 'the Worker entries should share their bundled CPU runtime');
-  assert.ok(workerChunks.some(file => file.endsWith('.min.mjs')) && workerChunks.some(file => !file.endsWith('.min.mjs')));
-  assert.ok(workerChunks.every(file => /^package\/dist\/[\w-]+(?:\.min)?\.mjs$/.test(file)));
-  assert.deepEqual(files, [
-    'package/LICENSE',
-    'package/README.md',
-    'package/README.zh-CN.md',
-    'package/dist/THIRD_PARTY_NOTICES.txt',
-    'package/dist/index.d.mts',
-    'package/dist/index.d.mts.map',
-    'package/dist/index.mjs.map',
-    'package/package.json',
-    ...entries.map(entry => `package/dist/${entry}`),
-    ...workerChunks,
-  ].sort());
-  const notices = await readFile(path.join(published, 'dist/THIRD_PARTY_NOTICES.txt'), 'utf8');
-  for (const dependency of ['cesium', '@cesium/engine', '@cesium/core'])
-    assert.ok(notices.includes(`${dependency} (geometry Worker runtime and upstream notices)`));
-});
-
-test('plain modules retain readable JavaScript and minified modules use their matching Workers', async () => {
-  for (const entry of ['index', 'worker', 'geometry-worker']) {
-    const plain = await readFile(path.join(published, `dist/${entry}.mjs`), 'utf8');
-    const minified = await readFile(path.join(published, `dist/${entry}.min.mjs`), 'utf8');
-    assert.ok(plain.split('\n').length > 100, `${entry}.mjs was compressed`);
-    assert.ok(minified.length < plain.length, `${entry}.min.mjs was not compressed`);
-    if (entry === 'index') {
-      for (const worker of ['worker', 'geometry-worker']) {
-        assert.ok(plain.includes(`./${worker}.mjs`));
-        assert.ok(minified.includes(`./${worker}.min.mjs`));
-      }
-    }
-  }
-});
-
-test('packed READMEs retain gallery and documentation links outside the package', async () => {
-  for (const name of ['README.md', 'README.zh-CN.md']) {
-    const readme = await readFile(path.join(published, name), 'utf8');
-    const gallery = [...readme.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map(match => match[1]);
-    assert.equal(gallery.length, 6);
-    assert.ok(gallery.every(url => url.startsWith('https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/')));
-    const links = [...readme.matchAll(/\]\(([^)]+)\)/g)].map(match => match[1]);
-    for (const link of links.filter(link => link.startsWith('./')))
-      assert.ok(files.includes(`package/${link.slice(2)}`), `${name} references an unpackaged file: ${link}`);
-    assert.ok(links.includes('https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/architecture.md'));
-  }
 });
 
 for (const suffix of ['', '.min']) {

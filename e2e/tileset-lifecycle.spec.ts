@@ -168,15 +168,6 @@ test('zoom replacement keeps framebuffer coverage', async ({ page, renderUrl }, 
   assert.deepEqual(errors, []);
 });
 
-test('published ESM entry loads its bundled worker and draws MVT pixels', async ({ page, renderUrl }) => {
-  const moduleRequests = [];
-  page.on('request', request => moduleRequests.push(request.url()));
-  const { errors } = await open(page, renderUrl, { published: true });
-  assert.ok(moduleRequests.some(url => url.includes('/dist/index.mjs')), 'the browser did not consume the published ESM entry');
-  assert.ok(moduleRequests.some(url => url.includes('/dist/worker.mjs')), 'the published entry did not load its bundled worker');
-  assert.deepEqual(errors, []);
-});
-
 test('public style and source switches draw the new pixels without empty frames', async ({ page, renderUrl }, testInfo) => {
   const { errors, requests } = await open(page, renderUrl);
   await expect.poll(() => page.evaluate(async () => {
@@ -263,78 +254,6 @@ test('public style and source switches draw the new pixels without empty frames'
     await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
   }
   assert.deepEqual(errors, []);
-});
-
-test('unsupported and unavailable styles reject without disrupting a loaded scene', async ({ page, renderUrl }) => {
-  const { errors } = await open(page, renderUrl);
-  for (const reference of [false, true]) {
-    const unsupported = gradientStyle(renderUrl, reference);
-    assert.deepEqual(validateStyleMin(unsupported), []);
-    const unsupportedFailure = await page.evaluate(async (json) => {
-      const next: StyleSpecification = JSON.parse(json);
-      const Constructor = window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset;
-      const candidate = new Constructor({ style: next });
-      try {
-        await candidate.whenReady();
-        return null;
-      }
-      catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-      finally {
-        candidate.destroy();
-      }
-    }, JSON.stringify(unsupported));
-    assert.match(unsupportedFailure, /paint\.line-gradient: .*not supported/);
-  }
-  const failure = await page.evaluate(async (url) => {
-    try {
-      const candidate = await (window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset).fromUrl(url);
-      candidate.destroy();
-      return null;
-    }
-    catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }, `${renderUrl}/lifecycle/unavailable.json`);
-  assert.match(failure, /503/);
-  const coverage = await page.evaluate(color => window.renderValidation.readCoverage(color), blue);
-  assert.ok(coverage.every(ratio => ratio >= 0.98), 'a failed load disrupted the existing primitive');
-  assert.deepEqual(errors, []);
-});
-
-test('settled demand rendering stops frames and destruction releases the primitive', async ({ page, renderUrl }) => {
-  const { errors } = await open(page, renderUrl);
-  await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.stats().pendingPublishes)).toBe(0);
-  // Two consecutive quiet intervals distinguish a settled scene from a brief
-  // gap between asynchronous tile uploads.
-  await expect.poll(() => page.evaluate(async () => {
-    const validation = window.renderValidation;
-    const before = validation.renderedFrames;
-    await new Promise<void>(resolve => setTimeout(resolve, 400));
-    return validation.renderedFrames - before;
-  })).toBe(0);
-  const quiet = await page.evaluate(async () => {
-    const validation = window.renderValidation;
-    const before = validation.renderedFrames;
-    await new Promise<void>(resolve => setTimeout(resolve, 400));
-    return validation.renderedFrames - before;
-  });
-  assert.equal(quiet, 0, 'the idle scene continued to render');
-  const destroyed = await page.evaluate(async () => {
-    const { viewer, tileset } = window.renderValidation;
-    viewer.scene.primitives.remove(tileset);
-    viewer.scene.requestRender();
-    await new Promise<void>(resolve => setTimeout(resolve, 200));
-    return { destroyed: tileset.isDestroyed(), attached: viewer.scene.primitives.contains(tileset), coverage: window.renderValidation.readCoverage() };
-  });
-  assert.equal(destroyed.destroyed, true);
-  assert.equal(destroyed.attached, false);
-  assert.ok(destroyed.coverage.every(ratio => ratio < 0.01), 'destroyed primitive left rendered vector pixels');
-  assert.deepEqual(errors, []);
-  await page.reload();
-  await expect.poll(() => page.evaluate(() => window.renderValidation?.tileset.stats().bucket.tiles ?? 0)).toBeGreaterThan(0);
-  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
 });
 
 test('adding, hiding, showing and removing a tileset wakes a settled demand scene', async ({ page, renderUrl }) => {

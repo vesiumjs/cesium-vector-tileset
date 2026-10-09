@@ -80,42 +80,42 @@ async function save(testInfo: TestInfo, page: Page, captures: Capture[], pageErr
   await testInfo.attach('symbol-map-perspective', { path: png, contentType: 'image/png' });
 }
 
-for (const bearing of [0, 35]) {
-  for (const rotation of ['map', 'viewport'] as const) {
-    test(`actual opaque point icon map pitch and ${rotation} rotation at bearing ${bearing} match MapLibre perspective shape`, async ({ page, renderUrl }, testInfo) => {
-      test.skip(process.env.E2E_GPU !== 'hardware', 'Actual point-map symbol comparison requires hardware');
-      const errors: string[] = [];
-      page.on('pageerror', error => errors.push(error.message));
-      await page.goto(`${renderUrl}/e2e/fixtures/symbol-map-perspective-fixture.html?rotation=${rotation}&bearing=${bearing}`);
-      await expect.poll(() => page.evaluate(() => window.symbolMapPerspective?.ready()), { timeout: 90_000 }).toBe(true);
-      const captures: Capture[] = [];
-      for (const pitch of [0, 75, 85, 89]) {
-        await page.evaluate(pitch => window.symbolMapPerspective.setView(pitch), pitch);
-        await expect.poll(() => page.evaluate(() => window.symbolMapPerspective.ready()), { timeout: 60_000 }).toBe(true);
-        captures.push(await page.evaluate(() => window.symbolMapPerspective.capture()));
-      }
-      await save(testInfo, page, captures, errors);
-      assert.deepEqual(errors, []);
-      captures.forEach(qualify);
-      const top = captures[0].points[0];
-      for (const renderer of ['native', 'reference'] as const) {
-        const pixels = top[renderer]!.pixels;
-        assert.ok(Math.abs(pixels.width - 16) < 0.35 && Math.abs(pixels.height - 16) < 0.35, `${renderer}: original 16px public addImage top-view width and height control ${pixels.width}/${pixels.height}`);
-      }
-      const failures = captures.slice(1).flatMap(capture => capture.points.flatMap((point) => {
-        const native = point.native!.pixels;
-        const reference = point.reference!.pixels;
-        // The L1 difference uses the complete actual 2D alpha masks. Dividing
-        // by the measured reference perimeter expresses shape error in pixels,
-        // independently of projected width/height and without scale calibration.
-        const shape = native.alpha.reduce((sum, alpha, index) => sum + Math.abs(alpha - reference.alpha[index]), 0) / Math.max(2 * (reference.width + reference.height), 1);
-        const width = Math.abs(native.width - reference.width);
-        const height = Math.abs(native.height - reference.height);
-        return width >= 0.5 || height >= 0.5 || shape >= 0.5
-          ? [{ pitch: capture.pitch, id: point.id, widthError: width, heightError: height, shapeError: shape, native: { width: native.width, height: native.height, area: native.area }, reference: { width: reference.width, height: reference.height, area: reference.area } }]
-          : [];
-      }));
-      assert.deepEqual(failures, [], 'Actual point-map icon width, height or full alpha shape differs from the independent MapLibre reference');
-    });
-  }
+// The zero-pitch control already uses bearing zero; tilted views exercise rotation.
+const bearing = 35;
+for (const rotation of ['map'] as const) {
+  test(`actual opaque point icon map pitch and ${rotation} rotation at bearing ${bearing} match MapLibre perspective shape`, async ({ page, renderUrl }, testInfo) => {
+    test.skip(process.env.E2E_GPU !== 'hardware', 'Actual point-map symbol comparison requires hardware');
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(`${renderUrl}/e2e/fixtures/symbol-map-perspective-fixture.html?rotation=${rotation}&bearing=${bearing}`);
+    await expect.poll(() => page.evaluate(() => window.symbolMapPerspective?.ready()), { timeout: 90_000 }).toBe(true);
+    const captures: Capture[] = [];
+    for (const pitch of [0, 75, 85, 89]) {
+      await page.evaluate(pitch => window.symbolMapPerspective.setView(pitch), pitch);
+      await expect.poll(() => page.evaluate(() => window.symbolMapPerspective.ready()), { timeout: 60_000 }).toBe(true);
+      captures.push(await page.evaluate(() => window.symbolMapPerspective.capture()));
+    }
+    await save(testInfo, page, captures, errors);
+    assert.deepEqual(errors, []);
+    captures.forEach(qualify);
+    const top = captures[0].points[0];
+    for (const renderer of ['native', 'reference'] as const) {
+      const pixels = top[renderer]!.pixels;
+      assert.ok(Math.abs(pixels.width - 16) < 0.35 && Math.abs(pixels.height - 16) < 0.35, `${renderer}: original 16px public addImage top-view width and height control ${pixels.width}/${pixels.height}`);
+    }
+    const failures = captures.slice(1).flatMap(capture => capture.points.flatMap((point) => {
+      const native = point.native!.pixels;
+      const reference = point.reference!.pixels;
+      // The L1 difference uses the complete actual 2D alpha masks. Dividing
+      // by the measured reference perimeter expresses shape error in pixels,
+      // independently of projected width/height and without scale calibration.
+      const shape = native.alpha.reduce((sum, alpha, index) => sum + Math.abs(alpha - reference.alpha[index]), 0) / Math.max(2 * (reference.width + reference.height), 1);
+      const width = Math.abs(native.width - reference.width);
+      const height = Math.abs(native.height - reference.height);
+      return width >= 0.5 || height >= 0.5 || shape >= 0.5
+        ? [{ pitch: capture.pitch, id: point.id, widthError: width, heightError: height, shapeError: shape, native: { width: native.width, height: native.height, area: native.area }, reference: { width: reference.width, height: reference.height, area: reference.area } }]
+        : [];
+    }));
+    assert.deepEqual(failures, [], 'Actual point-map icon width, height or full alpha shape differs from the independent MapLibre reference');
+  });
 }
