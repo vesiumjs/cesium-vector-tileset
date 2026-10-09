@@ -1,8 +1,8 @@
 # Primitive MVT 适配结构
 
-公开入口是 `CesiumVectorTileset`，负责样式与渲染资源生命周期；瓦片解析、样式求值、几何构建和绘制各自集中在以下目录，不向用户暴露内部调度对象。配置合同集中在 `tileset-options.ts`，图片输入与统计结果使用 `tileset-types.ts` 中的命名类型。URL 工厂调用 `style/load-style.ts` 处理请求转换、取消与响应结构检查，Style 继续负责完整样式语义验证；公开类保留初始化与帧内协调顺序。
+公开入口 `CesiumVectorTileset` 负责选项、公开生命周期与 Cesium 帧钩子的分发。`render/scene/tileset-renderer.ts` 持有样式和渲染轨道，协调求值、瓦片发布及绘制；场景唤醒、帧准入与空闲准备、符号排布分别由 `SceneRenderWake`、`FramePreparation`、`SceneSymbolPlacement` 管理。配置合同集中在 `tileset-options.ts`，图片输入与统计结果使用 `tileset-types.ts` 中的命名类型。URL 工厂调用 `style/load-style.ts` 处理请求转换、取消与响应结构检查；Style 负责完整样式语义验证。内部模块接收实际的 PrimitiveCollection 和协作者，不反向依赖公开入口类。
 
-发布包只有一个公开 ESM 入口及其类型声明。tsdown 分别处理主线程入口和 Worker 多入口构建：主线程将 Cesium 保持为外部 peer；瓦片 `worker.mjs` 和几何 `geometry-worker.mjs` 打包其 CPU 处理所需的依赖，使用默认代码拆分共享模块，不依赖文档的 import map。各线程分别拥有运行期对象，Worker 入口和其余发布模块保持相对位置。Node 22.13+ 的 `import` 与 `require()` 加载同一公开入口，构造器和 Worker 池不会因模块格式分裂。主线程拾取和 feature-state 使用 Worker 生成的 FeatureSnapshot，不再保存原始瓦片字节并重复解码。MLT 依赖在构建时纳入发布产物，避免其扩展名缺失的内部导入交给消费者运行时解析。
+发布包提供普通与压缩两套 ESM 构建，共用类型声明。默认入口 `index.mjs` 保留可读代码，`cesium-vector-tileset/min` 对应 `index.min.mjs`，两者提供相同 API。tsdown 分别处理主线程入口和 Worker 多入口构建：主线程将 Cesium 保持为外部 peer；瓦片 `worker.mjs` 和几何 `geometry-worker.mjs` 打包其 CPU 处理所需的依赖，使用默认代码拆分共享模块，不依赖文档的 import map。压缩入口引用对应的 `.min.mjs` Worker 与共享模块。各线程分别拥有运行期对象，Worker 入口和其余发布模块保持相对位置。Node 22.13+ 的 `import` 与 `require()` 在同一构建版本中加载同一入口，构造器和 Worker 池不会因模块格式分裂。主线程拾取和 feature-state 使用 Worker 生成的 FeatureSnapshot，不再保存原始瓦片字节并重复解码。MLT 依赖在构建时纳入发布产物，避免其扩展名缺失的内部导入交给消费者运行时解析。
 
 | 位置 | 职责 |
 | --- | --- |

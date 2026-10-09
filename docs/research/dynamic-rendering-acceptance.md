@@ -6,6 +6,12 @@
 
 ### 2026-10-09 测量修正
 
+#### 普通与压缩构建
+
+按用户最终要求，tsdown 留在根目录，两个源码入口采用 `tile.worker.ts`、`geometry.worker.ts` 命名。以同一配置定义输出 minify=false / true 两套构建：普通 `index.mjs`、`worker.mjs`、`geometry-worker.mjs` 保留可读代码；压缩版分别为 `index.min.mjs`、`worker.min.mjs`、`geometry-worker.min.mjs`。主入口引用对应版本的 Worker，共享模块同样使用该版本后缀，公开类型只生成一份。默认包入口使用普通版本，`cesium-vector-tileset/min` 导出压缩版本；中英文 README 与架构文档同步更新。
+
+ESLint → TSC → 库/demo build 通过。`plain-and-minified-builds` 的 20 项硬件浏览器/发布包回归全部通过（36.8s）：两种版本的 Node import/require、构造器身份、ESM/CommonJS 类型解析、可读与压缩文件及 Worker URL、实际 geometry Worker CDN/CSP 传输和 shared chunk 来源、parser Worker 消息、生产 demo 及失败/销毁控制。后续性能对比需要明确选择构建版本；当前 `index.mjs` 是普通版本，不能直接与此前同名压缩快照比较。上述结果不代表真实城市动态性能目标达成。
+
 #### 演示添加/移除与构建配置精简
 
 按用户要求删除 demo 的 tileset 包装组件和 Widget composable，`App.vue` 直接展示 `fromUrl`、`scene.primitives.add`、`scene.primitives.remove`。面板提供添加、移除；当前实例、加载取消、错误监听和 credits 在入口统一清理，选择与相机参数转换保留为纯配置函数。浏览器验证实际移除后集合为空、旧实例已销毁、画面已清除，重新添加使用新实例恢复绘制；加载中移除会取消请求，迟到响应不能重新加入实例。验证没有调用方 requestRender。

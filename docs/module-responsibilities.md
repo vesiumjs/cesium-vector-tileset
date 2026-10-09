@@ -6,11 +6,16 @@
 
 | 模块 | 实际调用方与状态归属 | 命名与拆分理由 |
 | --- | --- | --- |
-| `cesium-vector-tileset.ts` / `CesiumVectorTileset` | 公开 Primitive 入口，接收 Cesium 帧更新；拥有 Style、各渲染轨道、发布队列、驻留策略及最终销毁顺序 | 保留样式初始化、帧内顺序与资源交接协调；配置声明、样式下载、符号视图和 context 共享 Worker 生命周期由各自模块负责 |
+| `cesium-vector-tileset.ts` / `CesiumVectorTileset` | 公开 Primitive 入口，分发初始化、样式、图片、帧更新和销毁操作 | 入口不持有具体渲染算法；原生 PrimitiveCollection 与其子项的最终销毁仍由入口完成 |
+| `render/scene/tileset-renderer.ts` / `TilesetRenderer` | 持有 Style、各渲染轨道、发布队列与驻留策略，协调每帧的执行顺序和资源交接 | 接收实际 PrimitiveCollection owner；独立调度模块通过小接口管理自己的状态，不读取入口私有字段 |
+| `render/scene/scene-render-wake.ts` / `SceneRenderWake` | 管理请求代数、afterRender、祖先集合移除监听与符号排布的定时唤醒 | 隐藏或尚未 ready 时仍保留普通请求；移除帧独立于可取消的普通请求 |
+| `render/scene/frame-preparation.ts` / `FramePreparation` | 管理共享场景预算 lease、同帧多视口准入、静止加载及 idle/post-pass 准备 | 准备阶段只推进已准入工作；实际发布和求值继续由渲染协调模块安排 |
+| `render/scene/scene-symbol-placement.ts` / `SceneSymbolPlacement` | 消费完整相机快照，更新碰撞排布，退休完成淡出的符号集合 | 同一物理帧仅处理一次排布；场景脱离后清除视图缓存 |
+| `render/scene/style-change.ts`、`picked-feature.ts` | 分别分类样式变更与解析被拾取的保留要素代次 | 独立算法接收实际输入和必要能力，保留真实返回值，包括查找未命中的 undefined |
 | `tileset-options.ts`、`tileset-types.ts` | 包入口导出配置、样式图片与统计结果类型；公开类消费同一声明 | 让公共合同可独立阅读，避免在类方法中重复匿名图片与统计结构；不新增运行期状态 |
 | `tile/tile-pyramid.ts` / `TilePyramid` | Style 按来源创建；从 covering 选取理想瓦片，加载父子替代，管理活动集合与离屏缓存 | 原 `TileManager` 名称不表达层级选择；采用具体的瓦片金字塔概念 |
 | `tile/active-tiles.ts` / `ActiveTiles` | `TilePyramid` 持有，保存仍参与调度的瓦片并缓存排序与可渲染集合 | 原 `InViewTiles` 暗示几何可见性，实际包含加载中、替代及淡出瓦片；异步完成检查也改为 `_isTileActive` |
-| `render/scene/source-render-sync.ts` / `SourceRenderSync` | `CesiumVectorTileset.update()` 调用；持有每个来源的输入快照、模式、样式与图片修订、栅格就绪状态 | 保留独立模块；来源跨帧同步与驻留策略有不同状态和失效条件。将原 `SourceFrameSync` 合入驻留会混合职责 |
+| `render/scene/source-render-sync.ts` / `SourceRenderSync` | `TilesetRenderer.update()` 调用；持有每个来源的输入快照、模式、样式与图片修订、栅格就绪状态 | 保留独立模块；来源跨帧同步与驻留策略有不同状态和失效条件。将原 `SourceFrameSync` 合入驻留会混合职责 |
 | `render/scene/tile-residency.ts` / `TileResidency` | 来源同步与发布队列调用；决定场景瓦片暂留、恢复、地表与符号独立退役、显示所有者、父子遮罩和源级交接 | 保留驻留策略；不承担来源输入修订缓存、图片就绪重试或几何构建 |
 | `render/scene/tile-publish-queue.ts` / `TilePublishQueue` | 帧协调入口与来源同步提交工作；持有待构建任务，按预算推进地表与详情并提交 | 保留有状态队列；阶段、取消和旧代次交接是真实复杂度，不能改成无状态函数 |
 | `render/scene/scene-collections.ts` / `SceneCollections` | 发布、来源同步和驻留共同调用；接入新集合，预算推进首次 GPU 更新，延后销毁旧集合 | 栅格、图案方法同时处理 added 与 removed，使用 `applyRasterUpdate`、`applyPatternUpdate`；只有移除的方法才命名为 removal |
@@ -24,7 +29,7 @@
 | `render/line/dash-material.ts` / `DashMaterial` | 矢量与线渲染消费；持有 Native Material、图集上传修订及 canvas，更新 uniform；所有相关 Primitive 释放后销毁 | 原 `DashAtlasTexture` 未拥有 Texture，而是材质；移到线渲染目录，与 CPU `DashAtlas` 区分 |
 | `render/line/line-renderer.ts` | vector builder 与 paint updater 消费；处理实线、虚线及共享线几何 | `isDashStyleLayer` 只有这里消费，改为文件内函数；图片图案判定优先于虚线的行为保持 |
 | `render/symbol/symbol-renderer.ts` / `SymbolTileRenderer` | 符号资源、当前显示内容代次和碰撞范围输入；准备拟显示所有者并原子激活完整布局 | 显示代次与最新内容分开，未来标签不能挡住仍在显示的旧标签 |
-| `render/symbol/symbol-frame.ts` / `symbolFrame` | 公开类将冻结的 `CameraFrameSnapshot` 交给本函数；符号 renderer 消费投影、遮挡和碰撞视图 | 符号模块拥有 ECEF→场景投影、2D 世界 wrap、地球遮挡与 scratch 复用；帧协调入口只安排时序与预算 |
+| `render/symbol/symbol-frame.ts` / `symbolFrame` | `SceneSymbolPlacement` 将冻结的 `CameraFrameSnapshot` 交给本函数；符号 renderer 消费投影、遮挡和碰撞视图 | 符号模块拥有 ECEF→场景投影、2D 世界 wrap、地球遮挡与 scratch 复用；帧协调入口只安排时序与预算 |
 | `render/symbol/symbol-placement-pass.ts` / `SymbolPlacementScope` | renderer 持有当前、未来及局部交接范围；统一冻结视图、修订、时钟推进与完整结果 | 范围表达不同实际 occupancy，推进契约复用一套实现 |
 | `render/geometry/` | 矢量、图案、栅格及符号轨道使用坐标转换、细分和 Primitive 准备函数 | 按真实跨轨道共用职责保留；线条专用裁剪、布局与位置纹理归 `render/line/` |
 | `render/geometry/geometry-primitive.ts` / `GeometryPrimitive` | 场景首次更新队列推进 Native Primitive 准备、上传与 ready；保留布局和输入资源 | 保留 Native 状态机和预算推进；不再同时管理 context 共享 Worker 的创建、浏览器失败和引用计数 |
@@ -45,6 +50,7 @@
 | `worker/worker-channel.ts` / `WorkerChannel` | 主线程 dispatcher 与 Worker 各自创建；拥有一个 endpoint 的请求/响应、取消、handler、传输注册与消息队列 | 原 `Actor` 没有表达通信职责。唯一调度消费者就是本类，内联 `ThrottledInvoker` 的 MessageChannel 并负责关闭端口 |
 | `worker/dispatcher.ts` / `WorkerDispatcher` | 每个 Style 持有；将该客户端请求分派到共享 Worker，管理 channel 与租用释放 | 客户端路由与单通道通信是不同职责，保留 |
 | `worker/worker-pool.ts` / `WorkerPool` | dispatcher 获取与释放；持有原生 Worker、失败状态与订阅，最后一个客户端释放时终止 Worker | 保留共享生命周期；只返回惰性单例的旧 global/shared worker pool 文件并入这里 |
+| `util/browser.ts` / `browser` | 环境读取、动画帧与图片 canvas；tileset 和符号发布读取当前设备像素比例 | 环境信息集中在这里；Worker 创建在共享池中直接执行，不另设仅包装构造器的文件 |
 | `render/geometry/geometry-prepare-worker.ts` / `GeometryPrepareWorker` | GeometryPrimitive 按 context 获取和释放；拥有共享准备队列、惰性 TaskProcessor、CDN bootstrap URL、失败锁存及最后引用销毁 | context 资源生命周期独立于单个 Primitive；致命失败传播给队列，不重复登记或包装已接收请求的 Promise |
 | `render/geometry/geometry-prepare-queue.ts` / `GeometryPrepareQueue` | context 几何 Worker 持有；按 transfer 字节准入、微任务合批、取消和逐请求结算 | 队列唯一持有已接收请求的 resolve/reject；传输失败结算整队列，合法批回复中的单请求错误只影响该请求 |
 | `worker/tile-worker.ts` / `TileWorker` | Worker 入口创建；按客户端与来源管理 worker source，处理瓦片解析、重载与依赖取消 | 比通用 `Worker` 明确，不与浏览器原生 Worker 混称 |
@@ -65,3 +71,14 @@
 | `src/demo/camera-readout.vue` | app 传入实际 Scene；订阅 postRender，读取经纬度与 HPR，清理监听 | 姿态来自真实相机而非预设；不主动唤醒渲染，2D 显示 Native 正交视野宽度 |
 
 是否保留模块，取决于移除后复杂度是否真正消失。来源同步、驻留、地图切换、Worker 通信与共享池有独立状态和生命周期，应保留；仅转调请求、单独包装一个单例 getter、单消费者消息调度以及无调用者的功能应合并或删除。
+
+## 全库冗余抽象排查
+
+2026-10-09 对 400 个手写 TS、JS 和 Vue 文件建立定义、导入与调用清单，覆盖库、demo、构建配置、生成器及测试夹具。生成代码通过生成器核对，排查候选同时检查生产、测试和公共入口引用。
+
+- 将图案范围读取、图集版本转换、canvas 创建、栅格 GeometryInstance 构造、请求计时启动、Light 校验及字节大小查询等薄包装内联到实际消费者。
+- 删除单消费者的 `DictionaryCoder`；WorkerTile 直接建立排序后的来源图层编号，FeatureIndex 复用同一顺序。合并重复的退休集合取出方法与资源销毁转发。
+- 删除无人使用的同步线构建、纹理同步创建、旧瓦片 ID 查询、退休符号过滤及挤出交点查询入口。纹理打包测试直接测试 `geometry/line-position-packing.ts`，不再借助 GPU 模块中的包装与 mock。
+- 清理 demo 查询、构建生成器和浏览器夹具中的单次包装。仅供本文件使用的坐标与标签算法收为私有函数，保留有算法、预算、缓存或生命周期职责的模块。
+
+后续修改采用 [项目编码约定](../AGENTS.md) 中的判断标准。一次调用本身不构成删除理由；关键是独立实现是否承担了调用者需要的行为。
