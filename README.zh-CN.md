@@ -1,4 +1,4 @@
-# cesium-vector-tileset
+# cesium-vector-tileset [![npm 版本](https://img.shields.io/npm/v/cesium-vector-tileset.svg)](https://www.npmjs.com/package/cesium-vector-tileset)
 
 [English](./README.md) | 简体中文
 
