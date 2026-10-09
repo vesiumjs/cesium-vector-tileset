@@ -1,7 +1,11 @@
 import type { Cartesian4 } from 'cesium';
+import type { RenderFrameState } from '../../packages/cesium-vector-tileset/src/render/scene/render-frame';
 import type { NativePrimitive, NativeShaderProgram, TestViewer } from './browser-types';
-import { BoundingSphere, Cartesian3, Cartographic, Color, ColorGeometryInstanceAttribute, ComponentDatatype, Geometry, GeometryAttribute, GeometryInstance, JulianDate, PerInstanceColorAppearance, PerspectiveFrustum, Primitive, PrimitiveType, Rectangle, SceneMode } from 'cesium';
+import { BoundingSphere, Cartesian3, Cartographic, Color, ColorGeometryInstanceAttribute, ComponentDatatype, Geometry, GeometryAttribute, GeometryInstance, JulianDate, PerInstanceColorAppearance, PerspectiveFrustum, Primitive, PrimitiveCollection, PrimitiveType, Rectangle, SceneMode } from 'cesium';
 import { GeometryPrimitive } from '../../packages/cesium-vector-tileset/src/render/geometry/geometry-primitive';
+import { FrameBudget } from '../../packages/cesium-vector-tileset/src/render/scene/frame-budget';
+import { SceneCollections } from '../../packages/cesium-vector-tileset/src/render/scene/scene-collections';
+import { FRAME_CPU_TARGET_MS } from '../../packages/cesium-vector-tileset/src/render/scene/scene-frame-budget';
 
 // Frozen pre-compression shader. The reference below uses Native's own default
 // shader, position encoding and czm_computePosition instead of this source.
@@ -101,8 +105,22 @@ export async function compareSurfaceFloat(viewer: TestViewer, hidden: { show: bo
   const time = JulianDate.clone(viewer.clock.currentTime);
   const morphTime = scene.morphTime;
   const appearance = new PerInstanceColorAppearance({ flat: true, translucent: false, vertexShaderSource: oldSurfaceShader(morph) });
-  const production = [0, 1].map(() => scene.primitives.add(new GeometryPrimitive({ geometryInstances: instances(), appearance, vertexCacheOptimize: true, compressVertices: true }, morph ? 'surface-morph' : 'surface-planar')) as unknown as NativePrimitive);
-  const reference = scene.primitives.add(new Primitive({ geometryInstances: instances(), appearance: new PerInstanceColorAppearance({ flat: true, translucent: false }), asynchronous: false, vertexCacheOptimize: true, compressVertices: true })) as NativePrimitive;
+  // Exercise the real owned preparation queue while the comparison freezes
+  // its camera/time and temporarily hides the application's tileset.
+  class OracleCollection extends PrimitiveCollection {
+    readonly collections = new SceneCollections(this, () => scene.requestRender(), () => true);
+
+    update(frameState?: RenderFrameState): void {
+      const budget = new FrameBudget(FRAME_CPU_TARGET_MS);
+      const pumped = this.collections.pumpFirstUpdates(frameState!, budget);
+      this.collections.updateChildren(frameState!, pumped);
+    }
+  }
+  const group = scene.primitives.add(new OracleCollection());
+  const primitives = [0, 1].map(() => group.add(new GeometryPrimitive({ geometryInstances: instances(), appearance, vertexCacheOptimize: true, compressVertices: true }, morph ? 'surface-morph' : 'surface-planar')));
+  group.collections.queueFirstUpdate(primitives);
+  const production = primitives as unknown as NativePrimitive[];
+  const reference = group.add(new Primitive({ geometryInstances: instances(), appearance: new PerInstanceColorAppearance({ flat: true, translucent: false }), asynchronous: false, vertexCacheOptimize: true, compressVertices: true })) as NativePrimitive;
   const render = () => {
     scene.requestRender();
     scene.render(time);
@@ -185,7 +203,7 @@ export async function compareSurfaceFloat(viewer: TestViewer, hidden: { show: bo
       fps: scene.debugShowFramesPerSecond,
       destroyed: (() => {
         for (const primitive of [...production, reference])
-          scene.primitives.remove(primitive);
+          group.remove(primitive);
         return [...production, reference].every(primitive => primitive.isDestroyed());
       })(),
     };
@@ -193,8 +211,9 @@ export async function compareSurfaceFloat(viewer: TestViewer, hidden: { show: bo
   finally {
     for (const primitive of [...production, reference]) {
       if (!primitive.isDestroyed())
-        scene.primitives.remove(primitive);
+        group.remove(primitive);
     }
+    scene.primitives.remove(group);
     // 2D/CV positionWC uses projected axes; MORPHING rejects setView. Restore
     // the original local vectors and frustum before resuming the real animation.
     Cartesian3.clone(cameraView.position, camera.position);

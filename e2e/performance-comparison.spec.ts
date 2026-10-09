@@ -8,6 +8,7 @@ import { fromGeojsonVt, test } from './fixtures';
 
 interface PerformanceCombineTask {
   id: number;
+  createTaskIds: number[];
   started: number;
   instances: number;
   bytes: number;
@@ -15,7 +16,7 @@ interface PerformanceCombineTask {
   wallMs?: number;
   error?: unknown;
 }
-interface PerformanceCreateTask extends Omit<PerformanceCombineTask, 'attributes'> {
+interface PerformanceCreateTask extends Omit<PerformanceCombineTask, 'attributes' | 'createTaskIds'> {
   transferredBuffers: number;
   createdBytes?: number;
 }
@@ -182,6 +183,7 @@ test('local MVT renderer performance comparison @performance', async ({ browser,
       await page.addInitScript(() => {
         window.performanceCombineTasks = [];
         window.performanceCreateTasks = [];
+        const createdResults = new WeakMap<object, PerformanceCreateTask>();
         const NativeWorker = window.Worker;
         window.Worker = class extends NativeWorker {
           measuredTasks = new Map<number, PerformanceCombineTask | PerformanceCreateTask>();
@@ -194,8 +196,11 @@ test('local MVT renderer performance comparison @performance', async ({ browser,
               if (task) {
                 task.wallMs = performance.now() - task.started;
                 task.error = event.data.error ?? null;
-                if ('transferredBuffers' in task)
+                if ('transferredBuffers' in task) {
                   task.createdBytes = event.data.result?.packedData?.byteLength;
+                  if (event.data.result?.packedData)
+                    createdResults.set(event.data.result.packedData.buffer, task);
+                }
                 this.measuredTasks.delete(event.data.id);
               }
             });
@@ -217,6 +222,14 @@ test('local MVT renderer performance comparison @performance', async ({ browser,
             if (parameters?.packedInstances && parameters.createGeometryResults) {
               const task: PerformanceCombineTask = {
                 id: message.id,
+                // Native TaskProcessor IDs belong to their processor. Match
+                // each create chunk by its actual returned buffer instead.
+                createTaskIds: parameters.createGeometryResults.map((result) => {
+                  const created = createdResults.get(result.packedData.buffer);
+                  if (!created)
+                    throw new Error('Native combine input has no observed create result');
+                  return created.id;
+                }),
                 started: performance.now(),
                 instances: parameters.packedInstances[0],
                 bytes: parameters.packedInstances.byteLength + parameters.createGeometryResults.reduce((sum, item) => sum + item.packedData.byteLength, 0),
@@ -261,10 +274,10 @@ test('local MVT renderer performance comparison @performance', async ({ browser,
         if (renderer === 'cesium') {
           assert.equal(result.cold.nativePacking.filter(call => call.method === 'packCreateGeometryResults').length, 0, 'Native Geometry packing ran on the main thread');
           assert.ok(result.cold.nativePacking.some(call => call.method === 'packCombineGeometryParameters'), 'Native instance metadata packing was not observed');
-          assert.deepEqual([...new Set(result.cold.createTasks.map(task => task.id))].sort(), result.cold.tasks.map(task => task.id).sort(), 'Native cold create and combine task chains differ');
+          assert.deepEqual(result.cold.createTasks.map(task => task.id).sort(), result.cold.tasks.flatMap(task => task.createTaskIds).sort(), 'Native cold create and combine task chains differ');
           assert.ok(result.cold.createTasks.length > 0 && result.cold.createTasks.every(task => Number.isFinite(task.wallMs) && task.error === null && task.transferredBuffers === 0 && (task.createdBytes ?? 0) > 0), 'Native cold create did not clone and pack Geometry in its Worker');
           for (const task of result.cold.tasks)
-            assert.equal(result.cold.createTasks.filter(created => created.id === task.id).reduce((sum, created) => sum + created.instances, 0), task.instances, 'Native cold create pieces changed the combined instance count');
+            assert.equal(result.cold.createTasks.filter(created => task.createTaskIds.includes(created.id)).reduce((sum, created) => sum + created.instances, 0), task.instances, 'Native cold create pieces changed the combined instance count');
           assert.equal(result.cold.nativePacking.filter(call => call.method === 'unpackAndAttributePacking').length, result.cold.nativePacking.filter(call => call.method === 'unpackCombineGeometryResults').length, 'Native cold async attribute packing was not observed for every result');
           assert.ok(result.cold.tasks.length > 0 && result.cold.tasks.every(task => Number.isFinite(task.wallMs) && task.error === null), 'Native cold Worker task did not settle');
         }

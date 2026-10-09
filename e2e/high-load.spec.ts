@@ -21,7 +21,7 @@ interface ColdFrame {
   camera: { position: CameraVector; direction: CameraVector; right: CameraVector; fovY: number; aspectRatio: number };
   globe: string[];
   sources: Array<{ id: string; ideal: string[]; renderable: string[]; supplemented: boolean }>;
-  jobs: Array<{ tileId: string; phase: string; generationId: number }>;
+  jobs: Array<{ tileId: string; surfaces: string; symbols: string; generationId: number }>;
 }
 interface ColdObliqueReport {
   loadMs: number;
@@ -34,7 +34,7 @@ interface ColdObliqueReport {
   warmedSources: Array<{ id: string; ideal: string[]; renderable: string[] }>;
   warmedMemory: Array<{ key: string; bytes: number; pinned?: boolean }>;
   held: Array<{ id: string; tiles: string[] }>;
-  jobs: Array<{ tileId: string; phase: string; generationId: number }>;
+  jobs: Array<{ tileId: string; surfaces: string; symbols: string; generationId: number }>;
   firstUpdates: Array<{ show: boolean; ready: boolean; index: number }>;
   measurements: Window['renderValidation']['measurements'];
   renderErrors: string[];
@@ -129,7 +129,7 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
           camera: { position: { ...camera.positionWC }, direction: { ...camera.directionWC }, right: { ...camera.rightWC }, fovY: camera.frustum.fovy, aspectRatio: camera.frustum.aspectRatio },
           globe: validation.viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`),
           sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds(), supplemented: !!covering._globeCoverings.get(pyramid).supplementalPose })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase, generationId: job.generationId })),
+          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols, generationId: job.generationId })),
         });
       });
       validation.setObliqueView();
@@ -165,7 +165,7 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
           warmedSources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
           warmedMemory,
           held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase, generationId: job.generationId })),
+          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols, generationId: job.generationId })),
           firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, index: update.index }))),
           measurements: validation.measurements,
           renderErrors: validation.renderErrors,
@@ -246,7 +246,7 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
         held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
         memory,
         hiddenSurfaceLayers: [...tileset._tileResidency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
-        jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase })),
+        jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
         firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, length: collection.length, index: update.index, owners: [...tileset._vectorRenderer.collections].filter(([, candidate]) => candidate === collection).map(([id]) => id) }))),
       };
     };
