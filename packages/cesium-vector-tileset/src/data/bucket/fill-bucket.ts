@@ -128,6 +128,9 @@ export class FillBucket extends FillBucketRuntime {
     [_: string]: ImagePosition;
   }): void {
     for (const polygon of classifyRings(geometry, EARCUT_MAX_RINGS)) {
+      // All segment chunks of this exact polygon share lineage. Feature IDs
+      // alone cannot distinguish overlapping MultiPolygon components.
+      const polygonGroupId = this.polygons.length;
       const outerRing = polygon[0];
       // A valid hole cannot lie inside an outer ring that is wholly outside
       // the tile. Skip the complete polygon instead of letting an orphaned
@@ -192,6 +195,7 @@ export class FillBucket extends FillBucketRuntime {
         segment.vertexLength += flat.length / 2;
         segment.primitiveLength += triangles.length / 3;
         this.polygons.push({
+          polygonGroupId,
           featureIndex: index,
           vertexOffset: polygonVertexOffset,
           vertexLength: flat.length / 2,
@@ -226,6 +230,7 @@ export class FillBucket extends FillBucketRuntime {
         let chunkPrimitiveOffset = polygonPrimitiveStart;
         for (const chunk of chunks) {
           this.polygons.push({
+            polygonGroupId,
             featureIndex: index,
             vertexOffset: chunkVertexOffset,
             vertexLength: chunk.vertexLength,

@@ -327,6 +327,17 @@ export class ProgramConfiguration {
     }
   }
 
+  /** Bind transferred paint arrays to the scene's compiled layer expressions. */
+  bindLayer(layer: TypedStyleLayer): void {
+    for (const property in this.binders) {
+      const value = getPaintProperty(layer, property);
+      if (!(value instanceof PossiblyEvaluatedPropertyValue) || value.value.kind === 'constant') {
+        throw new Error(`Cannot bind transferred paint property ${layer.id}.${property}`);
+      }
+      this.binders[property].expression = value.value;
+    }
+  }
+
   /**
    * Returns the CPU-side attribute array for a data-driven or
    * cross-faded paint property, or undefined for constant properties.
@@ -428,6 +439,13 @@ export class ProgramConfigurationSet<Layer extends TypedStyleLayer> {
     this._bufferOffset = 0;
     this._featureRanges = [];
     this._featureRangeByIndex = new Map();
+  }
+
+  /** Expressions belong to scene layers; only bucket paint data crosses the channel. */
+  bindLayers(layers: readonly TypedStyleLayer[]): void {
+    for (const layer of layers) {
+      this.get(layer.id).bindLayer(layer);
+    }
   }
 
   populatePaintArrays(length: number, feature: Feature, index: number, options: PaintOptions): void {
@@ -581,10 +599,10 @@ function getPaintProperty(layer: TypedStyleLayer, property: string): PaintProper
 }
 
 export function registerProgramConfigurationTransfers(registry: TransferRegistry): void {
-  registry.register('SourceExpressionBinder', SourceExpressionBinder);
-  registry.register('CrossFadedPatternBinder', CrossFadedPatternBinder);
-  registry.register('CrossFadedDasharrayBinder', CrossFadedDasharrayBinder);
-  registry.register('CompositeExpressionBinder', CompositeExpressionBinder);
+  registry.register('SourceExpressionBinder', SourceExpressionBinder, { omit: ['expression'] });
+  registry.register('CrossFadedPatternBinder', CrossFadedPatternBinder, { omit: ['expression'] });
+  registry.register('CrossFadedDasharrayBinder', CrossFadedDasharrayBinder, { omit: ['expression'] });
+  registry.register('CompositeExpressionBinder', CompositeExpressionBinder, { omit: ['expression'] });
   registry.register('ProgramConfiguration', ProgramConfiguration);
   registry.register('ProgramConfigurationSet', ProgramConfigurationSet, { omit: ['_featureRangeByIndex', '_featureRangesById'] });
 }

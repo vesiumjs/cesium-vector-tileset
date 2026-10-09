@@ -95,7 +95,9 @@ function transport(result: WorkerTileWithData, id: OverscaledTileID, label: stri
 }
 
 function pick(index: Tile['latestFeatureIndex'], layerId: string, featureIndex = 0) {
-  const owner = { _tileResidency: { featureIndex: () => index } } as unknown as CesiumVectorTileset;
+  const owner = Object.assign(Object.create(CesiumVectorTileset.prototype), {
+    _tileResidency: { featureIndex: () => index },
+  }) as CesiumVectorTileset;
   return CesiumVectorTileset.prototype.pick.call(owner, { type: 'circle', tileId: 'interaction', generationId: 1, layerId, featureIndex });
 }
 

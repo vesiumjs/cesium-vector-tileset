@@ -9,6 +9,7 @@ import type { CollisionBoxArray } from './array-types.g';
 import type { FeatureIndex } from './feature-index';
 import type { FeatureLookup, PaintOptions } from './program-configuration';
 import type { ProjectedBucketGeometry } from './projected-geometry';
+import { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket, SymbolBucket } from './bucket-runtime';
 
 export interface BucketParameters<Layer extends TypedStyleLayer> {
   index: number;
@@ -91,6 +92,17 @@ export function deserialize(input: Bucket[], style: Style): { [_: string]: Bucke
     // look up StyleLayer objects from layer ids (since we don't
     // want to waste time serializing/copying them from the worker)
     bucket.layers = layers;
+    const typedLayers = layers as TypedStyleLayer[];
+    if (bucket instanceof SymbolBucket) {
+      bucket.text.programConfigurations.bindLayers(typedLayers);
+      bucket.icon.programConfigurations.bindLayers(typedLayers);
+    }
+    else if (bucket instanceof CircleBucket || bucket instanceof FillBucket || bucket instanceof FillExtrusionBucket || bucket instanceof LineBucket) {
+      bucket.programConfigurations.bindLayers(typedLayers);
+    }
+    else {
+      throw new TypeError('Cannot bind paint for an unsupported bucket');
+    }
     const layersById = new Map(layers.map(layer => [layer.id, layer] as const));
     bucket.stateDependentLayers = bucket.stateDependentLayerIds.flatMap((layerId) => {
       const layer = layersById.get(layerId);

@@ -8,9 +8,13 @@ import type { SizeData } from '../symbol/symbol-size';
 import type { TransferRegistry } from '../worker/transfer-registry';
 import type { FillExtrusionLayoutArray, FillLayoutArray, GlyphOffsetArray, PosArray, SymbolInstanceArray, SymbolLineVertexArray } from './array-types.g';
 import type { Bucket } from './bucket';
+import type { PackedLinePaths } from './line-path-transfer';
 import type { FeatureLookup, PaintOptions, ProgramConfigurationSet } from './program-configuration';
 import type { ProjectedBucketGeometry } from './projected-geometry';
+import type { PackedProjectedGeometry } from './projected-geometry-transfer';
 import { PlacedSymbolArray, SymbolLayoutArray, TriangleIndexArray } from './array-types.g';
+import { restoreLinePaths, serializeLinePaths } from './line-path-transfer';
+import { restoreProjectedGeometry, serializeProjectedGeometry } from './projected-geometry-transfer';
 import { SegmentVector } from './segment';
 
 /** Geometry span owned by a source feature; independent of its dense paint slot. */
@@ -76,8 +80,10 @@ export class FillBucket implements Bucket {
    * Segments are buffer chunks that may contain several polygons, so this is
    * the authoritative per-polygon geometry used by the Cesium rendering
    * backend.
+   * polygonGroupId identifies one original classified polygon, including
+   * all of its segment chunks; separate components never share that ID.
    */
-  polygons: Array<{ featureIndex: number; vertexOffset: number; vertexLength: number; primitiveOffset: number; primitiveLength: number; holes: number[] }>;
+  polygons: Array<{ polygonGroupId: number; featureIndex: number; vertexOffset: number; vertexLength: number; primitiveOffset: number; primitiveLength: number; holes: number[] }>;
 
   update(states: FeatureStates, lookup: FeatureLookup, options: PaintOptions): void {
     if (!this.stateDependentLayers.length)
@@ -220,12 +226,30 @@ export class SymbolBucket implements Bucket {
 
 /** Worker builder subclasses retain these wire identities through their runtime parent. */
 export function registerBucketTransfers(registry: TransferRegistry): void {
-  registry.register<CircleBucket & { availableImages?: string[] }>('CircleBucket', CircleBucket, { omit: ['layers', 'stateDependentLayers', 'availableImages'] });
-  registry.register<FillBucket & { patternFeatures?: unknown; availableImages?: string[] }>('FillBucket', FillBucket, { omit: ['layers', 'patternFeatures', 'stateDependentLayers', 'availableImages'] });
+  registry.register<CircleBucket & { availableImages?: string[] }>('CircleBucket', CircleBucket, { omit: ['layers', 'stateDependentLayers', 'availableImages'], serialize: serializeProjectedBucket, restore: restoreProjectedBucket });
+  registry.register<FillBucket & { patternFeatures?: unknown; availableImages?: string[] }>('FillBucket', FillBucket, { omit: ['layers', 'patternFeatures', 'stateDependentLayers', 'availableImages'], serialize: serializeProjectedBucket, restore: restoreProjectedBucket });
   registry.register<FillExtrusionBucket & { features?: unknown; availableImages?: string[] }>('FillExtrusionBucket', FillExtrusionBucket, { omit: ['layers', 'features', 'stateDependentLayers', 'availableImages'] });
-  registry.register<LineBucket & { patternFeatures?: unknown; availableImages?: string[] }>('LineBucket', LineBucket, { omit: ['layers', 'patternFeatures', 'stateDependentLayers', 'availableImages'] });
+  registry.register<LineBucket & { patternFeatures?: unknown; availableImages?: string[] }>('LineBucket', LineBucket, {
+    omit: ['layers', 'patternFeatures', 'stateDependentLayers', 'availableImages'],
+    serialize: bucket => ({ ...serializeProjectedBucket(bucket), linePaths: serializeLinePaths(bucket.linePaths) }),
+    restore: (bucket) => {
+      const packed = bucket as unknown as { linePaths: PackedLinePaths };
+      bucket.linePaths = restoreLinePaths(packed.linePaths);
+      restoreProjectedBucket(bucket);
+    },
+  });
   registry.register('SymbolBuffers', SymbolBuffers);
   registry.register<SymbolBucket & { collisionBoxArray?: unknown; features?: unknown; compareText?: unknown; availableImages?: string[] }>('SymbolBucket', SymbolBucket, {
     omit: ['layers', 'collisionBoxArray', 'features', 'compareText', 'availableImages'],
   });
+}
+
+function serializeProjectedBucket(bucket: { projectedGeometry?: ProjectedBucketGeometry }): Record<string, unknown> {
+  return { ...bucket, projectedGeometry: bucket.projectedGeometry && serializeProjectedGeometry(bucket.projectedGeometry) };
+}
+
+function restoreProjectedBucket(bucket: { projectedGeometry?: ProjectedBucketGeometry }): void {
+  const packed = bucket as unknown as { projectedGeometry?: PackedProjectedGeometry };
+  if (packed.projectedGeometry)
+    bucket.projectedGeometry = restoreProjectedGeometry(packed.projectedGeometry);
 }
