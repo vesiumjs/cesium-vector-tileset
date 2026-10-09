@@ -1106,7 +1106,8 @@ ESLint、完整 TypeScript 检查、40 个文件 / 371 个单测及库/demo 构�
 pnpm exec playwright test e2e/camera-dynamics.spec.ts --grep-invert '@live'
 E2E_GPU=hardware E2E_LIVE=1 E2E_CITY_RESOURCES=capture pnpm exec playwright test e2e/camera-dynamics.spec.ts
 E2E_GPU=hardware E2E_LIVE=1 E2E_CITY_RESOURCES=replay E2E_PROFILE=1 E2E_VERIFY_BUDGET=1 pnpm exec playwright test e2e/camera-dynamics.spec.ts
-E2E_GPU=hardware E2E_PERF_GPU=1 E2E_PERFORMANCE=1 pnpm exec playwright test e2e/performance-comparison.spec.ts
+E2E_GPU=hardware E2E_CITY_PERFORMANCE=1 E2E_CITY_RESOURCES=capture pnpm exec playwright test e2e/city-performance.spec.ts
+E2E_GPU=hardware E2E_CITY_PERFORMANCE=1 E2E_CITY_RESOURCES=replay E2E_VERIFY_CITY_BUDGET=1 pnpm exec playwright test e2e/city-performance.spec.ts
 ```
 
 重放缺失资源会失败，不回退实网。相机覆盖存在调度差异，首次 capture 必须覆盖实际运行所需的全部瓦片。基准的 create/combine 关联按实际返回并传输的结果 buffer 核对；Native TaskProcessor 的消息 ID 仅在各自 processor 内有意义，不能跨 processor 对比。

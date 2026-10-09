@@ -59,7 +59,7 @@ E2E_GPU=hardware E2E_LIVE=1 pnpm exec playwright test e2e/demo-presets.spec.ts
 
 该回归连续执行缩放、绕目标旋转、倾斜与返回，并保存实际相机、渲染统计和五阶段画面。[预设筛选与实景校验记录](./research/demo-preset-validation.md)说明保留理由、被删除视图和已验证范围。
 
-修改代码后，依次运行 `pnpm lint:eslint`、`pnpm lint:tsc` 和相关测试。单元测试放在被测试代码同级的 `__test__/` 目录，浏览器测试位于 `e2e/`。
+修改代码后，先运行 `pnpm lint:eslint`、`pnpm lint:tsc`，再验证受影响的行为。文档、命名、简单配置和转调不需要默认新增测试；新测试应能发现真实错误，优先复用已有用例。单元测试放在被测试代码同级的 `__test__/` 目录，浏览器测试位于 `e2e/`。
 
 生成的样式属性、struct array 和 Unicode 表应通过命令重新生成，不要手工编辑：
 
@@ -75,7 +75,7 @@ pnpm lint:eslint
 
 向 `main` 推送或创建以 `main` 为目标的 PR 时，GitHub Actions 会执行 lint、类型检查、单元测试、库与演示构建，以及四分片的默认 Playwright 测试集。`dev` 推送不会触发工作流；来源为 `dev` 的 PR 和在 `dev` 上的手动运行会跳过任务。现有测试配置会排除外部服务 live 测试和需要显式启用的性能测试。浏览器测试失败时会上传报告与失败产物。
 
-推送 `v*` 标签后，工作流先执行同一套检查，再通过 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) 将 **cesium-vector-tileset** 发布到 npm。在 npm 包设置中添加 GitHub Actions trusted publisher：
+推送 `v*` 标签后，发布工作流只校验版本、构建、打包并通过 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) 将 **cesium-vector-tileset** 发布到 npm，不运行 lint、单测或 e2e。日常检查由 `main` 和 PR 的 CI 完成。在 npm 包设置中添加 GitHub Actions trusted publisher：
 
 | 字段                 | 值                      |
 | -------------------- | ----------------------- |

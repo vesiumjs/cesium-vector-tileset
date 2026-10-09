@@ -33,9 +33,11 @@ E2E_GPU=hardware E2E_LIVE=1 pnpm exec playwright test e2e/camera-dynamics.spec.t
 pnpm lint:eslint
 pnpm lint:tsc
 pnpm test
+pnpm build:ci
 pnpm build
 E2E_GPU=hardware pnpm exec playwright test --grep-invert '@live|@performance'
-E2E_GPU=hardware E2E_PERF_GPU=1 E2E_PERFORMANCE=1 pnpm exec playwright test e2e/performance-comparison.spec.ts --grep '@performance'
+E2E_GPU=hardware E2E_CITY_PERFORMANCE=1 E2E_CITY_RESOURCES=capture pnpm exec playwright test e2e/city-performance.spec.ts
+E2E_GPU=hardware E2E_CITY_PERFORMANCE=1 E2E_CITY_RESOURCES=replay E2E_VERIFY_CITY_BUDGET=1 pnpm exec playwright test e2e/city-performance.spec.ts
 ```
 
 维护用例位于根目录 `e2e/`，辅助代码在 `e2e/fixtures/`，使用 TypeScript 并纳入完整类型检查。正式性能入口默认跳过，必须设置 `E2E_PERFORMANCE=1`；`E2E_PERF_GPU=1` 请求并核验实际硬件 renderer，`E2E_GPU=hardware` 控制其它用例。SwiftShader 结果不能外推硬件吞吐。

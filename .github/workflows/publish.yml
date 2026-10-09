@@ -12,11 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  checks:
-    uses: ./.github/workflows/ci.yml
-
   publish-npm:
-    needs: checks
     runs-on: ubuntu-24.04
     environment: Publish Package
     permissions:
