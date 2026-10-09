@@ -192,7 +192,9 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
   _collectResourceTiming: boolean;
   _removed: boolean;
 
-  /** @internal */
+  /**
+   * @internal
+   */
   constructor(id: string, options: GeoJSONSourceOptions, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super();
 
@@ -274,18 +276,30 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
     };
   }
 
+  /**
+   * @internal
+   */
   private _hasPendingWorkerUpdate(): boolean {
     return this._pendingWorkerUpdate.data !== undefined || this._pendingWorkerUpdate.diff !== undefined || this._pendingWorkerUpdate.updateCluster;
   }
 
+  /**
+   * @internal
+   */
   private _pixelsToTileUnits(pixelValue: number): number {
     return pixelValue * (EXTENT / this.tileSize);
   }
 
+  /**
+   * @internal
+   */
   private _tileUnitsToPixels(tileUnitValue: number): number {
     return tileUnitValue / (EXTENT / this.tileSize);
   }
 
+  /**
+   * @internal
+   */
   private _getClusterMaxZoom(clusterMaxZoom: number): number {
     const effectiveClusterMaxZoom = clusterMaxZoom !== undefined ? Math.round(clusterMaxZoom) : this.maxzoom - 1;
     if (!(Number.isInteger(clusterMaxZoom) || clusterMaxZoom === undefined)) {
@@ -464,8 +478,9 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
    * Responsible for invoking WorkerSource's geojson.loadData target, which
    * handles loading the geojson data and preparing to serve it up as tiles,
    * using geojson-vt or supercluster as appropriate.
+   * @internal
    */
-  async _updateWorkerData(): Promise<void> {
+  private async _updateWorkerData(): Promise<void> {
     if (this._isUpdatingWorker)
       return this._updatePromise;
 
@@ -494,6 +509,7 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
 
   /**
    * Create the parameters object that will be sent to the worker and used to load GeoJSON.
+   * @internal
    */
   private async _getLoadGeoJSONParameters(data?: string | GeoJSON.GeoJSON<GeoJSON.Geometry>, diff?: GeoJSONSourceDiff, updateCluster?: boolean): Promise<LoadGeoJSONParameters> {
     const params: LoadGeoJSONParameters = Object.assign({ type: this.type, source: this.id }, this.workerOptions);
@@ -531,6 +547,7 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
 
   /**
    * Send the worker update data from the main thread to the worker
+   * @internal
    */
   private async _dispatchWorkerUpdate(optionsPromise: Promise<LoadGeoJSONParameters>) {
     this._isUpdatingWorker = true;
@@ -581,6 +598,7 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
 
   /**
    * Apply resource timing data to the event object.
+   * @internal
    */
   private _applyResourceTiming(eventData: { resourceTiming?: PerformanceResourceTiming[] }, result: GeoJSONWorkerSourceLoadDataResult) {
     if (!this._collectResourceTiming)
@@ -601,6 +619,7 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
    * Apply a diff to this source's data and return the affected feature geometries.
    * @param diff - The {@link GeoJSONSourceDiff} to apply.
    * @returns The affected geometries, or undefined if the diff is not applicable or all geometries are affected.
+   * @internal
    */
   private _applyDiffToSource(diff?: GeoJSONSourceDiff): GeoJSON.Geometry[] | undefined {
     if (!diff) {
@@ -633,6 +652,7 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
    * Get options for use in determining whether to reload a tile based on the modified features.
    * @param affectedGeometries - The feature geometries affected by the update.
    * @returns A {@link GeoJSONSourceShouldReloadTileOptions} object which contains an array of affected bounds caused by the update.
+   * @internal
    */
   private _getShouldReloadTileOptions(affectedGeometries?: GeoJSON.Geometry[]): GeoJSONSourceShouldReloadTileOptions | undefined {
     if (!affectedGeometries)
@@ -701,6 +721,9 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
     return request.promise;
   }
 
+  /**
+   * @internal
+   */
   private async _loadTile(tile: Tile, request: TileLoadRequest<void>): Promise<void> {
     while (!this._removed && !tile.aborted && !request.controller.signal.aborted) {
       const version = request.version;

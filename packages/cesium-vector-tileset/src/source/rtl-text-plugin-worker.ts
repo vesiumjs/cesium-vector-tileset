@@ -16,11 +16,17 @@ class RTLWorkerPlugin implements RTLTextPlugin {
   pluginURL: string = null;
   loadScriptResolve: () => void = () => {};
 
+  /**
+   * @internal
+   */
   private setState(state: PluginState): void {
     this.pluginStatus = state.pluginStatus;
     this.pluginURL = state.pluginURL;
   }
 
+  /**
+   * @internal
+   */
   private getState(): PluginState {
     return {
       pluginStatus: this.pluginStatus,

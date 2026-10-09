@@ -87,7 +87,9 @@ export class CanvasSource extends ImageSource {
 
   _playing = false;
 
-  /** @internal */
+  /**
+   * @internal
+   */
   constructor(id: string, options: CanvasSourceSpecification, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super(id, options, dispatcher, eventedParent);
     this.type = 'canvas';
@@ -133,7 +135,7 @@ export class CanvasSource extends ImageSource {
       return;
     }
 
-    this._finishLoading();
+    this.finishLoading();
   }
 
   /**
@@ -205,7 +207,10 @@ export class CanvasSource extends ImageSource {
     return this._playing;
   }
 
-  _hasInvalidDimensions(): boolean {
+  /**
+   * @internal
+   */
+  private _hasInvalidDimensions(): boolean {
     const canvas = this.canvas;
     if (!canvas)
       return true;
@@ -217,6 +222,9 @@ export class CanvasSource extends ImageSource {
     return false;
   }
 
+  /**
+   * @internal
+   */
   private _getCanvas(): HTMLCanvasElement | undefined {
     const configuredCanvas = this.options.canvas;
     if (configuredCanvas instanceof HTMLCanvasElement) {

@@ -88,7 +88,9 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   isTileClipped: boolean;
   _tileJSONRequest?: AbortController;
   _loaded: boolean;
+
   private _removed = false;
+
   private readonly _tileLoads = new Map<Tile, TileLoadRequest<LoadTileResult | void>>();
 
   constructor(id: string, options: VectorTileSourceOptions, dispatcher: WorkerDispatcher, eventedParent: Evented) {
@@ -252,6 +254,9 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
     return request.promise;
   }
 
+  /**
+   * @internal
+   */
   private async _loadTile(tile: Tile, request: TileLoadRequest<LoadTileResult | void>): Promise<LoadTileResult | void> {
     while (!this._removed && !tile.aborted && !request.controller.signal.aborted) {
       const version = request.version;
@@ -328,6 +333,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   /**
    * When the requested tile has a higher canonical Z than source maxzoom, pass overzoom parameters so worker can load the
    * deepest tile at source max zoom to generate sub tiles using geojsonvt for highest performance on vector overscaling
+   * @internal
    */
   private async _getOverzoomParameters(tile: Tile): Promise<OverzoomParameters | undefined> {
     if (tile.tileID.canonical.z <= this.maxzoom) {
@@ -345,6 +351,9 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
     };
   }
 
+  /**
+   * @internal
+   */
   private _afterTileLoadWorkerResponse(tile: Tile, data: WorkerTileResult) {
     if (data?.resourceTiming) {
       tile.resourceTiming = data.resourceTiming;

@@ -50,11 +50,17 @@ export class VectorTileWorkerSource implements WorkerSource {
   availableImages: string[];
   tileState: WorkerTileState;
   overzoomedTileResultCache: BoundedLRUCache<string, LoadVectorTileResult>;
+
   private parentTileCache: BoundedLRUCache<string, ParentTile>;
+
   private pendingParentTiles: Map<string, PendingParentTile>;
+
   private parentTileIds: WeakMap<VectorTileData, number>;
+
   private overzoomParents: WeakMap<WorkerTile, LoadVectorTileResult>;
+
   private tileEtags: WeakMap<WorkerTile, string>;
+
   private nextParentTileId = 0;
 
   constructor(channel: WorkerMessageSender, layerIndex: StyleLayerIndex, availableImages: string[]) {
@@ -106,7 +112,9 @@ export class VectorTileWorkerSource implements WorkerSource {
       params.request = overzoomParameters.overzoomRequest;
     }
 
-    const timing = this._startRequestTiming(params);
+    const timing = params.request?.collectResourceTiming
+      ? new RequestPerformance(params.request.url)
+      : undefined;
     const workerTile = new WorkerTile(params);
 
     this.tileState.startLoading(uid, workerTile);
@@ -171,6 +179,7 @@ export class VectorTileWorkerSource implements WorkerSource {
    * decoded-parent LRU for children that arrive after the first one. Each child
    * keeps its own abort signal; the network request ends only after the last
    * interested child aborts.
+   * @internal
    */
   private async _loadParentTile(params: WorkerTileParameters, childAbort: AbortController): Promise<ParentTile> {
     const request = params.request;
@@ -258,13 +267,19 @@ export class VectorTileWorkerSource implements WorkerSource {
     }
   }
 
-  _getEtagUnmodifiedResult(response: ExpiryData, timing: RequestPerformance): WorkerTileResult {
+  /**
+   * @internal
+   */
+  private _getEtagUnmodifiedResult(response: ExpiryData, timing: RequestPerformance): WorkerTileResult {
     const cacheControl = this._getExpiryData(response);
     const resourceTiming = this._finishRequestTiming(timing);
     return Object.assign({ etagUnmodified: true as const }, cacheControl, resourceTiming);
   }
 
-  async _parseWorkerTile(workerTile: WorkerTile, parseState?: ParsingState, controller = new AbortController()): Promise<WorkerTileResult> {
+  /**
+   * @internal
+   */
+  private async _parseWorkerTile(workerTile: WorkerTile, parseState?: ParsingState, controller = new AbortController()): Promise<WorkerTileResult> {
     let result = await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel, controller);
 
     if (parseState) {
@@ -281,7 +296,10 @@ export class VectorTileWorkerSource implements WorkerSource {
     return result;
   }
 
-  _getExpiryData({ expires, cacheControl, etag }: ExpiryData): ExpiryData {
+  /**
+   * @internal
+   */
+  private _getExpiryData({ expires, cacheControl, etag }: ExpiryData): ExpiryData {
     const data: ExpiryData = {};
     if (expires)
       data.expires = expires;
@@ -292,13 +310,10 @@ export class VectorTileWorkerSource implements WorkerSource {
     return data;
   }
 
-  _startRequestTiming(params: WorkerTileParameters): RequestPerformance | undefined {
-    if (!params.request?.collectResourceTiming)
-      return;
-    return new RequestPerformance(params.request.url);
-  }
-
-  _finishRequestTiming(timing: RequestPerformance): { resourceTiming?: any } {
+  /**
+   * @internal
+   */
+  private _finishRequestTiming(timing: RequestPerformance): { resourceTiming?: any } {
     const timingData = timing?.finish();
     if (!timingData)
       return {};
@@ -313,6 +328,7 @@ export class VectorTileWorkerSource implements WorkerSource {
    * @param params - the worker tile parameters
    * @param maxZoomVectorTile - the original vector tile at the source's max available canonical zoom
    * @returns the overzoomed tile
+   * @internal
    */
   private _getOverzoomTile(params: WorkerTileParameters, maxZoomVectorTile: VectorTileData): LoadVectorTileResult {
     const { tileID, source, overzoomParameters } = params;
@@ -355,6 +371,7 @@ export class VectorTileWorkerSource implements WorkerSource {
 
   /**
    * Implements {@link WorkerSource.reloadTile}.
+   * @internal
    */
   async reloadTile(params: WorkerTileParameters, controller = new AbortController()): Promise<WorkerTileResult> {
     throwIfAborted(controller.signal);
@@ -401,6 +418,7 @@ export class VectorTileWorkerSource implements WorkerSource {
 
   /**
    * Implements {@link WorkerSource.removeTile}.
+   * @internal
    */
   async removeTile(params: TileParameters): Promise<void> {
     this.tileState.removeLoaded(params.uid);

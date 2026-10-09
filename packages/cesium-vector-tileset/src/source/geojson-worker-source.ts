@@ -69,7 +69,8 @@ export class GeoJSONWorkerSource implements WorkerSource {
 
   _pendingRequest: AbortController;
   _geoJSONIndex: GeoJSONVT;
-  _createGeoJSONIndex: typeof createGeoJSONIndex;
+
+  private _createGeoJSONIndex: typeof createGeoJSONIndex;
 
   constructor(channel: WorkerMessageSender, layerIndex: StyleLayerIndex, availableImages: string[], createGeoJSONIndexFunc: typeof createGeoJSONIndex = createGeoJSONIndex) {
     this.channel = channel;
@@ -128,6 +129,9 @@ export class GeoJSONWorkerSource implements WorkerSource {
     }
   }
 
+  /**
+   * @internal
+   */
   private async _reloadLoadedTile(params: WorkerTileParameters, controller: AbortController): Promise<WorkerTileResult> {
     const uid = params.uid;
 
@@ -150,6 +154,7 @@ export class GeoJSONWorkerSource implements WorkerSource {
 
   /**
    * Implements {@link WorkerSource.removeTile}.
+   * @internal
    */
   async removeTile(params: TileParameters): Promise<void> {
     this.tileState.removeLoaded(params.uid);
@@ -174,7 +179,9 @@ export class GeoJSONWorkerSource implements WorkerSource {
   async loadData(params: LoadGeoJSONParameters): Promise<GeoJSONWorkerSourceLoadDataResult> {
     this._pendingRequest?.abort();
 
-    const timing = this._startRequestTiming(params);
+    const timing = params.request?.collectResourceTiming
+      ? new RequestPerformance(params.request.url)
+      : undefined;
     this._pendingRequest = new AbortController();
     try {
       await this.loadAndProcessGeoJSON(params, this._pendingRequest);
@@ -198,13 +205,10 @@ export class GeoJSONWorkerSource implements WorkerSource {
     }
   }
 
-  _startRequestTiming(params: LoadGeoJSONParameters): RequestPerformance | undefined {
-    if (!params.request?.collectResourceTiming)
-      return;
-    return new RequestPerformance(params.request.url);
-  }
-
-  _finishRequestTiming(timing: RequestPerformance, params: LoadGeoJSONParameters, result: GeoJSONWorkerSourceLoadDataResult): void {
+  /**
+   * @internal
+   */
+  private _finishRequestTiming(timing: RequestPerformance, params: LoadGeoJSONParameters, result: GeoJSONWorkerSourceLoadDataResult): void {
     const timingData = timing?.finish();
     if (!timingData)
       return;
@@ -216,12 +220,11 @@ export class GeoJSONWorkerSource implements WorkerSource {
 
   /**
    * Implements {@link WorkerSource.reloadTile}.
-   *
    * If the tile is loaded, reload by re-parsing the already available tile data.
    * Otherwise, such as after a setData() call, we load the tile fresh.
-   *
    * @param params - the parameters
    * @returns A promise that resolves when the tile is reloaded
+   * @internal
    */
   reloadTile(params: WorkerTileParameters, controller = new AbortController()): Promise<WorkerTileResult> {
     const tile = this.tileState.getLoaded(params.uid);
@@ -269,8 +272,9 @@ export class GeoJSONWorkerSource implements WorkerSource {
 
   /**
    * Applies a filter to a GeoJSON object.
+   * @internal
    */
-  _filterGeoJSON(data: GeoJSON.GeoJSON, filter: FilterSpecification, source: string): GeoJSON.GeoJSON {
+  private _filterGeoJSON(data: GeoJSON.GeoJSON, filter: FilterSpecification, source: string): GeoJSON.GeoJSON {
     if (data.type !== 'FeatureCollection')
       return data;
 
@@ -283,8 +287,9 @@ export class GeoJSONWorkerSource implements WorkerSource {
 
   /**
    * Gets a predicate function that can be used to filter GeoJSON features.
+   * @internal
    */
-  _getFilterPredicate(filter: FilterSpecification, source: string): (feature: GeoJSON.Feature) => boolean {
+  private _getFilterPredicate(filter: FilterSpecification, source: string): (feature: GeoJSON.Feature) => boolean {
     if (typeof filter !== 'boolean' && !filter?.length)
       return undefined;
 

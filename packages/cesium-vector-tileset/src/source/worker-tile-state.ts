@@ -17,6 +17,9 @@ export class WorkerTileState {
     this.loading[uid] = tile;
   }
 
+  /**
+   * @internal
+   */
   finishLoading(uid: string | number, tile: WorkerTile): void {
     if (this.loading[uid] === tile)
       delete this.loading[uid];

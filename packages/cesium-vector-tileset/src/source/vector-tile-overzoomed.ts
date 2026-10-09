@@ -8,6 +8,7 @@ class VectorTileFeatureOverzoomed implements VectorTileFeature {
   readonly properties: VectorTileFeature['properties'];
   readonly id: VectorTileFeature['id'];
   readonly extent: number;
+
   private readonly geometry: Point[][];
 
   constructor(
@@ -35,6 +36,7 @@ class VectorTileLayerOverzoomed implements VectorTileLayer {
   readonly length: number;
   readonly name: string;
   readonly extent: number;
+
   private readonly features: VectorTileFeature[];
 
   constructor(

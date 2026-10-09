@@ -57,6 +57,9 @@ export class VideoSource extends ImageSource {
   video: HTMLVideoElement;
   roundZoom: boolean;
 
+  /**
+   * @internal
+   */
   private _onPlayingHandler = () => {
     this.style?.triggerRepaint?.();
   };
@@ -91,7 +94,7 @@ export class VideoSource extends ImageSource {
 
       this.video.play();
 
-      this._finishLoading();
+      this.finishLoading();
     }
     catch (err) {
       this.fire(new ErrorEvent(ensureError(err)));

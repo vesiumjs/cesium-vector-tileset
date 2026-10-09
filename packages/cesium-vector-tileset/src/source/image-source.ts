@@ -148,7 +148,9 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
   _loaded = false;
   _request?: AbortController;
 
-  /** @internal */
+  /**
+   * @internal
+   */
   constructor(id: string, options: ImageSourceSpecification | VideoSourceSpecification | CanvasSourceSpecification, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super();
     this.id = id;
@@ -197,7 +199,7 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
         if (newCoordinates) {
           this.coordinates = newCoordinates;
         }
-        this._finishLoading();
+        this.finishLoading();
       }
     }
     catch (err) {
@@ -243,7 +245,7 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
         this.coordinates = options.coordinates;
       }
 
-      this._finishLoading();
+      this.finishLoading();
       return this;
     }
 
@@ -256,7 +258,10 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
     return this;
   }
 
-  _finishLoading(): void {
+  /**
+   * @internal
+   */
+  finishLoading(): void {
     this.setCoordinates(this.coordinates);
     this.fire(new SourceDataEvent('data', { sourceDataType: 'metadata' }));
   }
@@ -365,7 +370,6 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
 
   /**
    * Given a list of coordinates, determine overlapping tile ranges for all zoom levels.
-   *
    * @returns Overlapping tile ranges for all zoom levels.
    * @internal
    */
@@ -411,11 +415,10 @@ function getImageUrl(options: ImageSourceOptions): string | undefined {
 
 /**
  * Given a list of coordinates, get their center as a coordinate.
- *
  * @returns centerpoint
  * @internal
  */
-export function getCoordinatesCenterTileID(coords: MercatorCoordinate[]): CanonicalTileID {
+function getCoordinatesCenterTileID(coords: MercatorCoordinate[]): CanonicalTileID {
   const bounds = Bounds.fromPoints(coords);
 
   const dx = bounds.width();

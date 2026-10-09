@@ -244,6 +244,9 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
     return loadPromise;
   }
 
+  /**
+   * @internal
+   */
   private async _loadTile(tile: Tile): Promise<void> {
     const url = tile.tileID.canonical.url(this.tiles, this.style?.pixelRatio ?? 1, this.scheme);
     const premultiply = this._premultiplyAlpha;
@@ -298,6 +301,9 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
     }
   }
 
+  /**
+   * @internal
+   */
   private _finishTileLoad(tile: Tile, loadPromise: Promise<void>, error?: unknown, rejected = false): void {
     if (tile.loadPromise !== loadPromise) {
       return;

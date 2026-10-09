@@ -35,6 +35,7 @@ export class SourceFeatureState {
   stateChanges: LayerFeatureStatesMap;
   deletedStates: DeletedStatesMap;
   revision: number;
+
   private _hasPendingChanges = false;
 
   constructor() {

@@ -26,7 +26,6 @@ import { EvaluationParameters } from '../style/evaluation-parameters';
 import { performSymbolLayout } from '../symbol/symbol-layout';
 import { OverscaledTileID } from '../tile/tile-id';
 import { throwIfAborted } from '../util/abort-error';
-import { DictionaryCoder } from '../util/dictionary-coder';
 import { warnOnce } from '../util/errors';
 import { mapObject } from '../util/objects';
 import { MessageType } from '../worker/messages';
@@ -106,16 +105,20 @@ export class WorkerTile {
     }
   }
 
+  /**
+   * @internal
+   */
   private async _parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller: AbortController, dependencies: AbortController[]): Promise<WorkerTileResult> {
     // WorkerTile instances are reused for reloads. Collision boxes belong to
     // one parse result; retaining the previous array duplicates collision
     // data and leaves stale boxes in the next serialized tile.
     const collisionBoxArray = this.collisionBoxArray = new CollisionBoxArray();
-    const sourceLayerCoder = new DictionaryCoder(Object.keys(data.layers).sort());
+    const sourceLayerIds = Object.keys(data.layers).sort();
+    const sourceLayerIndices = new Map(sourceLayerIds.map((id, index) => [id, index]));
 
     const featureIndex = new FeatureIndex(this.tileID, this.promoteId);
     featureIndex.bucketLayerIDs = [];
-    featureIndex.sourceLayerIds = Object.keys(data.layers).sort();
+    featureIndex.sourceLayerIds = sourceLayerIds;
 
     const buckets: { [_: string]: WorkerBucket } = {};
     const sourceFeatures = new Map<string, IndexedFeature[]>();
@@ -141,7 +144,7 @@ export class WorkerTile {
           + 'does not use vector tile spec v2 and therefore may have some rendering errors.');
       }
 
-      const sourceLayerIndex = sourceLayerCoder.encode(sourceLayerId);
+      const sourceLayerIndex = sourceLayerIndices.get(sourceLayerId)!;
       const features: IndexedFeature[] = [];
       for (let index = 0; index < sourceLayer.length; index++) {
         const feature = sourceLayer.feature(index);

@@ -9,10 +9,14 @@ import { RTLPluginLoadedEventName } from './rtl-text-plugin-status';
 class RTLMainThreadPlugin extends Evented {
   status: RTLPluginStatus = 'unavailable';
   url: string = null;
+
   private readonly _workerSyncs = new WeakMap<WorkerDispatcher, Promise<void>>();
 
-  /** Sync RTL plugin state by broadcasting a message to the worker */
-  _syncState(statusToSend: RTLPluginStatus, dispatcher = getGlobalDispatcher()): Promise<PluginState[]> {
+  /**
+   * Sync RTL plugin state by broadcasting a message to the worker
+   * @internal
+   */
+  private _syncState(statusToSend: RTLPluginStatus, dispatcher = getGlobalDispatcher()): Promise<PluginState[]> {
     this.status = statusToSend;
     if (!dispatcher) {
       return Promise.resolve([]);
@@ -81,8 +85,11 @@ class RTLMainThreadPlugin extends Evented {
     }
   }
 
-  /** Send a message to worker which will import the RTL plugin script */
-  async _requestImport(dispatcher = getGlobalDispatcher()): Promise<void> {
+  /**
+   * Send a message to worker which will import the RTL plugin script
+   * @internal
+   */
+  private async _requestImport(dispatcher = getGlobalDispatcher()): Promise<void> {
     if (!dispatcher) {
       this.status = 'deferred';
       return;
