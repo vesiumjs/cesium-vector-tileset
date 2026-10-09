@@ -25,10 +25,6 @@ export function createDemoSelection(id: DemoPresetId = demoDefaults.preset): Dem
 export function readDemoSelection(parameters: URLSearchParams): DemoSelection {
   const preset = demoPresets.find(preset => preset.id === parameters.get('preset')) ?? demoPresets[0];
   const selection = createDemoSelection(preset.id);
-  const positiveNumber = (key: string, fallback: number) => {
-    const value = Number(parameters.get(key));
-    return Number.isFinite(value) && value > 0 ? value : fallback;
-  };
   const source = stylePresets.find(style => style.id === parameters.get('source'));
   const mode = modeOptions.find(mode => mode.id === parameters.get('mode'));
   let style = '';
@@ -40,12 +36,13 @@ export function readDemoSelection(parameters: URLSearchParams): DemoSelection {
   catch {
     // An absent or invalid custom style leaves the selected source in use.
   }
+  const resolutionRatio = Number(parameters.get('resolutionRatio'));
   return {
     ...selection,
     source: source?.id ?? selection.source,
     mode: mode?.id ?? selection.mode,
     style,
-    resolutionRatio: positiveNumber('resolutionRatio', selection.resolutionRatio),
+    resolutionRatio: Number.isFinite(resolutionRatio) && resolutionRatio > 0 ? resolutionRatio : selection.resolutionRatio,
   };
 }
 
