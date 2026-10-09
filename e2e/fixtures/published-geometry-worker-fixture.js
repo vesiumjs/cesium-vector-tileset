@@ -2,14 +2,15 @@ import * as Cesium from 'cesium';
 
 const cdn = new URL(location.origin);
 cdn.hostname = 'localhost';
-const workerUrl = new URL('/package/dist/geometry-worker.mjs', cdn);
+const suffix = new URLSearchParams(location.search).get('minify') === 'true' ? '.min' : '';
+const workerUrl = new URL(`/package/dist/geometry-worker${suffix}.mjs`, cdn);
 const bootstrap = URL.createObjectURL(new Blob([`import ${JSON.stringify(workerUrl.href)};`], { type: 'application/javascript' }));
 let processor;
 let terminated = 0;
 let taskCount = 0;
 async function start() {
   try {
-    const api = await import(new URL('/package/dist/index.mjs', cdn).href);
+    const api = await import(new URL(`/package/dist/index${suffix}.mjs`, cdn).href);
     Cesium.buildModuleUrl.setBaseUrl(new URL('/cesium/', location.origin).href);
     const positions = [Cesium.Cartesian3.fromDegrees(179.98, 30), Cesium.Cartesian3.fromDegrees(179.99, 30.01)];
     const geometry = Cesium.PolylineGeometry.createGeometry(new Cesium.PolylineGeometry({ positions, width: 12, arcType: Cesium.ArcType.NONE }));

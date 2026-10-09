@@ -22,7 +22,7 @@ let consumerUrl: string;
 
 test.beforeAll(async () => {
   directory = await mkdtemp(path.join(tmpdir(), 'cesium-vector-tileset-published-'));
-  await run('pnpm', ['pack', '--pack-destination', directory], { cwd: library });
+  await run('pnpm', ['pack:lib', '--pack-destination', directory], { cwd: fileURLToPath(new URL('../', import.meta.url)) });
   const metadata = JSON.parse(await readFile(path.join(library, 'package.json'), 'utf8'));
   const archive = path.join(directory, `${metadata.name}-${metadata.version}.tgz`);
   const listing = await run('tar', ['-tf', archive]);
@@ -78,46 +78,54 @@ test.afterAll(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-for (const format of ['import', 'require']) {
-  test(`packed package loads with ${format} in Node without browser globals`, async () => {
-    const script = `
+for (const specifier of ['cesium-vector-tileset', 'cesium-vector-tileset/min']) {
+  for (const format of ['import', 'require']) {
+    test(`packed ${specifier} loads with ${format} in Node without browser globals`, async () => {
+      const script = `
       import assert from 'node:assert/strict';
       import {createRequire} from 'node:module';
       assert.equal(typeof document, 'undefined');
       assert.equal(typeof window, 'undefined');
       const api = process.argv[1] === 'require'
-        ? createRequire(import.meta.url)('cesium-vector-tileset')
-        : await import('cesium-vector-tileset');
+        ? createRequire(import.meta.url)(process.argv[2])
+        : await import(process.argv[2]);
       assert.equal(typeof api.CesiumVectorTileset, 'function');
       assert.equal(typeof api.CesiumVectorTileset.fromUrl, 'function');
       console.log(JSON.stringify({loaded: true}));
     `;
-    const { stdout } = await run(node, ['--input-type=module', '-e', script, format], { cwd: directory });
-    assert.deepEqual(JSON.parse(stdout), { loaded: true });
-  });
-}
+      const { stdout } = await run(node, ['--input-type=module', '-e', script, format, specifier], { cwd: directory });
+      assert.deepEqual(JSON.parse(stdout), { loaded: true });
+    });
+  }
 
-test('import and require share the published constructor', async () => {
-  const script = `
+  test(`${specifier} import and require share the published constructor`, async () => {
+    const script = `
     import assert from 'node:assert/strict';
     import {createRequire} from 'node:module';
-    const imported = await import('cesium-vector-tileset');
-    const required = createRequire(import.meta.url)('cesium-vector-tileset');
+    const imported = await import(process.argv[1]);
+    const required = createRequire(import.meta.url)(process.argv[1]);
     assert.equal(imported.CesiumVectorTileset, required.CesiumVectorTileset);
   `;
-  await run(node, ['--input-type=module', '-e', script], { cwd: directory });
-});
+    await run(node, ['--input-type=module', '-e', script, specifier], { cwd: directory });
+  });
+}
 
 test('packed declarations resolve for ESM and CommonJS TypeScript consumers', async () => {
   const esm = path.join(directory, 'consumer.mts');
   const cjs = path.join(directory, 'consumer.cts');
   await writeFile(esm, `import {CesiumVectorTileset} from 'cesium-vector-tileset';
+    import {CesiumVectorTileset as MinifiedTileset} from 'cesium-vector-tileset/min';
     const create: typeof CesiumVectorTileset.fromUrl = CesiumVectorTileset.fromUrl;
+    const createMinified: typeof CesiumVectorTileset.fromUrl = MinifiedTileset.fromUrl;
     void create;
+    void createMinified;
   `);
   await writeFile(cjs, `import api = require('cesium-vector-tileset');
+    import minified = require('cesium-vector-tileset/min');
     const create: typeof api.CesiumVectorTileset.fromUrl = api.CesiumVectorTileset.fromUrl;
+    const createMinified: typeof api.CesiumVectorTileset.fromUrl = minified.CesiumVectorTileset.fromUrl;
     void create;
+    void createMinified;
   `);
   const tsc = createRequire(import.meta.url).resolve('typescript/lib/tsc');
   await run(node, [tsc, '--noEmit', '--skipLibCheck', '--module', 'nodenext', '--target', 'ES2022', esm, cjs], { cwd: directory });
@@ -129,32 +137,51 @@ test('packed metadata includes Worker entries, shared modules and their runtime 
     types: './dist/index.d.mts',
     default: './dist/index.mjs',
   });
+  assert.deepEqual(metadata.exports['./min'], {
+    types: './dist/index.d.mts',
+    default: './dist/index.min.mjs',
+  });
   assert.deepEqual(metadata.peerDependencies, { cesium: '^1.146.0' });
   assert.equal(metadata.peerDependencies.cesium, '^1.146.0');
   assert.equal(metadata.devDependencies.cesium, '^1.146.0');
   assert.equal(metadata.engines.node, '>=22.13.0');
   assert.equal(metadata.dependencies['@maplibre/mlt'], undefined, 'the bundled decoder must not require a consumer dependency');
-  assert.deepEqual(Object.keys(metadata.exports), ['.', './package.json']);
-  const workerChunks = files.filter(file => file.startsWith('package/dist/') && file.endsWith('.mjs') && !['index.mjs', 'worker.mjs', 'geometry-worker.mjs'].includes(path.basename(file)));
+  assert.deepEqual(Object.keys(metadata.exports), ['.', './min', './package.json']);
+  const entries = ['index.mjs', 'index.min.mjs', 'worker.mjs', 'worker.min.mjs', 'geometry-worker.mjs', 'geometry-worker.min.mjs'];
+  const workerChunks = files.filter(file => file.startsWith('package/dist/') && file.endsWith('.mjs') && !entries.includes(path.basename(file)));
   assert.ok(workerChunks.length > 0, 'the Worker entries should share their bundled CPU runtime');
-  assert.ok(workerChunks.every(file => /^package\/dist\/[\w-]+\.mjs$/.test(file)));
+  assert.ok(workerChunks.some(file => file.endsWith('.min.mjs')) && workerChunks.some(file => !file.endsWith('.min.mjs')));
+  assert.ok(workerChunks.every(file => /^package\/dist\/[\w-]+(?:\.min)?\.mjs$/.test(file)));
   assert.deepEqual(files, [
     'package/LICENSE',
     'package/README.md',
     'package/README.zh-CN.md',
     'package/dist/THIRD_PARTY_NOTICES.txt',
-    'package/dist/geometry-worker.mjs',
     'package/dist/index.d.mts',
     'package/dist/index.d.mts.map',
-    'package/dist/index.mjs',
     'package/dist/index.mjs.map',
-    'package/dist/worker.mjs',
     'package/package.json',
+    ...entries.map(entry => `package/dist/${entry}`),
     ...workerChunks,
   ].sort());
   const notices = await readFile(path.join(published, 'dist/THIRD_PARTY_NOTICES.txt'), 'utf8');
   for (const dependency of ['cesium', '@cesium/engine', '@cesium/core'])
     assert.ok(notices.includes(`${dependency} (geometry Worker runtime and upstream notices)`));
+});
+
+test('plain modules retain readable JavaScript and minified modules use their matching Workers', async () => {
+  for (const entry of ['index', 'worker', 'geometry-worker']) {
+    const plain = await readFile(path.join(published, `dist/${entry}.mjs`), 'utf8');
+    const minified = await readFile(path.join(published, `dist/${entry}.min.mjs`), 'utf8');
+    assert.ok(plain.split('\n').length > 100, `${entry}.mjs was compressed`);
+    assert.ok(minified.length < plain.length, `${entry}.min.mjs was not compressed`);
+    if (entry === 'index') {
+      for (const worker of ['worker', 'geometry-worker']) {
+        assert.ok(plain.includes(`./${worker}.mjs`));
+        assert.ok(minified.includes(`./${worker}.min.mjs`));
+      }
+    }
+  }
 });
 
 test('packed READMEs retain gallery and documentation links outside the package', async () => {
@@ -170,44 +197,47 @@ test('packed READMEs retain gallery and documentation links outside the package'
   }
 });
 
-test('raw packed geometry Worker prepares line payload across CDN with explicit CSP and no Worker import map', async ({ page }) => {
-  const requests: string[] = [];
-  const errors: string[] = [];
-  page.on('request', request => requests.push(request.url()));
-  page.on('pageerror', error => errors.push(error.message));
-  await page.goto(`${consumerUrl}/consumer.html`);
-  await expect.poll(() => page.evaluate(() => (window as unknown as { publishedGeometryResult?: object }).publishedGeometryResult), { timeout: 15000 }).toBeTruthy();
-  const result = await page.evaluate(() => (window as unknown as { publishedGeometryResult: { error?: string; mainConstructor: boolean; indices: number[]; attributes: string[]; textureBytes: number; doubleBounds: boolean; sourceIntact: boolean; taskCount: number; detached: boolean; terminated: number; bootstrapRevoked: boolean } }).publishedGeometryResult);
-  assert.equal(result.error, undefined);
-  assert.equal(result.mainConstructor, true);
-  assert.ok(result.indices.length > 0 && result.attributes.includes('a_lineRecord'));
-  assert.ok(result.textureBytes > 0 && result.doubleBounds && result.sourceIntact && result.detached);
-  assert.equal(result.taskCount, 1);
-  assert.equal(result.terminated, 1);
-  assert.equal(result.bootstrapRevoked, true);
-  assert.deepEqual(errors, []);
-  assert.ok(requests.some(url => new URL(url).hostname === 'localhost' && url.endsWith('/package/dist/geometry-worker.mjs')));
-  assert.ok(!requests.some(url => /(?:createGeometry|combineGeometry)\.js/.test(url)));
-  const workerModules = requests.filter(url => new URL(url).pathname.startsWith('/package/dist/') && !url.endsWith('/index.mjs'));
-  assert.ok(workerModules.some(url => !url.endsWith('/geometry-worker.mjs')), 'the geometry Worker did not load its shared runtime');
-  assert.ok(workerModules.every(url => new URL(url).hostname === 'localhost'), 'a Worker module escaped its CDN origin');
-});
+for (const suffix of ['', '.min']) {
+  test(`raw packed geometry-worker${suffix} prepares line payload across CDN with explicit CSP and no Worker import map`, async ({ page }) => {
+    const requests: string[] = [];
+    const errors: string[] = [];
+    page.on('request', request => requests.push(request.url()));
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(`${consumerUrl}/consumer.html?minify=${suffix === '.min'}`);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { publishedGeometryResult?: object }).publishedGeometryResult), { timeout: 15000 }).toBeTruthy();
+    const result = await page.evaluate(() => (window as unknown as { publishedGeometryResult: { error?: string; mainConstructor: boolean; indices: number[]; attributes: string[]; textureBytes: number; doubleBounds: boolean; sourceIntact: boolean; taskCount: number; detached: boolean; terminated: number; bootstrapRevoked: boolean } }).publishedGeometryResult);
+    assert.equal(result.error, undefined);
+    assert.equal(result.mainConstructor, true);
+    assert.ok(result.indices.length > 0 && result.attributes.includes('a_lineRecord'));
+    assert.ok(result.textureBytes > 0 && result.doubleBounds && result.sourceIntact && result.detached);
+    assert.equal(result.taskCount, 1);
+    assert.equal(result.terminated, 1);
+    assert.equal(result.bootstrapRevoked, true);
+    assert.deepEqual(errors, []);
+    assert.ok(requests.some(url => new URL(url).hostname === 'localhost' && url.endsWith(`/package/dist/geometry-worker${suffix}.mjs`)));
+    assert.ok(!requests.some(url => /(?:createGeometry|combineGeometry)\.js/.test(url)));
+    const workerModules = requests.filter(url => new URL(url).pathname.startsWith('/package/dist/') && !url.endsWith(`/index${suffix}.mjs`));
+    assert.ok(workerModules.some(url => !url.endsWith(`/geometry-worker${suffix}.mjs`)), 'the geometry Worker did not load its shared runtime');
+    assert.ok(workerModules.every(url => new URL(url).hostname === 'localhost'), 'a Worker module escaped its CDN origin');
+    assert.ok(workerModules.every(url => url.endsWith('.min.mjs') === (suffix === '.min')), 'the geometry Worker loaded the other build variant');
+  });
 
-test('raw packed data Worker handles style messages without a Worker import map', async ({ page }) => {
-  await page.goto(`${consumerUrl}/consumer.html`);
-  const result = await page.evaluate(() => new Promise<{ type?: string; error?: string }>((resolve) => {
-    const worker = new Worker('/package/dist/worker.mjs', { type: 'module' });
-    let timeout: ReturnType<typeof setTimeout>;
-    const finish = (result: { type?: string; error?: string }) => {
-      clearTimeout(timeout);
-      worker.terminate();
-      resolve(result);
-    };
-    timeout = setTimeout(finish, 10000, { error: 'data Worker did not answer' });
-    worker.onerror = event => finish({ error: event.message || 'data Worker failed to load' });
-    worker.onmessage = event => finish({ type: event.data.type, error: event.data.error?.message });
-    worker.postMessage({ id: 'packed-style', type: 'SL', sourceMapId: 'packed-consumer', origin: location.origin, data: [] });
-  }));
-  expect(result.error).toBeUndefined();
-  expect(result.type).toBe('<response>');
-});
+  test(`raw packed worker${suffix} handles style messages without a Worker import map`, async ({ page }) => {
+    await page.goto(`${consumerUrl}/consumer.html?minify=${suffix === '.min'}`);
+    const result = await page.evaluate(suffix => new Promise<{ type?: string; error?: string }>((resolve) => {
+      const worker = new Worker(`/package/dist/worker${suffix}.mjs`, { type: 'module' });
+      let timeout: ReturnType<typeof setTimeout>;
+      const finish = (result: { type?: string; error?: string }) => {
+        clearTimeout(timeout);
+        worker.terminate();
+        resolve(result);
+      };
+      timeout = setTimeout(finish, 10000, { error: 'data Worker did not answer' });
+      worker.onerror = event => finish({ error: event.message || 'data Worker failed to load' });
+      worker.onmessage = event => finish({ type: event.data.type, error: event.data.error?.message });
+      worker.postMessage({ id: 'packed-style', type: 'SL', sourceMapId: 'packed-consumer', origin: location.origin, data: [] });
+    }), suffix);
+    expect(result.error).toBeUndefined();
+    expect(result.type).toBe('<response>');
+  });
+}
