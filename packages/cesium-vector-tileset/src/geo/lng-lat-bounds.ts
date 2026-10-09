@@ -430,6 +430,9 @@ export class LngLatBounds {
     return new LngLatBounds(sw, ne);
   }
 
+  /**
+   * @internal
+   */
   private getDefinedBounds(): { sw: LngLat; ne: LngLat } {
     if (!this._sw || !this._ne) {
       throw new Error('Cannot read an empty LngLatBounds.');
