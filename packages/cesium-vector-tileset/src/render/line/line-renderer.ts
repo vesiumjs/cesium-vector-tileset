@@ -4,6 +4,7 @@ import type {
   Primitive,
 } from 'cesium';
 import type { Bucket } from '../../data/bucket';
+import type { PreparedLineGeometry } from '../../data/projected-geometry';
 import type { DashRow } from '../../source/worker-source';
 import type { StyleLayer } from '../../style/style-layer';
 import type { LineStyleLayer } from '../../style/style-layer/line-style-layer';
@@ -13,8 +14,8 @@ import type { Budget } from '../scene/frame-budget';
 import type { DashMaterial } from './dash-material';
 import type { LineFamilyLayer } from './line-family';
 import type { LineGeometryOptions } from './line-geometry';
+import * as Cesium from 'cesium';
 import {
-  BoundingSphere,
   Color as CesiumColor,
   ColorGeometryInstanceAttribute,
   ComponentDatatype,
@@ -29,16 +30,22 @@ import {
   PrimitiveType,
 } from 'cesium';
 import { FillBucket, LineBucket } from '../../data/bucket-runtime';
+import { geometryBoundingSphere } from '../geometry/geometry-bounds';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
+import { lineInputs } from '../geometry/line-input';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
 import { registerDrawBatch, registerLinePaint } from '../scene/draw-batch';
 import { MAX_LINE_INSTANCES, UNBOUNDED_BUDGET } from '../scene/frame-budget';
-import { fillStyleForFeature, layerFor, lineStyleForFeature } from '../vector/feature-attributes';
+import { constantValue, fillStyleForFeature, layerFor, lineStyleForFeature } from '../vector/feature-attributes';
 import { dashRowsForFeature } from './dash-material';
-import { LineFamilyChunk } from './line-family';
+import { freezeLineCameraPaint } from './frozen-line-paint';
+import { lineAppearanceForMode } from './line-appearance-mode';
+import { LineFamilyChunk, updateLineUniforms } from './line-family';
 import { LineGeometryCache, lineLayoutKey } from './line-geometry';
+import { lineGroundScale } from './line-ground-scale';
 import { LINE_TILE_CLIP_FRAGMENT, LineTileClip } from './line-tile-clip';
 import { LINE_FAN_PARAMETER_SHADER } from './line-vertex-format';
+import { restorePreparedLineGeometry } from './prepared-line-geometry';
 
 /** A line pattern takes precedence over its dash array. */
 function isDashStyleLayer(layer: StyleLayer): layer is LineStyleLayer {
@@ -60,6 +67,7 @@ export interface LinePrimitiveSource {
   positions: Float64Array;
   /** Canonical tile coordinates, paired with each ECEF source point. */
   tilePositions: Float64Array;
+  prepared?: PreparedLineGeometry;
   /** Geodetic height applied by each layer's draw commands. */
   offsetMeters?: number;
 }
@@ -67,15 +75,15 @@ export interface LinePrimitiveSource {
 export type LinePrimitiveSourceList = LinePrimitiveSource[];
 
 /**
- * Cesium's polyline shader (PolylineCommon) expands vertices in window space
- * by `width / 2 * czm_pixelRatio`, giving a constant on-screen width with
- * miter joins (clamped to a bevel at sharp corners) and flat caps. The strip
- * shaders below add MapLibre's missing visuals:
+ * Ground strips retain Native's positions and near-plane clipping, while
+ * extruding their joins and caps in Web Mercator before camera projection.
+ * The ECEF track uses the WGS84 ground Jacobian; planar tracks use the scene's
+ * actual map projection. Both follow MapLibre's perspective width semantics:
  *
  * - a one-device-pixel antialiasing ramp, with a transparent geometry margin
  *   that keeps MSAA sample coverage from attenuating the ramp a second time;
  * - round caps: MapLibre's quad and fragment-distance clipping; round joins
- *   retain fan vertices expanded along the window-space segment normals;
+ *   retain fan vertices expanded along the ground segment normals;
  * - dashed lines sample the SDF dash atlas in the fragment shader with the
  *   from/to row crossfade (u_mix), dash lengths in line-width units and a
  *   screen-space SDF edge blur - the MapLibre line_sdf pipeline.
@@ -164,10 +172,9 @@ void clipLineSegmentToNearPlane(
  * validateShaderMatching checks the compiled shader's active attributes
  * against the combined geometry's).
  */
-function lineStripShader(dash: boolean): string {
+function lineHeightShader(): string {
   const inverseRadiiSquared = Ellipsoid.WGS84.oneOverRadiiSquared;
   return `
-${LINE_COMMON_SHADER}
 uniform float u_line_layer_offset;
 
 vec3 lineHeightEC(vec3 positionMC)
@@ -177,6 +184,13 @@ vec3 lineHeightEC(vec3 positionMC)
         vec3(${inverseRadiiSquared.x}, ${inverseRadiiSquared.y}, ${inverseRadiiSquared.z}));
     return czm_viewRotation * normalWC * u_line_layer_offset;
 }
+`;
+}
+
+function lineStripShader(dash: boolean): string {
+  return `
+${LINE_COMMON_SHADER}
+${lineHeightShader()}
 
 in vec3 position3DHigh;
 in vec3 position3DLow;
@@ -189,16 +203,20 @@ in vec3 nextOffset2D;
 in float a_lineFlags;
 uniform float u_line_width;
 uniform vec4 u_line_color;
+uniform float u_line_meters_per_pixel;
+uniform float u_line_mercator_projection;
 ${LINE_FAN_PARAMETER_SHADER}
 ${dash ? 'in float a_linesofar;\nin vec3 a_dashFrom;\nin vec3 a_dashTo;' : ''}
 in vec4 color;
 in float batchId;
 
 out vec4 v_color;
-out float v_expandDir;
-flat out vec4 v_lineCap;
-flat out vec3 v_otherCap;
+out vec2 v_lineDistance;
+out float v_gamma_scale;
 out float v_width;
+flat out vec3 v_capTangent;
+flat out vec3 v_capDenominator;
+flat out vec2 v_capExtent;
 #ifdef LINE_TILE_CLIP
 out vec3 v_lineClip3DEye;
 out vec3 v_lineClip2DEye;
@@ -215,22 +233,22 @@ void main()
     float a_cornerParam = role >= 7u && role < 30u ? lineFanParameters[int(role) - 7]
         : (a_corner == 0.0 || role >= 30u ? czm_batchTable_lineMiterLimit(batchId) : (usePrev ? 1.0 : -1.0));
     float width = czm_batchTable_lineWidth(batchId) * u_line_width;
-    // The AA boundary is half a device pixel outside the painted width.
-    // One more device pixel covers every sample in an intersecting pixel,
-    // including diagonals, without changing the fragment coverage.
+    // MapLibre extrudes in the ground plane before projection. The extra
+    // transparent device pixel retains Native's multisample geometry margin.
     float outset = width * 0.5 + 1.5 / czm_pixelRatio;
 
     v_color = color * u_line_color;
     v_color.a *= step(0.001, width);
-    v_expandDir = expandDir;
-    v_lineCap = vec4(0.0);
-    v_otherCap = vec3(0.0);
     v_width = width;
 ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
 
     vec4 position3DEC = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 prev3DEC = position3DEC;
     vec4 next3DEC = position3DEC;
+    vec3 east3DEC = vec3(0.0);
+    vec3 north3DEC = vec3(0.0);
+    vec2 previousGround3D = vec2(0.0);
+    vec2 nextGround3D = vec2(0.0);
     if (czm_morphTime > 0.0)
     {
         vec4 p3D = czm_translateRelativeToEye(position3DHigh * 65536.0, position3DLow);
@@ -241,10 +259,37 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
         position3DEC.xyz += lineHeightEC(centerMC);
         prev3DEC.xyz += lineHeightEC(centerMC + prevOffset3D);
         next3DEC.xyz += lineHeightEC(centerMC + nextOffset3D);
+        // Differential of WGS84 ECEF with respect to Web Mercator x/y.
+        // Keeping the two axes separate preserves pitch and bearing shear;
+        // a camera-distance scalar cannot represent this transformation.
+        vec3 world = (czm_model * vec4(centerMC, 1.0)).xyz;
+        vec3 normal = czm_geodeticSurfaceNormal(world, vec3(0.0),
+            vec3(${Ellipsoid.WGS84.oneOverRadiiSquared.x}, ${Ellipsoid.WGS84.oneOverRadiiSquared.y}, ${Ellipsoid.WGS84.oneOverRadiiSquared.z}));
+        vec3 east = normalize(vec3(-normal.y, normal.x, 0.0));
+        vec3 north = cross(normal, east);
+        float cosine = length(normal.xy);
+        float eccentricitySquared = ${1 - (Ellipsoid.WGS84.minimumRadius / Ellipsoid.WGS84.maximumRadius) ** 2};
+        float denominator = 1.0 - eccentricitySquared * normal.z * normal.z;
+        float primeVertical = ${Ellipsoid.WGS84.maximumRadius.toFixed(1)} / sqrt(denominator);
+        float meridional = primeVertical * (1.0 - eccentricitySquared) / denominator;
+        vec3 radiiSquared = vec3(${Ellipsoid.WGS84.radiiSquared.x.toFixed(1)}, ${Ellipsoid.WGS84.radiiSquared.y.toFixed(1)}, ${Ellipsoid.WGS84.radiiSquared.z.toFixed(1)});
+        vec3 surface = radiiSquared * normal / sqrt(dot(radiiSquared * normal, normal));
+        float height = dot(world - surface, normal) + u_line_layer_offset;
+        vec2 scale = vec2(primeVertical + height, meridional + height) * cosine / ${Ellipsoid.WGS84.maximumRadius.toFixed(1)};
+        east3DEC = czm_viewRotation * east * scale.x;
+        north3DEC = czm_viewRotation * north * scale.y;
+        vec3 previousWorld = mat3(czm_model) * prevOffset3D;
+        vec3 nextWorld = mat3(czm_model) * nextOffset3D;
+        previousGround3D = vec2(dot(previousWorld, east), dot(previousWorld, north)) / scale;
+        nextGround3D = vec2(dot(nextWorld, east), dot(nextWorld, north)) / scale;
     }
     vec4 position2DEC = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 prev2DEC = position2DEC;
     vec4 next2DEC = position2DEC;
+    vec3 east2DEC = vec3(0.0);
+    vec3 north2DEC = vec3(0.0);
+    vec2 previousGround2D = vec2(0.0);
+    vec2 nextGround2D = vec2(0.0);
     if (czm_morphTime < 1.0)
     {
         vec4 p2D = czm_translateRelativeToEye(position2DHigh.zxy * 65536.0, position2DLow.zxy);
@@ -252,10 +297,22 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
         position2DEC = czm_modelViewRelativeToEye * p2D;
         prev2DEC = czm_modelViewRelativeToEye * (p2D + vec4(prevOffset2D.zxy, 0.0));
         next2DEC = czm_modelViewRelativeToEye * (p2D + vec4(nextOffset2D.zxy, 0.0));
+        // GeographicProjection uses R*latitude, while WebMercatorProjection
+        // uses R*log(tan(pi/4+latitude/2)). Native records retain either one.
+        float planarNorthScale = u_line_mercator_projection > 0.5 ? 1.0
+            : cos((position2DHigh.y * 65536.0 + position2DLow.y) / ${Ellipsoid.WGS84.maximumRadius.toFixed(1)});
+        east2DEC = (czm_modelViewRelativeToEye * vec4(0.0, 1.0, 0.0, 0.0)).xyz;
+        north2DEC = (czm_modelViewRelativeToEye * vec4(0.0, 0.0, planarNorthScale, 0.0)).xyz;
+        previousGround2D = prevOffset2D.xy / vec2(1.0, planarNorthScale);
+        nextGround2D = nextOffset2D.xy / vec2(1.0, planarNorthScale);
     }
     vec4 positionEC = czm_columbusViewMorph(position2DEC, position3DEC, czm_morphTime);
     vec4 prevEC = czm_columbusViewMorph(prev2DEC, prev3DEC, czm_morphTime);
     vec4 nextEC = czm_columbusViewMorph(next2DEC, next3DEC, czm_morphTime);
+    vec3 eastEC = mix(east2DEC, east3DEC, czm_morphTime);
+    vec3 northEC = mix(north2DEC, north3DEC, czm_morphTime);
+    vec2 previousGround = mix(previousGround2D, previousGround3D, czm_morphTime);
+    vec2 nextGround = mix(nextGround2D, nextGround3D, czm_morphTime);
 
     vec4 clippedPrevWC, clippedPrevEC;
     bool prevSegmentClipped, prevSegmentCulled;
@@ -275,44 +332,35 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
         return;
     }
 
-    vec2 directionToPrevWC = normalize(clippedPrevWC.xy - clippedPositionWC.xy);
-    vec2 directionToNextWC = normalize(clippedNextWC.xy - clippedPositionWC.xy);
+    vec2 directionToPrevGround = normalize(previousGround);
+    vec2 directionToNextGround = normalize(nextGround);
     if (prevSegmentCulled)
     {
-        directionToPrevWC = -directionToNextWC;
+        directionToPrevGround = -directionToNextGround;
     }
     else if (nextSegmentCulled)
     {
-        directionToNextWC = -directionToPrevWC;
+        directionToNextGround = -directionToPrevGround;
     }
 
-    // Left normals of the incoming (prev -> position) and outgoing
-    // (position -> next) segments, in window space.
-    vec2 nPrev = vec2(directionToPrevWC.y, -directionToPrevWC.x);
-    vec2 nNext = vec2(-directionToNextWC.y, directionToNextWC.x);
+    // Ground normals use east/north axes, before the perspective transform.
+    vec2 nPrev = vec2(-directionToPrevGround.y, directionToPrevGround.x);
+    vec2 nNext = vec2(directionToNextGround.y, -directionToNextGround.x);
 
-    // The endpoint pair provokes both cap and adjacent strip triangles.
-    // Flat window coordinates give every MSAA sample the same analytic cap
-    // distance even when its pixel center lies across their shared edge.
-    if (a_corner >= 30.0)
-    {
-        v_lineCap = vec4(clippedPositionWC.xy, -(usePrev ? directionToPrevWC : directionToNextWC));
-        v_otherCap = vec3(usePrev ? clippedPrevWC.xy : clippedNextWC.xy, a_corner == 31.0 ? 1.0 : 0.0);
-    }
-
-    vec2 thisSegmentForwardWC, otherSegmentForwardWC;
+    vec2 thisSegmentForwardGround, otherSegmentForwardGround;
     if (usePrev)
     {
-        thisSegmentForwardWC = -directionToPrevWC;
-        otherSegmentForwardWC = directionToNextWC;
+        thisSegmentForwardGround = -directionToPrevGround;
+        otherSegmentForwardGround = directionToNextGround;
     }
     else
     {
-        thisSegmentForwardWC = directionToNextWC;
-        otherSegmentForwardWC = -directionToPrevWC;
+        thisSegmentForwardGround = directionToNextGround;
+        otherSegmentForwardGround = -directionToPrevGround;
     }
 
     vec2 offsetDir = vec2(0.0);
+    vec2 squareTangent = vec2(0.0);
     float expandWidth = outset;
 
     if (a_corner == 1.0 || a_corner == 2.0)
@@ -323,8 +371,7 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
     }
     else if (a_corner == 3.0)
     {
-        // Round join fan: sweep the outer side of the turn from nPrev to
-        // nNext, mirroring MapLibre's fakeround pie slices.
+        // Round join fan: sweep the ground normals before projection.
         float crossN = nPrev.x * nNext.y - nPrev.y * nNext.x;
         float phi = atan(crossN, dot(nPrev, nNext));
         float theta = phi * a_cornerParam;
@@ -337,11 +384,13 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
         // Both caps extend a quad by half a width. Round caps use the endpoint
         // pair's flat coordinates for fragment-space semicircle clipping.
         vec2 left = usePrev ? nPrev : nNext;
-        vec2 fwd = usePrev ? -directionToPrevWC : directionToNextWC;
+        vec2 fwd = usePrev ? -directionToPrevGround : directionToNextGround;
         // Square caps have no fragment clipping along the tangent, so their
         // painted length must exclude the transparent MSAA geometry margin.
         float capScale = a_corner == 5.0 ? (outset - 1.0 / czm_pixelRatio) / outset : 1.0;
         offsetDir = left * expandDir + fwd * a_cornerParam * capScale;
+        if (a_corner == 5.0)
+            squareTangent = fwd * a_cornerParam;
     }
     else if (a_corner == 6.0)
     {
@@ -350,47 +399,83 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
     }
     else
     {
-        // Regular vertex: Cesium's miter expansion.
-        vec2 thisSegmentLeftWC = vec2(-thisSegmentForwardWC.y, thisSegmentForwardWC.x);
-        vec2 leftWC = thisSegmentLeftWC;
+        // Regular vertex: bounded miter expansion in the ground plane.
+        vec2 thisSegmentNormal = vec2(thisSegmentForwardGround.y, -thisSegmentForwardGround.x);
+        vec2 groundNormal = thisSegmentNormal;
         if (!czm_equalsEpsilon(prevEC.xyz - positionEC.xyz, vec3(0.0), czm_epsilon1) && !czm_equalsEpsilon(nextEC.xyz - positionEC.xyz, vec3(0.0), czm_epsilon1))
         {
-            vec2 otherSegmentLeftWC = vec2(-otherSegmentForwardWC.y, otherSegmentForwardWC.x);
+            vec2 otherSegmentNormal = vec2(otherSegmentForwardGround.y, -otherSegmentForwardGround.x);
 
-            vec2 leftSumWC = thisSegmentLeftWC + otherSegmentLeftWC;
-            float leftSumLength = length(leftSumWC);
-            leftWC = leftSumLength < czm_epsilon6 ? thisSegmentLeftWC : (leftSumWC / leftSumLength);
+            vec2 normalSum = thisSegmentNormal + otherSegmentNormal;
+            float normalSumLength = length(normalSum);
+            groundNormal = normalSumLength < czm_epsilon6 ? thisSegmentNormal : (normalSum / normalSumLength);
 
-            vec2 u = -thisSegmentForwardWC;
-            vec2 v = leftWC;
+            vec2 u = -thisSegmentForwardGround;
+            vec2 v = groundNormal;
             float sinAngle = abs(u.x * v.y - u.y * v.x);
             // Regular vertices read the feature's exact FLOAT miter limit
             // from Native's instance table.
             expandWidth = clamp(expandWidth / sinAngle, 0.0, outset * max(a_cornerParam, 1.0));
         }
-        offsetDir = leftWC * expandDir;
+        offsetDir = groundNormal * expandDir;
     }
 
-    vec4 positionWC = vec4(clippedPositionWC.xy + offsetDir * expandWidth * czm_pixelRatio, -clippedPositionWC.z, 1.0) * (czm_projection * clippedPositionEC).w;
-    gl_Position = czm_viewportOrthographic * positionWC;
+    // MapLibre's gamma is measured from its painted AA envelope, rather than
+    // our additional transparent multisample margin. unitsToPixels uses CSS
+    // pixels, so DPR enters only the AA distance and the device viewport.
+    vec2 direction = offsetDir * expandWidth / outset + squareTangent / (outset * czm_pixelRatio);
+    vec2 gammaDirection = length(direction) > 0.0 ? direction : nNext;
+    vec2 paintExtrusion = gammaDirection * (width * 0.5 + 0.5 / czm_pixelRatio);
+    vec3 paintExpansionEC = (eastEC * paintExtrusion.x + northEC * paintExtrusion.y) * u_line_meters_per_pixel;
+    vec4 projectedCenter = czm_projection * clippedPositionEC;
+    v_capTangent = vec3(0.0);
+    v_capDenominator = vec3(0.0, 0.0, 1.0);
+    v_capExtent = vec2(0.0);
+    if (role >= 30u || a_corner == 4.0)
+    {
+        // The endpoint pair provokes the cap and its adjacent strip. Both
+        // triangles must evaluate the same ground semicircle at a pixel
+        // centre, including MSAA pixels straddling their shared edge.
+        // Invert the ground-plane homography instead of using a screen-space
+        // circle: perspective may shear and foreshorten the two ground axes.
+        vec4 projectedEast = czm_projection * vec4(eastEC * u_line_meters_per_pixel, 0.0);
+        vec4 projectedNorth = czm_projection * vec4(northEC * u_line_meters_per_pixel, 0.0);
+        mat3 groundFromClip = inverse(mat3(
+            vec3(projectedEast.xy, projectedEast.w),
+            vec3(projectedNorth.xy, projectedNorth.w),
+            vec3(projectedCenter.xy, projectedCenter.w)));
+        vec2 outward = -(usePrev ? directionToPrevGround : directionToNextGround);
+        v_capTangent = outward.x * vec3(groundFromClip[0].x, groundFromClip[1].x, groundFromClip[2].x)
+            + outward.y * vec3(groundFromClip[0].y, groundFromClip[1].y, groundFromClip[2].y);
+        v_capDenominator = vec3(groundFromClip[0].z, groundFromClip[1].z, groundFromClip[2].z);
+        v_capExtent = vec2(1.0, role == 31u
+            ? length(usePrev ? previousGround : nextGround) / u_line_meters_per_pixel : -1.0);
+    }
+    vec4 projectedPaint = czm_projection * (clippedPositionEC + vec4(paintExpansionEC, 0.0));
+    vec2 screenExtrusion = (projectedPaint.xy - projectedCenter.xy) / projectedPaint.w
+        * czm_viewport.zw / (2.0 * czm_pixelRatio);
+    v_gamma_scale = length(paintExtrusion) / max(length(screenExtrusion), czm_epsilon7);
+    // One transparent device pixel must remain one projected device pixel,
+    // even when perspective makes a ground pixel substantially narrower.
+    float geometryOutset = width * 0.5 + (0.5 + v_gamma_scale) / czm_pixelRatio;
+    vec2 extrusion = direction * geometryOutset - squareTangent * v_gamma_scale / czm_pixelRatio;
+    vec3 expansionEC = (eastEC * extrusion.x + northEC * extrusion.y) * u_line_meters_per_pixel;
+    vec4 expandedPositionEC = clippedPositionEC + vec4(expansionEC, 0.0);
+    gl_Position = czm_projection * expandedPositionEC;
+    v_lineDistance = vec2(expandDir, a_corner == 4.0 ? abs(a_cornerParam) : 0.0) * geometryOutset;
 #ifdef LINE_TILE_CLIP
     // Native's inverseProjection is zero in 2D/orthographic views. Its
     // window helper also restores those views from the current frustum.
-    vec4 lineClipWindow = czm_viewportTransformation * vec4(gl_Position.xyz / gl_Position.w, 1.0);
-    lineClipWindow.w = 1.0 / gl_Position.w;
-    vec4 lineClipPositionEC = czm_windowToEyeCoordinates(lineClipWindow);
-    vec3 pixelEC = lineClipPositionEC.xyz / lineClipPositionEC.w;
+    vec3 pixelEC = expandedPositionEC.xyz;
     vec3 segmentEC = (usePrev ? prevEC : nextEC).xyz - positionEC.xyz;
     float clipFraction = segmentClipped ? dot(clippedPositionEC.xyz - positionEC.xyz, segmentEC) / dot(segmentEC, segmentEC) : 0.0;
-    vec3 expansionEC = pixelEC - clippedPositionEC.xyz;
     vec3 clipped3DEC = position3DEC.xyz + clipFraction * ((usePrev ? prev3DEC : next3DEC).xyz - position3DEC.xyz);
     vec3 clipped2DEC = position2DEC.xyz + clipFraction * ((usePrev ? prev2DEC : next2DEC).xyz - position2DEC.xyz);
     v_lineClip3DEye = czm_morphTime == 1.0 ? pixelEC : clipped3DEC + expansionEC;
     v_lineClip2DEye = czm_morphTime == 0.0 ? pixelEC : clipped2DEC + expansionEC;
 #endif
-    // Coverage is a window-space distance. Cancel perspective interpolation
-    // in the fragment shader so different endpoint depths do not skew it.
-    v_expandDir *= gl_Position.w;
+    // Perspective interpolation retains ground distances for both coverage
+    // and dash atlas coordinates, as in MapLibre's v_normal/v_linesofar.
 }
 `;
 }
@@ -405,21 +490,30 @@ float lineCoverage()
 #ifdef LINE_TILE_CLIP
     clipLineTile();
 #endif
-    float halfWidth = v_width * czm_pixelRatio * 0.5;
-    float tangent = max(dot(gl_FragCoord.xy - v_lineCap.xy, v_lineCap.zw), 0.0);
-    if (v_otherCap.z > 0.0)
-        tangent = max(tangent, dot(gl_FragCoord.xy - v_otherCap.xy, -v_lineCap.zw));
-    float normal = v_expandDir * gl_FragCoord.w * (halfWidth + 1.5);
-    return clamp(halfWidth + 0.5 - length(vec2(normal, tangent)), 0.0, 1.0);
+    float halfWidth = v_width * 0.5;
+    float tangent = max(v_lineDistance.y, 0.0);
+    if (v_capExtent.x > 0.0)
+    {
+        vec3 clip = vec3((gl_FragCoord.xy - czm_viewport.xy) / czm_viewport.zw * 2.0 - 1.0, 1.0);
+        float along = dot(v_capTangent, clip) / dot(v_capDenominator, clip);
+        tangent = max(along, 0.0);
+        if (v_capExtent.y >= 0.0)
+            tangent = max(tangent, -along - v_capExtent.y);
+    }
+    float distance = length(vec2(v_lineDistance.x, tangent));
+    float blur = v_gamma_scale / czm_pixelRatio;
+    return clamp((halfWidth + 0.5 / czm_pixelRatio - distance) / blur, 0.0, 1.0);
 }
 `;
 
 export const LINE_AA_FS = `
 in vec4 v_color;
-in float v_expandDir;
-flat in vec4 v_lineCap;
-flat in vec3 v_otherCap;
+in vec2 v_lineDistance;
+in float v_gamma_scale;
 in float v_width;
+flat in vec3 v_capTangent;
+flat in vec3 v_capDenominator;
+flat in vec2 v_capExtent;
 
 ${LINE_COVERAGE_SHADER}
 
@@ -453,8 +547,8 @@ void main()
 /**
  * PolylineColorAppearance with the antialiasing ramp from {@link LINE_AA_FS}
  * and the round cap/join geometry from {@link LINE_STRIP_VS}. The vertex
- * shader is the stock polyline shader plus the extra varyings, so
- * per-instance colors and picking work unchanged.
+ * shader retains Native's instance colors and picking while projecting the
+ * ground extrusion and its antialiasing envelope.
  *
  * The appearance enables alpha blending for edge coverage, including opaque
  * paint. The ground command plan retains that blend state while placing the
@@ -478,6 +572,7 @@ class FillOutlineAppearance extends PolylineColorAppearance {
     super({
       translucent: true,
       vertexShaderSource: `
+${lineHeightShader()}
 in vec3 position3DHigh;
 in vec3 position3DLow;
 in vec4 color;
@@ -487,7 +582,11 @@ out vec2 v_position;
 void main()
 {
     vec4 position = czm_computePosition();
-    gl_Position = czm_modelViewProjectionRelativeToEye * position;
+    vec4 positionEC = czm_modelViewRelativeToEye * position;
+    vec3 height3DEC = lineHeightEC(position3DHigh + position3DLow);
+    vec3 height2DEC = czm_modelViewRelativeToEye[0].xyz * u_line_layer_offset;
+    positionEC.xyz += mix(height2DEC, height3DEC, czm_morphTime);
+    gl_Position = czm_projection * positionEC;
     v_position = (gl_Position.xy / gl_Position.w * 0.5 + 0.5) * czm_viewport.zw + czm_viewport.xy;
     v_color = color;
 }
@@ -551,7 +650,7 @@ export interface LineDashResources {
   rows?: Record<string, DashRow>;
 }
 
-function lineGeometryOptions(bucket: Bucket | undefined, layerId: string, featureIndex: number, dash: LineDashResources | undefined, dashed: boolean): LineGeometryOptions | undefined {
+function lineGeometryOptions(bucket: Bucket | undefined, layerId: string, featureIndex: number, dash: LineDashResources | undefined, dashed: boolean, resolveRows: typeof dashRowsForFeature): LineGeometryOptions | undefined {
   if (!(bucket instanceof LineBucket) && !(bucket instanceof FillBucket))
     return undefined;
   const joinCap = bucket instanceof LineBucket
@@ -560,7 +659,7 @@ function lineGeometryOptions(bucket: Bucket | undefined, layerId: string, featur
   if (bucket instanceof LineBucket && dashed) {
     if (!dash)
       throw new Error('A line atlas is required to render dash layers');
-    const rows = dashRowsForFeature(bucket, featureIndex, layerId, dash.rows, dash.material.atlas);
+    const rows = resolveRows(bucket, featureIndex, layerId, dash.rows, dash.material.atlas);
     if (!rows)
       return undefined;
     return { ...joinCap, widthPx: 255, dashFrom: rows.from, dashTo: rows.to };
@@ -568,9 +667,13 @@ function lineGeometryOptions(bucket: Bucket | undefined, layerId: string, featur
   return { ...joinCap, widthPx: bucket instanceof LineBucket ? 255 : 1 };
 }
 
-function lineGeometryKey(bucket: Bucket | undefined, layerId: string, featureIndex: number, dash: LineDashResources | undefined, dashed: boolean): string {
-  const options = lineGeometryOptions(bucket, layerId, featureIndex, dash, dashed);
+function lineGeometryKey(bucket: Bucket | undefined, layerId: string, featureIndex: number, dash: LineDashResources | undefined, dashed: boolean, resolveRows: typeof dashRowsForFeature): string {
+  const options = lineGeometryOptions(bucket, layerId, featureIndex, dash, dashed, resolveRows);
   return options ? lineLayoutKey(options) : 'omitted';
+}
+
+function lineLayout(bucket: Bucket | undefined, featureIndex: number): Pick<LineGeometryOptions, 'join' | 'cap' | 'miterLimit' | 'roundLimit'> | undefined {
+  return bucket instanceof LineBucket ? bucket.featureLineJoinCaps[featureIndex] ?? bucket.lineJoinCap : undefined;
 }
 
 /** Build lines at continuous style zoom; pixel ratio is a shader uniform. */
@@ -590,7 +693,7 @@ export function buildLineCollection(
 }
 
 /**
- * Resumable per-feature line build. A layer keeps its own geometry instances
+ * Resumable point and instance line build. A layer keeps its own geometry instances
  * through commit; merging different style layers would lose painter order.
  *
  * Instances always share the translucent appearance: the fragment shader's
@@ -608,9 +711,11 @@ export interface LineBuildState {
     paintMode: 'uniform' | 'instance';
     zoomDependent: boolean;
     familyRoot?: string;
+    instancePaint?: Map<number, LineFeatureStyle>;
     dash: boolean;
-    geometryInputs: Array<{ positions: Float64Array; tilePositions: Float64Array; key: string }>;
+    geometryInputs: Array<{ positions: Float64Array; tilePositions: Float64Array; key: string; featureIndex: number; layout?: Pick<LineGeometryOptions, 'join' | 'cap' | 'miterLimit' | 'roundLimit'> }>;
     instances?: GeometryInstance[];
+    maximumMiterLimit?: number;
     outlineInstances?: GeometryInstance[];
   }>;
   buckets: { [layerId: string]: Bucket };
@@ -621,6 +726,9 @@ export interface LineBuildState {
   dash?: LineDashResources;
   layerIndex: number;
   sourceIndex: number;
+  iterator?: Generator<void>;
+  collection?: PrimitiveCollection;
+  complete: boolean;
 }
 
 export function beginLineBuild(
@@ -633,46 +741,10 @@ export function beginLineBuild(
   planar = false,
   dash?: LineDashResources,
 ): LineBuildState {
-  const byLayer = new Map<string, LinePrimitiveSource[]>();
-  for (const source of sources) {
-    const list = byLayer.get(source.layerId);
-    if (list) {
-      list.push(source);
-    }
-    else {
-      byLayer.set(source.layerId, [source]);
-    }
-  }
-  const families = new Map<LineBucket, string[]>();
-  for (const layerId of byLayer.keys()) {
-    const bucket = buckets[layerId];
-    if (!(bucket instanceof LineBucket) || isDashStyleLayer(layerFor(bucket, layerId)))
-      continue;
-    const members = families.get(bucket);
-    if (members)
-      members.push(layerId);
-    else
-      families.set(bucket, [layerId]);
-  }
-  return {
+  const state: LineBuildState = {
     clip: new LineTileClip(tileID),
     geometryCache: new LineGeometryCache(tileID),
-    byLayer: [...byLayer].map(([layerId, layerSources]) => {
-      const bucket = buckets[layerId];
-      const dashed = bucket instanceof LineBucket && isDashStyleLayer(layerFor(bucket, layerId));
-      const family = bucket instanceof LineBucket ? families.get(bucket) : undefined;
-      const familyRoot = family && family.length > 1 ? family[0] : undefined;
-      return {
-        layerId,
-        sources: layerSources,
-        dash: dashed,
-        geometryInputs: layerSources.map(source => ({ positions: source.positions, tilePositions: source.tilePositions, key: lineGeometryKey(bucket, layerId, source.featureIndex, dash, dashed) })),
-        offsetMeters: layerSources[0].offsetMeters ?? 0,
-        paintMode: linePaintMode(bucket, layerId),
-        zoomDependent: linePaintUsesZoom(bucket, layerId),
-        familyRoot,
-      };
-    }),
+    byLayer: [],
     buckets,
     tileId,
     generationId,
@@ -681,42 +753,143 @@ export function beginLineBuild(
     dash,
     layerIndex: 0,
     sourceIndex: 0,
+    complete: false,
   };
+  state.iterator = compileLineBuild(state, sources);
+  return state;
 }
 
-/** Build features until the budget is spent; true when every layer is built. */
-export function stepLineBuild(state: LineBuildState, budget: Budget): boolean {
-  // Finish at least one feature per call so a spent budget cannot livelock.
-  // A single large feature remains the indivisible unit of line baking.
-  let first = true;
-  while (state.layerIndex < state.byLayer.length) {
-    if (!first && budget.exhausted) {
-      return false;
-    }
-    first = false;
-    const layer = state.byLayer[state.layerIndex];
-    if (layer.familyRoot && layer.familyRoot !== layer.layerId) {
-      state.layerIndex++;
-      state.sourceIndex = 0;
-      continue;
-    }
-    const { layerId } = layer;
-    const source = layer.sources[state.sourceIndex++];
-    const bucket = state.buckets[layerId];
-    if (bucket instanceof FillBucket && !state.planar) {
-      layer.outlineInstances ??= [];
-      appendFillOutlineInstances(layer.outlineInstances, source, bucket, state.tileId, state.generationId, layerId, state.zoom);
-    }
-    else {
-      layer.instances ??= [];
-      appendLineLayerInstances(layer.instances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.planar, layer.paintMode, state.geometryCache!, state.dash, layer.dash);
-    }
-    if (state.sourceIndex === layer.sources.length) {
-      state.layerIndex++;
-      state.sourceIndex = 0;
+function* compileLineBuild(state: LineBuildState, sources: LinePrimitiveSourceList): Generator<void> {
+  // Grouping and input snapshots are cheap; bound their work without reading
+  // the frame clock per road. Geometry below keeps its own point quanta.
+  const bookkeepingQuantum = 32;
+  let pendingWork = 0;
+  const byLayer = new Map<string, LinePrimitiveSource[]>();
+  for (const source of sources) {
+    const list = byLayer.get(source.layerId);
+    if (list)
+      list.push(source);
+    else byLayer.set(source.layerId, [source]);
+    if (++pendingWork === bookkeepingQuantum) {
+      pendingWork = 0;
+      yield;
     }
   }
-  return true;
+  if (pendingWork) {
+    pendingWork = 0;
+    yield;
+  }
+  const families = new Map<LineBucket, string[]>();
+  for (const layerId of byLayer.keys()) {
+    const bucket = state.buckets[layerId];
+    if (bucket instanceof LineBucket && !isDashStyleLayer(layerFor(bucket, layerId))) {
+      const members = families.get(bucket);
+      if (members)
+        members.push(layerId);
+      else families.set(bucket, [layerId]);
+    }
+    if (++pendingWork === bookkeepingQuantum) {
+      pendingWork = 0;
+      yield;
+    }
+  }
+  if (pendingWork) {
+    pendingWork = 0;
+    yield;
+  }
+  for (const [layerId, layerSources] of byLayer) {
+    const bucket = state.buckets[layerId];
+    const dashed = bucket instanceof LineBucket && isDashStyleLayer(layerFor(bucket, layerId));
+    const family = bucket instanceof LineBucket ? families.get(bucket) : undefined;
+    const layer: LineBuildState['byLayer'][number] = {
+      layerId,
+      sources: layerSources,
+      dash: dashed,
+      geometryInputs: [],
+      offsetMeters: layerSources[0].offsetMeters ?? 0,
+      paintMode: linePaintMode(bucket, layerId),
+      zoomDependent: linePaintUsesZoom(bucket, layerId),
+      familyRoot: family && family.length > 1 ? family[0] : undefined,
+    };
+    state.byLayer.push(layer);
+    for (const source of layerSources) {
+      // Replay layers have no separate construction GeometryInstances. Keep
+      // their committed paint within this budgeted, bounded build scan so a
+      // frozen family can upload before any live style evaluation is allowed.
+      if (layer.familyRoot && layer.paintMode === 'instance') {
+        layer.instancePaint ??= new Map();
+        if (!layer.instancePaint.has(source.featureIndex))
+          layer.instancePaint.set(source.featureIndex, lineFeatureStyle(bucket, source.featureIndex, layerId, state.zoom));
+      }
+      const layout = lineLayout(bucket, source.featureIndex);
+      layer.geometryInputs.push({
+        positions: source.positions,
+        tilePositions: source.tilePositions,
+        featureIndex: source.featureIndex,
+        layout: layout ? { ...layout } : undefined,
+        key: lineGeometryKey(bucket, layerId, source.featureIndex, state.dash, dashed, dashRowsForFeature),
+      });
+      if (++pendingWork === bookkeepingQuantum) {
+        pendingWork = 0;
+        yield;
+      }
+    }
+    if (pendingWork) {
+      pendingWork = 0;
+      yield;
+    }
+  }
+  while (state.layerIndex < state.byLayer.length) {
+    const layer = state.byLayer[state.layerIndex];
+    if (!layer.familyRoot || layer.familyRoot === layer.layerId) {
+      const { layerId } = layer;
+      const bucket = state.buckets[layerId];
+      for (; state.sourceIndex < layer.sources.length; state.sourceIndex++) {
+        const source = layer.sources[state.sourceIndex];
+        if (bucket instanceof FillBucket && !state.planar) {
+          layer.outlineInstances ??= [];
+          yield* appendFillOutlineInstances(layer.outlineInstances, source, bucket, state.tileId, state.generationId, layerId, state.zoom);
+        }
+        else {
+          layer.instances ??= [];
+          const miterLimit = yield* appendLineLayerInstances(layer.instances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.planar, layer.paintMode, state.geometryCache!, state.dash, layer.dash);
+          if (miterLimit !== undefined)
+            layer.maximumMiterLimit = Math.max(layer.maximumMiterLimit ?? 0, miterLimit);
+        }
+        yield;
+      }
+    }
+    state.layerIndex++;
+    state.sourceIndex = 0;
+    yield;
+  }
+  yield* assembleLineCollection(state);
+}
+
+/** Advance at least one small work unit even when the budget is already spent. */
+export function stepLineBuild(state: LineBuildState, budget: Budget): boolean {
+  if (state.complete)
+    return true;
+  if (!state.iterator)
+    return false;
+  do {
+    if (state.iterator.next().done) {
+      state.complete = true;
+      state.iterator = undefined;
+      return true;
+    }
+  } while (!budget.exhausted);
+  return false;
+}
+
+/** Release unpublished primitives as well as the unfinished compiler arrays. */
+export function discardLineBuild(state: LineBuildState): void {
+  state.iterator?.return(undefined);
+  state.iterator = undefined;
+  state.collection?.destroy();
+  state.collection = undefined;
+  state.geometryCache = undefined;
+  state.byLayer = [];
 }
 
 /** Shared appearance: stateless across primitives, so one for all tiles. */
@@ -744,6 +917,32 @@ function* lineChunks(instances: GeometryInstance[], planar: boolean): Generator<
         break;
       }
       vertices += count;
+    }
+    yield offset === 0 && end === instances.length ? instances : instances.slice(offset, end);
+    offset = end;
+  }
+}
+
+/** Representation limits, rather than cold work quanta, bound permanent pages. */
+function* linePages(instances: GeometryInstance[]): Generator<GeometryInstance[]> {
+  const maximumTextureSize = (Cesium as unknown as { ContextLimits: { maximumTextureSize: number } }).ContextLimits.maximumTextureSize;
+  // Each centerline record occupies twelve uint32 values per track. Planar
+  // scenes need both tracks; before a Native context exists, only the FLOAT
+  // address limit is known. Do not assume a hardware texture size then.
+  const maximumRecords = maximumTextureSize > 0
+    ? Math.min(2 ** 24, Math.floor(maximumTextureSize ** 2 / 6))
+    : 2 ** 24;
+  for (let offset = 0; offset < instances.length;) {
+    let end = offset;
+    let records = 0;
+    while (end < instances.length && end - offset < 65536) {
+      const count = lineInputs.get(instances[end].geometry)!.positions.length / 3;
+      if (count > maximumRecords)
+        throw new RangeError('A line feature exceeds its geometry page record capacity');
+      if (records + count > maximumRecords)
+        break;
+      records += count;
+      end++;
     }
     yield offset === 0 && end === instances.length ? instances : instances.slice(offset, end);
     offset = end;
@@ -797,15 +996,17 @@ function linePaintMode(bucket: Bucket | undefined, layerId: string): 'uniform' |
   return properties.some(property => !!configuration.getAttributeArray(property)) ? 'instance' : 'uniform';
 }
 
-function lineUniforms(clip: LineTileClip, width = 1, color: Color = CesiumColor.WHITE, offset = 0): LinePaintUniforms {
+function lineUniforms(clip: LineTileClip, width = 1, color: Color = CesiumColor.WHITE, offset = 0, zoom = 0): LinePaintUniforms {
   const uniforms = {
     clip,
     width,
     color: CesiumColor.clone(color),
     offset,
+    metersPerPixel: lineGroundScale(zoom),
     widthUniform: () => uniforms.width,
     colorUniform: () => uniforms.color,
     offsetUniform: () => uniforms.offset,
+    metersPerPixelUniform: () => uniforms.metersPerPixel,
   };
   return uniforms;
 }
@@ -819,7 +1020,20 @@ function lineWidth(width: number): number {
  * while bounding Native upload preparation.
  */
 export function commitLineBuild(state: LineBuildState): PrimitiveCollection | undefined {
+  if (!state.complete)
+    throw new Error('cannot commit unfinished line build');
+  const collection = state.collection;
+  state.collection = undefined;
+  state.geometryCache = undefined;
+  if (collection?.length)
+    return collection;
+  collection?.destroy();
+  return undefined;
+}
+
+function* assembleLineCollection(state: LineBuildState): Generator<void> {
   const collection = new PrimitiveCollection();
+  state.collection = collection;
   for (const layer of state.byLayer) {
     if (layer.familyRoot && layer.familyRoot !== layer.layerId) {
       continue;
@@ -828,7 +1042,8 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
       const primitive = new GeometryPrimitive({
         geometryInstances: instances,
         appearance: fillOutlineAppearance,
-      }, 'native');
+      }, 'native', layer.offsetMeters);
+      registerLinePaint(primitive, lineUniforms(state.clip, 1, CesiumColor.WHITE, layer.offsetMeters));
       lineGroups.set(primitive, {
         kind: 'outline',
         instanceIds: instances.map(instance => instance.id as LineInstanceId),
@@ -837,8 +1052,9 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
       });
       registerDrawBatch(primitive, { layerId: layer.layerId, tileId: state.tileId, kind: 'fill-outline' });
       collection.add(primitive);
+      yield;
     }
-    for (const instances of lineChunks(layer.instances ?? [], state.planar)) {
+    for (const instances of state.buckets[layer.layerId] instanceof LineBucket ? linePages(layer.instances ?? []) : lineChunks(layer.instances ?? [], state.planar)) {
       if (layer.familyRoot) {
         const layers = state.byLayer
           .filter(candidate => candidate.familyRoot === layer.layerId)
@@ -848,6 +1064,7 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
             offsetMeters: candidate.offsetMeters,
             paintMode: candidate.paintMode,
             zoomDependent: candidate.zoomDependent,
+            instancePaint: candidate.instancePaint,
           }));
         const chunk = new LineFamilyChunk(
           instances,
@@ -857,9 +1074,11 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
           state.zoom,
           translucentLineAppearance,
           state.clip,
+          layer.maximumMiterLimit,
         );
         lineFamilies.set(chunk, layers);
         collection.add(chunk as unknown as Primitive);
+        yield;
         continue;
       }
       const primitive = new GeometryPrimitive({
@@ -867,7 +1086,7 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
         appearance: layer.dash
           ? new DashLineAppearance({ material: state.dash!.material.material, translucent: true })
           : translucentLineAppearance,
-      }, 'line', layer.offsetMeters);
+      }, 'line', layer.offsetMeters, lineAppearanceForMode);
       registerDrawBatch(primitive, { layerId: layer.layerId, tileId: state.tileId, kind: layer.dash ? 'dash' : 'line' });
       const first = instances[0].id as LineInstanceId;
       const bucket = state.buckets[layer.layerId];
@@ -879,8 +1098,11 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
         style ? lineWidth(style.widthPx) : 1,
         style?.color,
         layer.offsetMeters,
+        state.zoom,
       );
-      registerLinePaint(primitive, uniforms);
+      registerLinePaint(primitive, uniforms, layer.paintMode === 'uniform' && layer.maximumMiterLimit !== undefined
+        ? { widthFactor: 1, miterLimit: layer.maximumMiterLimit }
+        : undefined);
       lineGroups.set(primitive, {
         kind: 'line',
         firstFeatureIndex: first.featureIndex,
@@ -893,14 +1115,15 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
         uniforms,
       });
       collection.add(primitive);
+      yield;
     }
+    yield;
   }
   lineGeometryInputs.set(collection, state.byLayer.map(({ layerId, dash, sources, geometryInputs }) => ({ layerId, dash, sources, geometryInputs })));
   state.geometryCache = undefined;
-  return collection.length > 0 ? collection : undefined;
 }
 
-function appendFillOutlineInstances(
+function* appendFillOutlineInstances(
   instances: GeometryInstance[],
   source: LinePrimitiveSource,
   bucket: FillBucket,
@@ -908,7 +1131,7 @@ function appendFillOutlineInstances(
   generationId: number,
   layerId: string,
   zoom: number,
-): void {
+): Generator<void> {
   const style = fillStyleForFeature(bucket, source.featureIndex, layerId, zoom);
   // Existing outline sources survive hidden paint so opacity transitions can
   // update Native attributes without rebuilding the other layers' geometry.
@@ -920,6 +1143,7 @@ function appendFillOutlineInstances(
   for (let i = 0; i < count - 1; i++) {
     indices[i * 2] = i;
     indices[i * 2 + 1] = i + 1;
+    yield;
   }
   const attributes: Record<string, GeometryAttribute> = {
     position: new GeometryAttribute({
@@ -932,7 +1156,7 @@ function appendFillOutlineInstances(
     attributes: attributes as never,
     indices,
     primitiveType: PrimitiveType.LINES,
-    boundingSphere: BoundingSphere.fromVertices(strip),
+    boundingSphere: yield* geometryBoundingSphere(strip),
   });
   instances.push(new GeometryInstance({
     geometry,
@@ -945,7 +1169,7 @@ function appendFillOutlineInstances(
  * Append one feature's strips to its layer. Colors ride per instance;
  * the layer id survives in the pick id.
  */
-function appendLineLayerInstances(
+function* appendLineLayerInstances(
   instances: GeometryInstance[],
   source: LinePrimitiveSource,
   bucket: Bucket | undefined,
@@ -958,7 +1182,7 @@ function appendLineLayerInstances(
   geometryCache: LineGeometryCache,
   dash: LineDashResources | undefined,
   dashed: boolean,
-): void {
+): Generator<void, number | undefined> {
   if (!(bucket instanceof LineBucket) && !(bucket instanceof FillBucket)) {
     return;
   }
@@ -967,11 +1191,15 @@ function appendLineLayerInstances(
   if (source.positions.length < 6) {
     return;
   }
-  const options = lineGeometryOptions(bucket, layerId, source.featureIndex, dash, dashed);
+  const options = lineGeometryOptions(bucket, layerId, source.featureIndex, dash, dashed, dashRowsForFeature);
   if (!options)
     return;
-  const geometry = geometryCache.geometry(source, options, planar);
+  const geometry = !planar && !dashed && source.prepared?.layoutKey === lineLayoutKey(options)
+    && source.prepared.originalPositions === source.positions && source.prepared.originalTilePositions === source.tilePositions
+    ? restorePreparedLineGeometry(source.prepared)
+    : yield* geometryCache.compile(source, options, planar);
   if (geometry) {
+    const miterLimit = Math.fround(options.join === 'bevel' ? 1.05 : options.miterLimit);
     instances.push(new GeometryInstance({
       geometry,
       id: { type: 'line', tileId, layerId, featureIndex: source.featureIndex, generationId },
@@ -985,11 +1213,63 @@ function appendLineLayerInstances(
         lineMiterLimit: new GeometryInstanceAttribute({
           componentDatatype: ComponentDatatype.FLOAT,
           componentsPerAttribute: 1,
-          value: [Math.fround(options.join === 'bevel' ? 1.05 : options.miterLimit)],
+          value: [miterLimit],
         }),
       },
     }));
+    return miterLimit;
   }
+}
+
+type LineGeometryInputs = LineBuildState['byLayer'][number]['geometryInputs'];
+const validatedLineInputs = new WeakMap<LineGeometryInputs, { dependencies: unknown[]; count: number }>();
+
+/** Revisions cover in-place feature paint; evaluated constants also change at zoom boundaries. */
+function lineValidationDependencies(bucket: Bucket | undefined, layerId: string, dashed: boolean, dash?: LineDashResources): unknown[] {
+  if (!(bucket instanceof LineBucket) && !(bucket instanceof FillBucket))
+    return [bucket];
+  const layer = layerFor(bucket, layerId);
+  const configuration = bucket.programConfigurations.get(layerId);
+  const dependencies: unknown[] = [bucket, layer, layer.paintRevision, bucket.programConfigurations, bucket.programConfigurations.paintRevision, configuration];
+  if (dashed) {
+    const array = configuration.getAttributeArray('line-dasharray');
+    const constant = constantValue(layer, 'line-dasharray') as number[] | { from?: number[]; to?: number[] } | undefined;
+    const from = Array.isArray(constant) ? constant : constant?.from;
+    const to = Array.isArray(constant) ? constant : constant?.to;
+    // Worker rows are normally replaced as one payload; their values remain
+    // part of the proof so a row edited in place cannot reuse stale geometry.
+    const rows = dash?.rows;
+    const rowValues = rows ? Object.entries(rows).map(([key, row]) => `${key}:${row.dasharray.join(',')}`).join('|') : undefined;
+    // Worker row keys and values do not read the atlas. Appending an unrelated
+    // texture row only invalidates the constant branch that looks rows up there.
+    const atlasRevision = array && rows ? undefined : dash?.material.atlas.revision;
+    dependencies.push(array, array?.arrayBuffer, array?.length, array?.bytesPerElement, from?.join(','), to?.join(','), dash?.material, dash?.material.atlas, atlasRevision, rows, rowValues);
+  }
+  return dependencies;
+}
+
+/** One validation shares feature keys and constant rows; every path still checks its layout. */
+function lineGeometryKeys(bucket: Bucket | undefined, layerId: string, dashed: boolean, dash: LineDashResources | undefined): (featureIndex: number) => string {
+  const keys = new Map<number, string>();
+  let resolveRows = dashRowsForFeature;
+  if (dashed && bucket instanceof LineBucket
+    && !(bucket.programConfigurations.get(layerId).getAttributeArray('line-dasharray') && dash?.rows)) {
+    const rows = new Map<boolean, ReturnType<typeof dashRowsForFeature>>();
+    resolveRows = (bucket, featureIndex, layerId, dashRows, atlas) => {
+      const round = (bucket.featureLineJoinCaps[featureIndex] ?? bucket.lineJoinCap).cap === 'round';
+      if (!rows.has(round))
+        rows.set(round, dashRowsForFeature(bucket, featureIndex, layerId, dashRows, atlas));
+      return rows.get(round);
+    };
+  }
+  return (featureIndex) => {
+    let key = keys.get(featureIndex);
+    if (key === undefined) {
+      key = lineGeometryKey(bucket, layerId, featureIndex, dash, dashed, resolveRows);
+      keys.set(featureIndex, key);
+    }
+    return key;
+  };
 }
 
 function sameLineGeometry(
@@ -1002,11 +1282,31 @@ function sameLineGeometry(
     const dashed = bucket instanceof LineBucket && isDashStyleLayer(layerFor(bucket, layer.layerId));
     if (layer.dash !== dashed)
       return false;
-    if (layer.sources.some((source, index) => source.positions !== layer.geometryInputs[index].positions
-      || source.tilePositions !== layer.geometryInputs[index].tilePositions
-      || lineGeometryKey(bucket, layer.layerId, source.featureIndex, dash, dashed) !== layer.geometryInputs[index].key)) {
-      return false;
+    const inputs = layer.geometryInputs;
+    const dependencies = lineValidationDependencies(bucket, layer.layerId, dashed, dash);
+    const validated = validatedLineInputs.get(inputs);
+    const reusable = validated && dependencies.length === validated.dependencies.length
+      && dependencies.every((value, index) => Object.is(value, validated.dependencies[index]));
+    let keys: ReturnType<typeof lineGeometryKeys> | undefined;
+    for (let index = 0; index < inputs.length; index++) {
+      const input = inputs[index];
+      const source = layer.sources[index];
+      const layout = source && lineLayout(bucket, source.featureIndex);
+      // Source references and layout scalars are checked even when revision
+      // evidence lets us skip feature-range and atlas lookups.
+      if (!source || source.positions !== input.positions || source.tilePositions !== input.tilePositions
+        || source.featureIndex !== input.featureIndex
+        || layout?.join !== input.layout?.join || layout?.cap !== input.layout?.cap
+        || layout?.miterLimit !== input.layout?.miterLimit || layout?.roundLimit !== input.layout?.roundLimit) {
+        return false;
+      }
+      if (!reusable || index >= validated.count) {
+        keys ??= lineGeometryKeys(bucket, layer.layerId, dashed, dash);
+        if (keys(source.featureIndex) !== input.key)
+          return false;
+      }
     }
+    validatedLineInputs.set(inputs, { dependencies, count: inputs.length });
   }
   return true;
 }
@@ -1047,6 +1347,61 @@ export function canUpdateLinePaint(collection: PrimitiveCollection, buckets: { [
   return true;
 }
 
+/** Update only live uniforms; no geometry validation or per-instance writes. */
+/** Capture the committed camera expressions of actual uploaded uniform owners. */
+export function captureUniformLinePaint(collection: PrimitiveCollection, buckets: { [layerId: string]: Bucket }): (zoom: number) => void {
+  const updates: Array<(zoom: number) => void> = [];
+  for (let index = 0; index < collection.length; index++) {
+    const child = collection.get(index);
+    if (child instanceof LineFamilyChunk) {
+      updates.push(child.captureCameraPaint());
+      continue;
+    }
+    const group = lineGroups.get(child);
+    const bucket = group ? buckets[group.layerId] : undefined;
+    if (group?.kind !== 'line')
+      continue;
+    updates.push(zoom => group.uniforms.metersPerPixel = lineGroundScale(zoom));
+    if (group.paintMode !== 'uniform' || !(bucket instanceof LineBucket))
+      continue;
+    const evaluate = freezeLineCameraPaint(bucket.layers.find(layer => layer.id === group.layerId)!);
+    updates.push((zoom) => {
+      const style = evaluate(zoom);
+      group.uniforms.width = lineWidth(style.widthPx);
+      CesiumColor.clone(style.color, group.uniforms.color);
+    });
+  }
+  return (zoom) => {
+    for (const update of updates) update(zoom);
+  };
+}
+
+export function updateUniformLinePaint(collection: PrimitiveCollection, buckets: { [layerId: string]: Bucket }, zoom: number): void {
+  for (let index = 0; index < collection.length; index++) {
+    const child = collection.get(index);
+    if (child instanceof LineFamilyChunk) {
+      child.updateUniformPaint(zoom);
+      continue;
+    }
+    const group = lineGroups.get(child as Primitive);
+    if (group?.kind !== 'line') {
+      continue;
+    }
+    group.uniforms.metersPerPixel = lineGroundScale(zoom);
+    if (group.paintMode !== 'uniform')
+      continue;
+    const bucket = buckets[group.layerId];
+    if (bucket instanceof LineBucket) {
+      updateLineUniforms(group.uniforms, bucket, group.firstFeatureIndex, group.layerId, zoom);
+    }
+    else if (bucket) {
+      const style = lineFeatureStyle(bucket, group.firstFeatureIndex, group.layerId, zoom);
+      group.uniforms.width = lineWidth(style.widthPx);
+      CesiumColor.clone(style.color, group.uniforms.color);
+    }
+  }
+}
+
 /** Change line paint without rebuilding or reuploading its centerlines. */
 export function updateLinePaint(
   collection: PrimitiveCollection,
@@ -1069,6 +1424,8 @@ export function updateLinePaint(
     }
     const primitive = child as Primitive;
     const group = lineGroups.get(primitive);
+    if (group?.kind === 'line')
+      group.uniforms.metersPerPixel = lineGroundScale(zoom);
     if (group && force) {
       group.zoomDependent = linePaintUsesZoom(buckets[group.layerId], group.layerId);
     }
@@ -1077,7 +1434,10 @@ export function updateLinePaint(
     }
     if (group.kind === 'line' && group.paintMode === 'uniform') {
       const bucket = buckets[group.layerId];
-      if (bucket) {
+      if (bucket instanceof LineBucket) {
+        updateLineUniforms(group.uniforms, bucket, group.firstFeatureIndex, group.layerId, zoom);
+      }
+      else if (bucket) {
         const style = lineFeatureStyle(bucket, group.firstFeatureIndex, group.layerId, zoom);
         group.uniforms.width = lineWidth(style.widthPx);
         CesiumColor.clone(style.color, group.uniforms.color);

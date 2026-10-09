@@ -9,17 +9,9 @@ export const LINE_TILE_CLIP_FRAGMENT = `
 #ifdef LINE_TILE_CLIP
 in vec3 v_lineClip3DEye;
 in vec3 v_lineClip2DEye;
-uniform vec4 u_line_clip_west;
-uniform vec4 u_line_clip_east;
-uniform vec4 u_line_clip_edges;
-uniform vec3 u_line_clip_south_origin;
-uniform vec3 u_line_clip_north_origin;
-uniform vec4 u_line_clip_south_shape;
-uniform vec4 u_line_clip_north_shape;
-uniform vec4 u_line_clip_2d_west;
-uniform vec4 u_line_clip_2d_east;
-uniform vec4 u_line_clip_2d_south;
-uniform vec4 u_line_clip_2d_north;
+uniform mat4 u_line_clip_planes;
+uniform mat4 u_line_clip_latitudes;
+uniform mat4 u_line_clip_planar;
 
 float lineLatitudeSide(vec3 originEC, vec4 shape)
 {
@@ -36,10 +28,10 @@ float lineLatitudeSide(vec3 originEC, vec4 shape)
 void clipLineTile2D()
 {
     vec4 positionEC = vec4(v_lineClip2DEye, 1.0);
-    if (dot(u_line_clip_2d_west, positionEC) < 0.0
-        || dot(u_line_clip_2d_east, positionEC) >= 0.0
-        || dot(u_line_clip_2d_south, positionEC) < 0.0
-        || dot(u_line_clip_2d_north, positionEC) >= 0.0)
+    if (dot(u_line_clip_planar[0], positionEC) < 0.0
+        || dot(u_line_clip_planar[1], positionEC) >= 0.0
+        || dot(u_line_clip_planar[2], positionEC) < 0.0
+        || dot(u_line_clip_planar[3], positionEC) >= 0.0)
         discard;
 }
 
@@ -48,17 +40,17 @@ void clipLineTile3D()
     vec4 positionEC = vec4(v_lineClip3DEye, 1.0);
     // A z1 longitude interval is a hemisphere; its two edges share a plane.
     // Its across axis distinguishes the inclusive and exclusive endpoints.
-    if (u_line_clip_edges.x == 2.0)
+    if (u_line_clip_planes[2].x == 2.0)
     {
-        float radial = dot(u_line_clip_west, positionEC);
-        float across = dot(u_line_clip_east, positionEC);
+        float radial = dot(u_line_clip_planes[0], positionEC);
+        float across = dot(u_line_clip_planes[1], positionEC);
         if (radial < 0.0 || (radial == 0.0 && across >= 0.0))
             discard;
     }
-    if ((u_line_clip_edges.x == 1.0 && dot(u_line_clip_west, positionEC) < 0.0)
-        || (u_line_clip_edges.y > 0.0 && dot(u_line_clip_east, positionEC) >= 0.0)
-        || (u_line_clip_edges.z > 0.0 && lineLatitudeSide(u_line_clip_south_origin, u_line_clip_south_shape) < 0.0)
-        || (u_line_clip_edges.w > 0.0 && lineLatitudeSide(u_line_clip_north_origin, u_line_clip_north_shape) >= 0.0))
+    if ((u_line_clip_planes[2].x == 1.0 && dot(u_line_clip_planes[0], positionEC) < 0.0)
+        || (u_line_clip_planes[2].y > 0.0 && dot(u_line_clip_planes[1], positionEC) >= 0.0)
+        || (u_line_clip_planes[2].z > 0.0 && lineLatitudeSide(u_line_clip_latitudes[0].xyz, u_line_clip_latitudes[2]) < 0.0)
+        || (u_line_clip_planes[2].w > 0.0 && lineLatitudeSide(u_line_clip_latitudes[1].xyz, u_line_clip_latitudes[3]) >= 0.0))
         discard;
 }
 
@@ -77,7 +69,7 @@ interface ClipUniformState {
   readonly view: Matrix4;
 }
 
-type UniformMap = Readonly<Record<string, () => Cartesian3 | Cartesian4>>;
+type UniformMap = Readonly<Record<string, () => Matrix4>>;
 
 /** Immutable tile bounds, shared by all layers/chunks; Native owns the view. */
 export class LineTileClip {
@@ -93,6 +85,10 @@ export class LineTileClip {
   private readonly _origins: Cartesian3[];
   private readonly _eyeOrigins: Cartesian3[];
   private readonly _shapes: Cartesian4[];
+  private readonly _packedPlanes = new Matrix4();
+  private readonly _packedLatitudes = new Matrix4();
+  private readonly _packedPlanar = new Matrix4();
+  private readonly _originColumn = new Cartesian4();
   private readonly _view = new Matrix4();
   private _hasView = false;
   private _uniformState!: ClipUniformState;
@@ -126,31 +122,16 @@ export class LineTileClip {
       this._origins[index].x,
       Math.tan(latitude),
     ));
-    const plane = (index: number) => () => {
-      this._updateView();
-      return this._eyePlanes[index];
-    };
-    const origin = (index: number) => () => {
-      this._updateView();
-      return this._eyeOrigins[index];
-    };
-    const shape = (index: number) => () => {
-      this._updateView();
-      return this._shapes[index];
-    };
     const edges = new Cartesian4(canonical.z === 1 ? 2 : canonical.z > 0 ? 1 : 0, canonical.z > 1 ? 1 : 0, canonical.y < dimension - 1 ? 1 : 0, canonical.y > 0 ? 1 : 0);
+    Matrix4.setColumn(this._packedPlanes, 2, edges, this._packedPlanes);
+    const packed = (matrix: Matrix4) => () => {
+      this._updateView();
+      return matrix;
+    };
     this.uniforms = {
-      u_line_clip_west: plane(0),
-      u_line_clip_east: plane(1),
-      u_line_clip_edges: () => edges,
-      u_line_clip_south_origin: origin(0),
-      u_line_clip_north_origin: origin(1),
-      u_line_clip_south_shape: shape(0),
-      u_line_clip_north_shape: shape(1),
-      u_line_clip_2d_west: plane(2),
-      u_line_clip_2d_east: plane(3),
-      u_line_clip_2d_south: plane(4),
-      u_line_clip_2d_north: plane(5),
+      u_line_clip_planes: packed(this._packedPlanes),
+      u_line_clip_latitudes: packed(this._packedLatitudes),
+      u_line_clip_planar: packed(this._packedPlanar),
     };
   }
 
@@ -217,7 +198,18 @@ export class LineTileClip {
       shape.y = sine;
       this._origins[index].x = shape.z * cosine;
       this._origins[index].y = shape.z * sine;
-      Matrix4.multiplyByPoint(view, this._origins[index], this._eyeOrigins[index]);
+      const origin = Matrix4.multiplyByPoint(view, this._origins[index], this._eyeOrigins[index]);
+      this._originColumn.x = origin.x;
+      this._originColumn.y = origin.y;
+      this._originColumn.z = origin.z;
+      Matrix4.setColumn(this._packedLatitudes, index, this._originColumn, this._packedLatitudes);
+      Matrix4.setColumn(this._packedLatitudes, index + 2, shape, this._packedLatitudes);
     }
+    // Cesium uploads Matrix4 in column-major order; GLSL matrix[i] reads
+    // the original vector without changing clip arithmetic or precision.
+    for (let index = 0; index < 2; index++)
+      Matrix4.setColumn(this._packedPlanes, index, this._eyePlanes[index], this._packedPlanes);
+    for (let index = 0; index < 4; index++)
+      Matrix4.setColumn(this._packedPlanar, index, this._eyePlanes[index + 2], this._packedPlanar);
   }
 }

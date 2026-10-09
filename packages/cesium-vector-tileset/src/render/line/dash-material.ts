@@ -26,10 +26,12 @@ export interface DashAtlasRow {
  */
 const DASH_SDF_MATERIAL_SOURCE = `
 in vec4 v_color;
-in float v_expandDir;
-flat in vec4 v_lineCap;
-flat in vec3 v_otherCap;
+in vec2 v_lineDistance;
+in float v_gamma_scale;
 in float v_width;
+flat in vec3 v_capTangent;
+flat in vec3 v_capDenominator;
+flat in vec2 v_capExtent;
 in float v_linesofar;
 in vec3 v_dashFrom;
 in vec3 v_dashTo;
@@ -53,8 +55,8 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
     float periodTo = v_dashTo.z * floorWidth * u_toScale;
     // Atlas coordinates use the AA envelope, independent of the extra
     // transparent geometry margin needed by a multisampled framebuffer.
-    float halfWidth = v_width * czm_pixelRatio * 0.5;
-    float normal = v_expandDir * gl_FragCoord.w * (halfWidth + 1.5) / (halfWidth + 0.5);
+    float halfWidth = v_width * 0.5;
+    float normal = v_lineDistance.x / (halfWidth + 0.5 / czm_pixelRatio);
 
     vec2 texFrom = vec2(
         v_linesofar * u_worldPixels / max(periodFrom, 0.0001),

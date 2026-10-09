@@ -1,7 +1,8 @@
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { DashAtlasRow } from './dash-material';
-import { BoundingSphere, Cartesian3, Cartographic, ComponentDatatype, Ellipsoid, Geometry, GeometryAttribute, IndexDatatype, PrimitiveType, WebMercatorProjection } from 'cesium';
-import { lineInputs } from '../geometry/geometry-primitive';
+import { Cartesian3, Cartographic, ComponentDatatype, Ellipsoid, Geometry, GeometryAttribute, IndexDatatype, PrimitiveType, WebMercatorProjection } from 'cesium';
+import { geometryBoundingSphere } from '../geometry/geometry-bounds';
+import { lineInputs } from '../geometry/line-input';
 import { tileLocalToMercatorFraction } from '../geometry/tile-to-ecef';
 import { LINE_CORNER_ANCHOR, LINE_CORNER_BUTT_NEXT, LINE_CORNER_BUTT_PREV, LINE_CORNER_JOIN_FAN, LINE_CORNER_REGULAR, LINE_CORNER_ROUND_BOTH_ENDS, LINE_CORNER_ROUND_CAP, LINE_CORNER_ROUND_END, LINE_CORNER_SQUARE, LINE_FAN_PARAMETERS, MAX_FAN_VERTICES } from './line-vertex-format';
 
@@ -25,6 +26,9 @@ export interface LineGeometryOptions {
 const MIN_SEGMENT_LENGTH_METERS = 1e-8;
 const DEG_PER_TRIANGLE = 20;
 const MAX_FAN_ERROR_PX = 0.15;
+// Amortize deadline checks without making a complete path the work unit.
+// The renderer keeps consuming these quanta until its wall-clock budget ends.
+const POINT_QUANTUM = 32;
 // Cesium exports this helper at runtime, but its enum declaration omits it.
 const createIndices = (IndexDatatype as typeof IndexDatatype & {
   createTypedArray: (vertices: number, length: number) => Uint16Array | Uint32Array;
@@ -56,12 +60,20 @@ export class LineGeometryCache {
   }
 
   geometry(source: LineGeometrySource, options: LineGeometryOptions, planar = false): Geometry | undefined {
+    const iterator = this.compile(source, options, planar);
+    let result = iterator.next();
+    while (!result.done) result = iterator.next();
+    return result.value;
+  }
+
+  /** Only completed geometry enters the cache; abandoned iterators own no entry. */
+  * compile(source: LineGeometrySource, options: LineGeometryOptions, planar = false): Generator<void, Geometry | undefined> {
     const key = `${lineLayoutKey(options)}|${planar ? 'planar' : '3d'}`;
     let coordinates = this._geometries.get(source.positions);
     let layouts = coordinates?.get(source.tilePositions);
     let geometry = layouts?.get(key);
     if (!geometry) {
-      geometry = createLineGeometry(source.positions, options, planar, {
+      geometry = yield* compileLineGeometry(source.positions, options, planar, {
         tileID: this._tileID,
         tilePositions: source.tilePositions,
       });
@@ -90,10 +102,24 @@ export function createLineGeometry(
   planar = false,
   source?: { tileID: CanonicalTileID; tilePositions: Float64Array },
 ): Geometry | undefined {
+  const iterator = compileLineGeometry(positions, options, planar, source);
+  let result = iterator.next();
+  while (!result.done) result = iterator.next();
+  return result.value;
+}
+
+/** One compiler shared by synchronous callers and budgeted publication. */
+export function* compileLineGeometry(
+  positions: Float64Array,
+  options: LineGeometryOptions,
+  planar = false,
+  source?: { tileID: CanonicalTileID; tilePositions: Float64Array },
+): Generator<void, Geometry | undefined> {
   if (planar && !source)
     throw new TypeError('planar line geometry requires source coordinates');
   const { join, cap, roundLimit } = options;
   const sourceCount = positions.length / 3;
+  const resumable = sourceCount > POINT_QUANTUM;
   if (source && source.tilePositions.length !== sourceCount * 2)
     throw new TypeError('line source coordinates must match its ECEF point count');
   let retained: Uint32Array | undefined;
@@ -111,15 +137,25 @@ export function createLineGeometry(
       : Cartesian3.distanceSquared(previous, point) < MIN_SEGMENT_LENGTH_METERS * MIN_SEGMENT_LENGTH_METERS)) {
       if (!retained) {
         retained = new Uint32Array(sourceCount);
-        for (let retainedIndex = 0; retainedIndex < n; retainedIndex++) retained[retainedIndex] = retainedIndex;
+        for (let retainedIndex = 0; retainedIndex < n; retainedIndex++) {
+          retained[retainedIndex] = retainedIndex;
+          if (resumable && (retainedIndex + 1) % POINT_QUANTUM === 0)
+            yield;
+        }
       }
+      if (resumable && (index + 1) % POINT_QUANTUM === 0)
+        yield;
       continue;
     }
     if (retained)
       retained[n] = index;
     n++;
     Cartesian3.clone(point, previous);
+    if (resumable && (index + 1) % POINT_QUANTUM === 0)
+      yield;
   }
+  if (resumable)
+    yield;
   const last = retained ? retained[n - 1] : n - 1;
   const closed = n > 3 && (source
     ? source.tilePositions[0] === source.tilePositions[last * 2]
@@ -130,6 +166,7 @@ export function createLineGeometry(
   if (n < 2)
     return undefined;
 
+  const resumableCentres = n > POINT_QUANTUM;
   // Contiguous source points share their existing backing. Filtering internal
   // duplicates owns only the surviving packed centres, without JS point arrays.
   const contiguous = !retained || retained[n - 1] === n - 1;
@@ -142,8 +179,12 @@ export function createLineGeometry(
       centres[j * 3] = positions[input];
       centres[j * 3 + 1] = positions[input + 1];
       centres[j * 3 + 2] = positions[input + 2];
+      if (resumableCentres && (j + 1) % POINT_QUANTUM === 0)
+        yield;
     }
   }
+  if (resumableCentres)
+    yield;
   const planarSource = planar && source;
   const longitudes = source ? new Float64Array(n) : undefined;
   const dashed = options.dashFrom !== undefined && options.dashTo !== undefined;
@@ -187,10 +228,14 @@ export function createLineGeometry(
       }
       previousX = x;
       previousY = y;
+      if (resumableCentres && (j + 1) % POINT_QUANTUM === 0)
+        yield;
     }
     if (linesofar && closed)
       perimeter = linesofar[n - 1] + distance(previousX, previousY, firstX, firstY);
   }
+  if (resumableCentres)
+    yield;
 
   const fanCounts = join === 'round' ? new Int16Array(n) : undefined;
   const fanSides = join === 'round' ? new Int8Array(n) : undefined;
@@ -240,12 +285,16 @@ export function createLineGeometry(
         vertexCount += count + 1;
         indexCount += 3 * (count + 3);
       }
+      if (resumableCentres && (j + 1) % POINT_QUANTUM === 0)
+        yield;
     }
   }
   if (!closed && (cap === 'round' || cap === 'square')) {
     vertexCount += 4;
     indexCount += 12;
   }
+  if (resumableCentres)
+    yield;
 
   const expanded = new Float64Array(vertexCount * 3);
   const flags = new Uint8Array(vertexCount);
@@ -369,11 +418,15 @@ export function createLineGeometry(
     }
     previousL = nextL;
     previousR = nextR;
+    if (resumableCentres && (j + 1) % POINT_QUANTUM === 0)
+      yield;
   }
   if (closed) {
     triangle(previousL, firstL, previousR);
     triangle(firstL, firstR, previousR);
   }
+  if (resumableCentres)
+    yield;
 
   const attributes: Record<string, GeometryAttribute> = {};
   attributes.position = new GeometryAttribute({ componentDatatype: ComponentDatatype.DOUBLE, componentsPerAttribute: 3, values: expanded });
@@ -389,7 +442,7 @@ export function createLineGeometry(
     indices: indices as never,
     primitiveType: PrimitiveType.TRIANGLES,
     // Every strip role repeats a retained world-space centre.
-    boundingSphere: BoundingSphere.fromVertices(centres),
+    boundingSphere: yield* geometryBoundingSphere(centres),
   });
   lineInputs.set(geometry, {
     positions: centres,
@@ -399,3 +452,5 @@ export function createLineGeometry(
   });
   return geometry;
 }
+
+/** Cesium's Ritter/box sphere scan, with local scratch and bounded point quanta. */
