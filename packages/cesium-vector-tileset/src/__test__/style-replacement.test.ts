@@ -220,7 +220,26 @@ describe('style replacement resource lifetime', () => {
       child.buckets = { land: bucket };
       child.state = 'loaded';
       buildVectorTile(internals._vectorRenderer, { tileId: `land/${childID.key}`, buckets: child.buckets, tileID: childID });
-      internals._tileResidency.published('land', childID);
+      internals._tileResidency.commit({
+        sourceId: 'land',
+        tileId: `land/${childID.key}`,
+        tileID: childID,
+        generationId: internals._vectorRenderer.tileBuildLayers(`land/${childID.key}`)!.generationId,
+        stage: 'complete',
+        progress: { vector: 'complete', pattern: true, symbol: true },
+        buckets: child.buckets,
+        styleRevision: internals._style.styleRevision,
+        mode: SceneMode.SCENE3D,
+        featureIndex: child.latestFeatureIndex,
+        retainPreviousGeneration: false,
+        previousVector: [],
+        retiredVector: [],
+        addedVector: [],
+        raster: { added: [], removed: [], removedMaterials: [] },
+        addedSymbols: [],
+        removedSymbols: [],
+        firstUpdateSymbols: [],
+      });
       const [successor] = internals._vectorRenderer.getTileCollections(`land/${childID.key}`);
       tileset.add(successor);
       internals._sceneCollections.queueFirstUpdate([successor]);

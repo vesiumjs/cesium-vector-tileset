@@ -1,116 +1,52 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { PatternPrimitiveID } from './render/pattern/pattern-renderer';
 import type { RasterPrimitivePickObject } from './render/raster/raster-renderer';
-import type { Budget } from './render/scene/frame-budget';
-import type { RenderFrameState } from './render/scene/render-frame';
+import type { Budget, FrameBudget } from './render/scene/frame-budget';
+import type { CoveringCache, RenderFrameState } from './render/scene/render-frame';
+import type { RunnableStages, SceneFrameBudgetLease, SceneFrameWork } from './render/scene/scene-frame-budget';
 import type { TilePickObject } from './render/vector/tile-conversion';
 import type { VectorPaintFrame } from './render/vector/vector-paint-updater';
 import type { VectorCollection } from './render/vector/vector-tile-renderer';
 import type { Style } from './style/style';
 import type { Tile } from './tile/tile';
+import type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions } from './tileset-options';
+import type { TilesetImage, TilesetImageOptions, TilesetStats } from './tileset-types';
 import type { SourceDataEvent, StyleDataEvent } from './util/events';
 import type { RequestTransformFunction } from './util/request';
 import { diff as diffStyles } from '@maplibre/maplibre-gl-style-spec';
 import {
-  Cartesian3,
-  Cartographic,
-  Ellipsoid,
-  EllipsoidalOccluder,
+  DeveloperError,
   Event,
+  GeographicProjection,
   HeightReference,
   PrimitiveCollection,
   SceneMode,
+  WebMercatorProjection,
 } from 'cesium';
 import { isPatternStyleLayer } from './render/pattern/pattern-layer';
 import { destroyPatternResources, PatternTileRenderer } from './render/pattern/pattern-renderer';
 import { destroyRasterResources, rasterSourceInfo, RasterTileRenderer } from './render/raster/raster-renderer';
 import { BackgroundRenderer } from './render/scene/background-renderer';
 import { DrawCommands } from './render/scene/draw-commands';
-import { FrameBudget, MAX_TILE_COMMITS, TILE_WORK_BUDGET_MS } from './render/scene/frame-budget';
+import { MAX_TILE_COMMITS } from './render/scene/frame-budget';
+import { cameraPoseForFrame } from './render/scene/render-frame';
 import { RenderLayerIndex } from './render/scene/render-layer-index';
 import { SceneCollections } from './render/scene/scene-collections';
+import { acquireSceneFrameBudget } from './render/scene/scene-frame-budget';
 import { SceneTileCovering } from './render/scene/scene-tile-covering';
 import { SourceRenderSync } from './render/scene/source-render-sync';
 import { StyleEvaluation } from './render/scene/style-evaluation';
 import { TilePublishQueue } from './render/scene/tile-publish-queue';
 import { TileResidency } from './render/scene/tile-residency';
-import { sameViewProjection, symbolViewProjection } from './render/symbol/symbol-placement';
+import { viewPriority } from './render/scene/view-priority';
+import { symbolFrame } from './render/symbol/symbol-frame';
+import { sameViewProjection } from './render/symbol/symbol-placement';
 import { SymbolTileRenderer } from './render/symbol/symbol-renderer';
-import { VectorTileRenderer } from './render/vector/vector-tile-renderer';
-import { resolveStyleUrls } from './style/resolve-style-urls';
+import { isClampHeightReference, VectorTileRenderer } from './render/vector/vector-tile-renderer';
+import { loadStyle } from './style/load-style';
 import { Style as StyleClass } from './style/style';
 import { isRasterStyleLayer } from './style/style-layer/raster-style-layer';
 import { RGBAImage } from './util/image';
-import { ResourceType, transformRequest } from './util/request';
-
-export interface CesiumVectorTilesetOptions {
-  style: StyleSpecification;
-  /** Transforms style, tile, sprite, glyph and source requests before loading. */
-  transformRequest?: RequestTransformFunction;
-  /**
-   * Number of zoom levels above a vector source's max zoom for which tiles
-   * are re-parsed from the deepest available tile, keeping deep zoom crisp
-   * instead of upscaled (MapLibre default: 4).
-   */
-  zoomLevelsToOverscale?: number;
-  /**
-   * Font family used to render CJK ideographs locally (client-side SDF)
-   * instead of fetching their glyph ranges from the style's glyph server.
-   * MapLibre defaults to 'sans-serif'; pass `false` to force server fonts.
-   */
-  localIdeographFontFamily?: string | false;
-  /**
-   * Drape fill polygons onto terrain / 3D Tiles through the scene's vector
-   * provider (Cesium 1.144+). Defaults to `HeightReference.NONE` (geometry
-   * drawn at ellipsoid heights, as before).
-   *
-   * Only fill polygons drape: circle points, lines, symbols, extrusions and
-   * patterns keep their ellipsoid heights, because Cesium's vector pipeline
-   * only packs polygons and polylines.
-   */
-  heightReference?: HeightReference;
-}
-
-export type CesiumVectorTilesetFromUrlOptions = Omit<CesiumVectorTilesetOptions, 'style'> & {
-  /** Cancels the style request before a tileset is created. */
-  signal?: AbortSignal;
-};
-
-async function loadStyleFromUrl(url: string, requestTransform?: RequestTransformFunction, signal?: AbortSignal): Promise<{ style: StyleSpecification; url: string }> {
-  signal?.throwIfAborted();
-  const request = await transformRequest(url, ResourceType.Style, requestTransform);
-  signal?.throwIfAborted();
-  const response = await fetch(request.url, {
-    signal,
-    method: request.method,
-    headers: request.headers,
-    body: request.body,
-    credentials: request.credentials,
-    cache: request.cache,
-    referrerPolicy: request.referrerPolicy,
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load style from ${request.url}: ${response.status} ${response.statusText}`);
-  }
-  const style: unknown = await response.json();
-  signal?.throwIfAborted();
-  if (!isStyleSpecification(style)) {
-    throw new Error(`The style response from ${request.url} is not a valid style object`);
-  }
-  return { style, url: response.url || request.url };
-}
-
-function isStyleSpecification(value: unknown): value is StyleSpecification {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const fields = value as Record<string, unknown>;
-  return fields.version === 8
-    && typeof fields.sources === 'object'
-    && fields.sources !== null
-    && !Array.isArray(fields.sources)
-    && Array.isArray(fields.layers);
-}
 
 /**
  * The frame state fields the tileset consumes. Structural type so the class
@@ -118,7 +54,31 @@ function isStyleSpecification(value: unknown): value is StyleSpecification {
  */
 export type { RenderFrameState } from './render/scene/render-frame';
 
-const EMPTY_LAYER_SET: ReadonlySet<string> = new Set();
+export type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions } from './tileset-options';
+
+const prePassesUpdateCollection = (PrimitiveCollection.prototype as unknown as {
+  prePassesUpdate: (state: RenderFrameState) => void;
+}).prePassesUpdate;
+
+const postPassesUpdateCollection = (PrimitiveCollection.prototype as unknown as {
+  postPassesUpdate: (state: RenderFrameState) => void;
+}).postPassesUpdate;
+
+const requestRemovalFrame = () => true;
+
+function ownerCollections(root: PrimitiveCollection, target: PrimitiveCollection): PrimitiveCollection[] | undefined {
+  if (root.contains(target))
+    return [root];
+  for (let index = 0; index < root.length; index++) {
+    const child = root.get(index);
+    if (child instanceof PrimitiveCollection) {
+      const owners = ownerCollections(child, target);
+      if (owners)
+        return [root, ...owners];
+    }
+  }
+  return undefined;
+}
 
 /**
  * CesiumVectorTileset: renders a MapLibre style into a Cesium scene.
@@ -153,10 +113,34 @@ export class CesiumVectorTileset extends PrimitiveCollection {
   private _sceneCovering: SceneTileCovering;
   private _readyPromise!: Promise<void>;
   private _afterRender?: RenderFrameState['afterRender'];
-  private readonly _requestNextFrame = () => !this._destroyed;
+  private _renderScene?: RenderFrameState['camera']['_scene'];
+  private _removeSceneListeners: Array<() => void> = [];
+  private _renderRequested = false;
+  private _renderRequestGeneration = 0;
+  private _lastShow?: boolean;
+  private _symbolPlacementWake?: ReturnType<typeof setTimeout>;
+  private _symbolPlacementDeadline?: number;
+  private readonly _requestNextFrame = () => {
+    this._renderRequested = false;
+    const frame = this._tileWorkFrame;
+    // postRender runs after Native drains afterRender. A camera render can
+    // already service that old request before its callback reaches this tick.
+    return !this._destroyed && !(frame?.successfulUpdate
+      && frame.requestGeneration === this._renderRequestGeneration);
+  };
+
   private readonly _requestRender = () => {
+    if (this._destroyed)
+      return;
+    // Retain requests made before Cesium first observes the primitive. Idle
+    // requestRenderMode scenes run prePassesUpdate but skip update entirely.
+    this._renderRequested = true;
+    this._renderRequestGeneration++;
     if (this._afterRender && !this._afterRender.includes(this._requestNextFrame)) {
       this._afterRender.push(this._requestNextFrame);
+    }
+    else if (!this._afterRender) {
+      this._renderScene?.requestRender?.();
     }
   };
 
@@ -180,7 +164,19 @@ export class CesiumVectorTileset extends PrimitiveCollection {
   private _tileResidency: TileResidency;
   private _sourceRenderSync: SourceRenderSync;
   private _drapeFrameNumber = 0;
-  private _tileWorkFrame?: { frameNumber?: number; budget: FrameBudget };
+  private readonly _fallbackBudgetScene = {};
+  private _budgetScene?: object;
+  private _sceneBudget?: SceneFrameBudgetLease;
+  private readonly _loadingCameraCache: CoveringCache = new WeakMap();
+  private _loadingCameraPose?: object;
+  private _loadingCameraChangedAt = 0;
+  private _loadingContinuationMs = 0;
+  private _tileWorkFrame?: {
+    frameNumber?: number;
+    budget: FrameBudget;
+    requestGeneration: number;
+    successfulUpdate: boolean;
+  };
 
   /**
    * CSS-pixel widths must land on device pixels. Cesium's polyline shader
@@ -195,10 +191,29 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     return device / scene;
   }
 
+  /** Loads and initializes a style before returning a scene-ready primitive. */
   static async fromUrl(url: string, options?: CesiumVectorTilesetFromUrlOptions): Promise<CesiumVectorTileset> {
-    const response = await loadStyleFromUrl(url, options?.transformRequest, options?.signal);
-
-    return new CesiumVectorTileset({ ...options, style: resolveStyleUrls(response.style, response.url) });
+    const style = await loadStyle(url, options?.transformRequest, options?.signal);
+    options?.signal?.throwIfAborted();
+    const tileset = new CesiumVectorTileset({ ...options, style });
+    const signal = options?.signal;
+    const abort = () => tileset.destroy();
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      signal?.throwIfAborted();
+      await tileset.whenReady();
+      signal?.throwIfAborted();
+      return tileset;
+    }
+    catch (error) {
+      if (!tileset.isDestroyed())
+        tileset.destroy();
+      signal?.throwIfAborted();
+      throw error;
+    }
+    finally {
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
   constructor(options: CesiumVectorTilesetOptions) {
@@ -206,11 +221,11 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     // Letting PrimitiveCollection destroy them during remove() defeats the
     // pending-removal queue and can release a command buffer still referenced
     // by the previous frame.
-    super({ destroyPrimitives: false });
+    super({ show: options.show, destroyPrimitives: false });
     this._sceneCollections = new SceneCollections(
       this,
       () => this._requestRender(),
-      tileId => this._symbolRenderer.isTilePlaced(tileId),
+      tileId => this._symbolRenderer.isTilePlacementActive(tileId),
       collection => this._vectorRenderer.releaseDrapedCollection(collection),
       (collection, budget) => {
         const paint = this._vectorRenderer.refreshCollectionPaint(collection, this._paintFrame(budget));
@@ -286,6 +301,8 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       scene: this._sceneCollections,
     });
     this._vectorRenderer.setDraping(undefined, this._heightReference);
+    if (options.gpuMemoryBudgetBytes !== undefined)
+      this._tileResidency.setMemoryBudgetBytes(options.gpuMemoryBudgetBytes);
 
     this._initStyle(options.style);
   }
@@ -365,33 +382,26 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     return this._ready;
   }
 
+  private _assertNotDestroyed(): void {
+    // Cesium's destroyObject replaces enumerable functions. Native class
+    // methods are non-enumerable, so public operations need this guard too.
+    if (this._destroyed)
+      throw new DeveloperError('This object was destroyed, i.e., destroy() was called.');
+  }
+
   /** Resolves when the style has loaded. */
   whenReady(): Promise<void> {
+    this._assertNotDestroyed();
     return this._readyPromise;
   }
 
-  /**
-   * Register a named style image for `icon-image` / `*-pattern` references.
-   *
-   * Accepts the documented `{width, height, data}` shape (data as a plain
-   * `Uint8Array`, non-premultiplied RGBA) and wraps it into the internal
-   * image representation. The wrap is required: the worker transfer clones
-   * the payload via `data.clone()`, so a raw `Uint8Array` would fail
-   * silently later with `image.data.clone is not a function` and the icon
-   * would never render. Tiles already parsed without this image are
-   * reloaded so the icon appears immediately.
-   */
+  /** Adds a named RGBA image for icons or patterns and refreshes affected tiles. */
   addImage(
     id: string,
-    image: { width: number; height: number; data: Uint8Array | Uint8ClampedArray },
-    options: {
-      pixelRatio?: number;
-      sdf?: boolean;
-      stretchX?: Array<[number, number]>;
-      stretchY?: Array<[number, number]>;
-      content?: [number, number, number, number];
-    } = {},
+    image: TilesetImage,
+    options: TilesetImageOptions = {},
   ): void {
+    this._assertNotDestroyed();
     this._style.addImage(id, {
       data: new RGBAImage({ width: image.width, height: image.height }, image.data),
       pixelRatio: options.pixelRatio ?? 1,
@@ -405,9 +415,10 @@ export class CesiumVectorTileset extends PrimitiveCollection {
 
   updateImage(
     id: string,
-    image: { width: number; height: number; data: Uint8Array | Uint8ClampedArray },
-    options: { pixelRatio?: number; sdf?: boolean } = {},
+    image: TilesetImage,
+    options: Pick<TilesetImageOptions, 'pixelRatio' | 'sdf'> = {},
   ): void {
+    this._assertNotDestroyed();
     const previous = this._style.getImage(id);
     this._style.updateImage(id, {
       ...previous,
@@ -418,6 +429,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
   }
 
   removeImage(id: string): void {
+    this._assertNotDestroyed();
     this._style.removeImage(id);
   }
 
@@ -428,6 +440,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
    * A shrink requests a frame so it also takes effect under requestRenderMode.
    */
   setGpuMemoryBudgetBytes(bytes: number): void {
+    this._assertNotDestroyed();
     this._tileResidency.setMemoryBudgetBytes(bytes);
     this._memoryBudgetDirty = true;
     this._requestRender();
@@ -439,18 +452,11 @@ export class CesiumVectorTileset extends PrimitiveCollection {
    *
    * `submittedCommands` counts commands added in this tileset's last update,
    * before Cesium's visibility, frustum, and OIT processing.
+   * `gpuMemory` covers tile residency; `renderPassGpuBytes` reports this
+   * tileset's offscreen attachments separately from the tile cache budget.
    */
-  stats(): {
-    renderableTiles: number;
-    pendingPublishes: number;
-    bucket: { tiles: number; collections: number; retiredTiles: number };
-    symbol: { tiles: number; fadingTiles: number; retiredTiles: number; primitives: number };
-    pattern: { tiles: number; retiredTiles: number; layerCollections: number };
-    raster: { tiles: number; layerCollections: number };
-    featureIndexes: number;
-    gpuMemory: { totalBytes: number; maxBytes: number; entries: number; evictions: number };
-    submittedCommands: number;
-  } {
+  stats(): TilesetStats {
+    this._assertNotDestroyed();
     const bucket = this._vectorRenderer.stats;
     const symbol = this._symbolRenderer.stats;
     const pattern = this._patternRenderer.stats;
@@ -464,6 +470,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       raster,
       featureIndexes: this._tileResidency.featureIndexCount,
       gpuMemory: this._tileResidency.memoryStats(),
+      renderPassGpuBytes: this._drawCommands.extrusionGpuBytes,
       submittedCommands: this._lastSubmittedCommands,
     };
   }
@@ -482,7 +489,9 @@ export class CesiumVectorTileset extends PrimitiveCollection {
    * tile cache) and rebuilds only the affected layer collections.
    */
   setStyle(nextStyle: StyleSpecification): void {
+    this._assertNotDestroyed();
     const previousStyle = this._style.serialize()!;
+    const cameraPaint = this._vectorRenderer.captureLivePaint();
     // Style preflights unsupported operations before applying the diff.
     // Failures reach the caller without silently discarding a working scene.
     if (!this._style.setState(nextStyle)) {
@@ -521,7 +530,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._requestRender();
       return;
     }
-    this._vectorRenderer.freezePaint();
+    this._vectorRenderer.freezePaint(cameraPaint);
     this._tilePublishQueue.clear();
     this._renderLayerIndex.rebuildIndex();
     this._sceneCollections.flushRemovals();
@@ -620,78 +629,245 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     this._hydrateRenderableTiles();
   }
 
+  /** Reuse resident geometry and publish only newly visible, missing layers. */
+  private _publishVisibleLayers(newlyVisible: ReadonlySet<string>): void {
+    if (newlyVisible.size === 0)
+      return;
+    for (const sourceId in this._style.tilePyramids) {
+      const pyramid = this._style.tilePyramids[sourceId];
+      for (const key of pyramid.getRenderableIds()) {
+        const tile = pyramid.getTileByID(key);
+        if (tile)
+          this._tilePublishQueue.ensureVisibleLayers(sourceId, tile, newlyVisible);
+      }
+    }
+  }
+
   /**
-   * Visibility-flip republish for exactly the tiles a flip affects. Live
-   * collections stay attached until the republish commits and swaps them
-   * (see TilePublishQueue): a zoom crossing one layer's minzoom no longer
-   * blanks every retained ancestor the way the old blanket removeAll did.
-   * Retired bucket entries baking a flipped layer are evicted (restoring
-   * them would show pre-flip content); retired symbol entries predating a
-   * newly visible layer go the same way. The cleared render sync below makes
-   * _syncHydratedTiles pick up anything this pass did not enqueue.
+   * Cesium invokes this hook even when demand rendering skips the draw pass.
+   * Observe insertion and visibility here so consumers never need to wake the
+   * scene themselves after adding or toggling this primitive.
    */
-  private _republishFlippedTiles(flipped: Set<string>, newlyVisible: Set<string>): void {
-    if (flipped.size === 0) {
+  prePassesUpdate(frameState: RenderFrameState): void {
+    this._assertNotDestroyed();
+    const scene = frameState.camera._scene;
+    if (scene !== this._renderScene) {
+      this._releaseScene();
+      this._renderScene = scene;
+      this._bindFrameBudget(scene);
+      // Observe before Cesium's first preRender so placement can use that
+      // frame's complete camera snapshot instead of waiting for another draw.
+      this._sceneCovering.observe(scene);
+      const owners = (scene?.primitives && ownerCollections(scene.primitives, this)) ?? [];
+      for (let index = 0; index < owners.length; index++) {
+        const child = owners[index + 1] ?? this;
+        this._removeSceneListeners.push(owners[index].primitiveRemoved.addEventListener((removed) => {
+          if (removed === child) {
+            this._requestRemovalFrame();
+            this._releaseScene();
+          }
+        }));
+      }
+    }
+    this._afterRender = frameState.afterRender;
+    this._updateLoadingService(frameState);
+    if (!this.show)
+      this._cancelSymbolPlacementWake();
+    if (this._lastShow !== this.show) {
+      this._lastShow = this.show;
+      if (!this.show)
+        this._vectorRenderer.undrapeAll();
+      this._requestRender();
+    }
+    else if (this._renderRequested) {
+      this._requestRender();
+    }
+    const idlePreparationsEnabled = this._cpuPreparationsEnabled(frameState);
+    this._sceneCollections.idlePreparationsEnabled = idlePreparationsEnabled;
+    this._tilePublishQueue.idlePreparationsEnabled = idlePreparationsEnabled;
+    if (frameState.newFrame === false && this.show && this._ready && scene?.mode === frameState.mode
+      && this._symbolRenderer.observeIdlePlacement()) {
+      this._continueSymbolPlacement();
+    }
+    if (idlePreparationsEnabled && frameState.newFrame === false)
+      this._advanceIdlePreparations(frameState);
+    Reflect.apply(prePassesUpdateCollection, this, [frameState]);
+  }
+
+  private _cpuPreparationsEnabled(frameState: RenderFrameState): boolean {
+    const scene = frameState.camera._scene;
+    if (scene?.requestRenderMode !== true || scene.mode !== frameState.mode)
+      return false;
+    if (frameState.mode === SceneMode.SCENE3D)
+      return true;
+    const projection = frameState.mapProjection ?? scene.mapProjection;
+    return frameState.mode === SceneMode.COLUMBUS_VIEW && frameState.scene3DOnly !== true
+      && (projection instanceof GeographicProjection || projection instanceof WebMercatorProjection);
+  }
+
+  private _updateLoadingService(frame: RenderFrameState): void {
+    this._loadingContinuationMs = 0;
+    const supportedMode = frame.mode === SceneMode.SCENE3D || frame.mode === SceneMode.COLUMBUS_VIEW;
+    const pose = this.show && this._ready && supportedMode && frame.camera._scene?.mode === frame.mode
+      ? cameraPoseForFrame(frame, this._loadingCameraCache, frame.mode)
+      : undefined;
+    const now = performance.now();
+    if (pose !== this._loadingCameraPose) {
+      this._loadingCameraPose = pose;
+      this._loadingCameraChangedAt = now;
+    }
+    // A paused load can trade a larger work slice for fewer redraws. Restore
+    // ordinary service immediately when the actual camera or viewport moves.
+    if (pose && now - this._loadingCameraChangedAt >= 200
+      && !this._style._changed && !this._style.getRenderTransitionFlags().any
+      && (this._sceneCollections.pendingFirstUpdateCount > 0 || this._tilePublishQueue.size > 0)) {
+      this._loadingContinuationMs = 12;
+    }
+  }
+
+  private _advanceIdlePreparations(frameState: RenderFrameState): void {
+    if (!this.show || !this._ready || this._destroyed || this._renderRequested
+      || !this._cpuPreparationsEnabled(frameState) || frameState.camera._scene !== this._renderScene) {
       return;
     }
-    this._tilePublishQueue.clear();
-    const isPattern = (layerId: string): boolean => {
-      const layer = this._style.getLayer(layerId);
-      return !!layer && (isPatternStyleLayer(layer));
+    const cpuUpload = this._sceneCollections.hasRunnablePreparations;
+    const resources = this._sceneCollections.hasRunnableResourceUploads;
+    const upload = cpuUpload || resources;
+    const builds = this._tilePublishQueue.inspectBuilds();
+    if (!upload && !builds.runnable && !builds.renderNeeded)
+      return;
+    // Prepared resources are immutable; changed paint inputs only gate CPU work.
+    const cpuAllowed = !this._style._changed && !this._style.getRenderTransitionFlags().any
+      && this._vectorRenderer.pixelRatio === this._pixelRatioCompensation(frameState);
+    if (!cpuAllowed) {
+      this._requestRender();
+    }
+    const frameWork = this._bindFrameBudget(frameState.camera._scene).frame(frameState.frameNumber);
+    const runnable = {
+      upload: (cpuAllowed && cpuUpload) || resources,
+      build: cpuAllowed && builds.runnable,
+      paint: this._vectorRenderer.needsPaintUpdate,
+      placement: this._symbolRenderer.hasRunnableWork,
     };
-    const isRasterOf = (layerId: string, sourceId: string): boolean => {
-      const layer = this._style.getLayer(layerId);
-      return !!layer && isRasterStyleLayer(layer) && layer.source === sourceId;
-    };
-    const symbolNewBySource = new Map<string, Set<string>>();
-    if (newlyVisible.size > 0) {
-      for (const layerId of this._style._getLayerOrder()) {
-        if (!newlyVisible.has(layerId)) {
-          continue;
-        }
-        const layer = this._style.getLayer(layerId);
-        if (layer && layer.type === 'symbol' && typeof layer.source === 'string') {
-          let set = symbolNewBySource.get(layer.source);
-          if (!set) {
-            set = new Set<string>();
-            symbolNewBySource.set(layer.source, set);
-          }
-          set.add(layerId);
-        }
+    if (runnable.upload) {
+      const budget = frameWork.continuation('upload', runnable, this._loadingContinuationMs) ?? frameWork.tileBudget;
+      const minimum = budget !== frameWork.tileBudget;
+      const cpuProgress = cpuAllowed
+        ? this._sceneCollections.advancePreparations(frameState, budget, operation => frameWork.measure(operation), minimum)
+        : { units: 0, renderNeeded: false };
+      const resourceProgress = this._sceneCollections.advanceResourceUploads(frameState, budget, frameWork.tileBudget, operation => frameWork.measure(operation), minimum && cpuProgress.units === 0);
+      if (cpuProgress.renderNeeded || resourceProgress.renderNeeded)
+        this._requestRender();
+    }
+    if (cpuAllowed && builds.runnable && !this._renderRequested) {
+      const budget = frameWork.continuation('build', runnable, this._loadingContinuationMs) ?? frameWork.tileBudget;
+      const progress = frameWork.measure(() => this._tilePublishQueue.advanceBuilds(budget));
+      if (progress.renderNeeded)
+        this._requestRender();
+    }
+    if (builds.renderNeeded && !this._renderRequested)
+      this._requestRender();
+  }
+
+  /** Spend the completed draw's remaining time on CPU preparation and resource writes. */
+  postPassesUpdate(frameState: RenderFrameState): void {
+    Reflect.apply(postPassesUpdateCollection, this, [frameState]);
+    const scene = frameState.camera._scene;
+    const tileWork = this._tileWorkFrame;
+    if (!this.show || !this._ready || this._destroyed || frameState.newFrame !== true
+      || !this._cpuPreparationsEnabled(frameState) || scene !== this._renderScene
+      || !tileWork?.successfulUpdate || tileWork.frameNumber !== frameState.frameNumber) {
+      return;
+    }
+    const frameWork = this._bindFrameBudget(scene).frame(frameState.frameNumber);
+    if (tileWork.budget !== frameWork.tileBudget)
+      return;
+    const cpuAllowed = !this._style._changed && !this._style.getRenderTransitionFlags().any
+      && this._vectorRenderer.pixelRatio === this._pixelRatioCompensation(frameState);
+    if (!cpuAllowed) {
+      this._requestRender();
+    }
+    const prepared = frameWork.prepareAfterPasses((budget) => {
+      const upload = (cpuAllowed && this._sceneCollections.hasRunnablePreparations) || this._sceneCollections.hasRunnableResourceUploads;
+      const builds = this._tilePublishQueue.inspectBuilds();
+      if (upload) {
+        const cpuProgress = cpuAllowed
+          ? this._sceneCollections.advancePreparations(frameState, budget, operation => frameWork.measure(operation), false)
+          : { units: 0, renderNeeded: false };
+        const resourceProgress = this._sceneCollections.advanceResourceUploads(frameState, budget, frameWork.tileBudget, operation => frameWork.measure(operation), false);
+        if (cpuProgress.renderNeeded || resourceProgress.renderNeeded)
+          this._requestRender();
+      }
+      if (cpuAllowed && !budget.exhausted && builds.runnable) {
+        const progress = frameWork.measure(() => this._tilePublishQueue.advanceBuilds(budget));
+        if (progress.renderNeeded)
+          this._requestRender();
+      }
+    });
+    if (!prepared && this._sceneCollections.hasRunnableResourceUploads) {
+      // Reuse the physical tick's single overload token after all Native draws.
+      const runnable = {
+        upload: true,
+        build: cpuAllowed && this._tilePublishQueue.size > 0,
+        paint: this._vectorRenderer.needsPaintUpdate,
+        placement: this._symbolRenderer.hasRunnableWork,
+      };
+      const budget = frameWork.continuation('upload', runnable, this._loadingContinuationMs);
+      if (budget && budget !== frameWork.tileBudget) {
+        const progress = this._sceneCollections.advanceResourceUploads(frameState, budget, frameWork.tileBudget, operation => frameWork.measure(operation), true);
+        if (progress.renderNeeded)
+          this._requestRender();
       }
     }
-    for (const sourceId in this._style.tilePyramids) {
-      const tilePyramid = this._style.tilePyramids[sourceId];
-      const renderableIds = tilePyramid.getRenderableIds();
-      const rasterFlipped = [...flipped].some(layerId => isRasterOf(layerId, sourceId));
-      const symbolNew = symbolNewBySource.get(sourceId) ?? EMPTY_LAYER_SET;
-      for (const tileKey of renderableIds) {
-        const tile = tilePyramid.getTileByID(tileKey);
-        if (!tile) {
-          continue;
-        }
-        const bucketKeys = Object.keys(tile.buckets);
-        const record = this._vectorRenderer.tileBuildLayers(`${sourceId}/${tileKey}`);
-        // No record (never published): republish conservatively when the
-        // tile carries buckets; raster-only tiles are covered below.
-        const baked = record
-          ? record.layerIds.filter(layerId => !record.skipLayerIds?.has(layerId) && !isPattern(layerId))
-          : bucketKeys;
-        const needsBucket = record?.complete === false || baked.some(layerId => flipped.has(layerId));
-        const needsPattern = bucketKeys.some(layerId => flipped.has(layerId) && isPattern(layerId));
-        const needsSymbol = bucketKeys.some(layerId => symbolNew.has(layerId));
-        const needsRaster = rasterFlipped && !!tile.textureData;
-        if (needsBucket || needsPattern || needsSymbol || needsRaster) {
-          this._tilePublishQueue.enqueue(sourceId, tile);
-        }
-      }
+  }
+
+  private _requestRemovalFrame(): void {
+    if (this._afterRender) {
+      if (!this._afterRender.includes(requestRemovalFrame))
+        this._afterRender.push(requestRemovalFrame);
     }
-    for (const { collections } of this._vectorRenderer.evictRetiredIntersectingLayers(flipped, isPattern)) {
-      for (const collection of collections) {
-        this._sceneCollections.deferDestroy(collection);
-      }
+    else {
+      this._renderScene?.requestRender?.();
     }
-    this._sceneCollections.queueSymbolRemoval(this._symbolRenderer.evictRetiredMissingLayers(newlyVisible));
+  }
+
+  private _releaseScene(): void {
+    this._loadingCameraPose = undefined;
+    this._loadingContinuationMs = 0;
+    this._cancelSymbolPlacementWake();
+    for (const remove of this._removeSceneListeners)
+      remove();
+    this._removeSceneListeners = [];
+    if (this._afterRender) {
+      const pending = this._afterRender.indexOf(this._requestNextFrame);
+      if (pending !== -1)
+        this._afterRender.splice(pending, 1);
+    }
+    this._afterRender = undefined;
+    this._renderScene = undefined;
+    this._lastShow = undefined;
+    this._lastPlacementFrame = undefined;
+    this._lastPlacementView = undefined;
+    this._tileWorkFrame = undefined;
+    this._sceneBudget?.release();
+    this._sceneBudget = undefined;
+    this._budgetScene = undefined;
+    this._sceneCollections.idlePreparationsEnabled = false;
+    this._tilePublishQueue.idlePreparationsEnabled = false;
+    this._renderRequested = true;
+    this._sceneCovering.destroy();
+    this._vectorRenderer.setDraping(undefined, this._heightReference);
+  }
+
+  private _bindFrameBudget(scene: RenderFrameState['camera']['_scene']): SceneFrameBudgetLease {
+    const owner = scene ?? this._fallbackBudgetScene;
+    if (this._budgetScene !== owner) {
+      this._sceneBudget?.release();
+      this._budgetScene = owner;
+      this._sceneBudget = acquireSceneFrameBudget(owner, this, () => this.show && this._ready && !this._destroyed);
+      this._tileWorkFrame = undefined;
+    }
+    return this._sceneBudget!;
   }
 
   /**
@@ -699,6 +875,11 @@ export class CesiumVectorTileset extends PrimitiveCollection {
    * the camera and refreshes the Buffer*Collections for loaded tiles.
    */
   update(frameState: RenderFrameState): void {
+    this._assertNotDestroyed();
+    // A later viewport must also finish successfully before the physical
+    // frame may consume its old wake. An exception retains the pending debt.
+    if (this._tileWorkFrame)
+      this._tileWorkFrame.successfulUpdate = false;
     if (!this._destroyed) {
       // Cesium consumes this queue even when requestRenderMode skips drawing.
       // Bind before readiness so asynchronous style loading can wake rendering.
@@ -720,10 +901,23 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     // StyleImages suppresses duplicate render-callback dispatches within one
     // frame. The tileset owns the frame boundary because Cesium, rather than a
     // MapLibre map loop, drives this renderer.
-    const previousBudget = frameState.frameNumber !== undefined
-      && this._tileWorkFrame?.frameNumber === frameState.frameNumber
+    this._updateLoadingService(frameState);
+    const frameWork = this._bindFrameBudget(frameState.camera._scene).frame(frameState.frameNumber);
+    const previousBudget = this._tileWorkFrame?.budget === frameWork.tileBudget
       ? this._tileWorkFrame.budget
       : undefined;
+    // Camera coverage and style preparation consume this frame's allowance
+    // before uploads and builds. Reuse the deadline across Cesium viewports.
+    const frameBudget = frameWork.tileBudget;
+    if (!previousBudget) {
+      this._tileWorkFrame = {
+        frameNumber: frameState.frameNumber,
+        budget: frameBudget,
+        requestGeneration: this._renderRequestGeneration,
+        successfulUpdate: false,
+      };
+    }
+    const tileWorkFrame = this._tileWorkFrame!;
     if (!previousBudget)
       this._style.images.beginFrame();
 
@@ -760,14 +954,13 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._rebuildRenderableTiles(previousSceneMode);
     }
     else if (evaluatedStyle.visibility) {
-      // A visibility flip (often a zoom crossing one layer's min/maxzoom)
-      // republishes exactly the tiles a flip affects; live collections stay
-      // attached until the republish commits, so a retained ancestor
-      // survives the crossing instead of blanking. Mode changes keep the
-      // blanket path above (different geometry tracks per mode).
-      const { flipped, newlyVisible } = evaluatedStyle.visibility;
+      // Visibility is evaluated at command submission, independently of
+      // geometry residency. Only tracks whose layer plan changed are updated.
+      const { flipped } = evaluatedStyle.visibility;
       this._renderLayerIndex.rebuildIndex();
-      this._republishFlippedTiles(flipped, newlyVisible);
+      // Globe draping consumes the visibility change on its next beginFrame.
+      if (isClampHeightReference(this._heightReference))
+        this._requestRender();
       for (const layerId of flipped) {
         const layer = this._style.getLayer(layerId);
         if (layer && isRasterStyleLayer(layer)) {
@@ -789,9 +982,6 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       // Keep MapLibre-style source/video/canvas and paint transitions alive.
       this._requestRender();
     }
-    const frameBudget = previousBudget ?? new FrameBudget(TILE_WORK_BUDGET_MS);
-    if (!previousBudget)
-      this._tileWorkFrame = { frameNumber: frameState.frameNumber, budget: frameBudget };
     const pixelRatioCompensation = this._pixelRatioCompensation(frameState);
     this._vectorRenderer.pixelRatio = pixelRatioCompensation;
     let totalRenderable = 0;
@@ -799,7 +989,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     let residentChanged = false;
     let sourceFeatureStateChanged = false;
     for (const { sourceId, tilePyramid, covering } of coverings) {
-      const result = this._sourceRenderSync.updateSource(sourceId, tilePyramid, covering, {
+      const result = frameWork.measure(() => this._sourceRenderSync.updateSource(sourceId, tilePyramid, covering, {
         mode: this._sceneMode,
         rasterLayers: this._renderLayerIndex.rasterForSource(sourceId),
         patternLayers: this._renderLayerIndex.patternForSource(sourceId),
@@ -807,13 +997,15 @@ export class CesiumVectorTileset extends PrimitiveCollection {
         styleRevision: this._style.styleRevision,
         imageUpdateRevision: this._style.images.imageUpdateRevision,
         budget: frameBudget,
-      });
+      }));
       totalRenderable += result.renderableCount;
       retiredCapacity += tilePyramid._tileCache.max;
       residentChanged ||= result.changed;
       sourceFeatureStateChanged ||= result.featureStateChanged;
       this._memoryBudgetDirty ||= result.memoryChanged;
     }
+    if (evaluatedStyle.visibility)
+      this._publishVisibleLayers(evaluatedStyle.visibility.newlyVisible);
     this._tileResidency.syncRetiredCapacity(retiredCapacity);
     if (sourceFeatureStateChanged) {
       this._vectorRenderer.invalidatePaint();
@@ -826,16 +1018,26 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     // Advance already committed resources before building more. Both stages
     // share one deadline, so a full build frame cannot repeatedly strand the
     // Native first-update queue. New commits request the following frame.
-    if (this._tileResidency.syncHeldTileVisibility()) {
-      this._memoryBudgetDirty = true;
-      this._requestRender();
-    }
     this._memoryBudgetDirty ||= this._sceneCollections.pendingFirstUpdateCount > 0;
-    const pumped = this._sceneCollections.pumpFirstUpdates(frameState, frameBudget);
+    const renderUpload = this._sceneCollections.hasRunnableFirstUpdates;
+    const runnable = {
+      upload: renderUpload || this._sceneCollections.hasRunnableResourceUploads,
+      build: this._tilePublishQueue.size > 0,
+      paint: this._vectorRenderer.needsPaintUpdate,
+      placement: this._symbolRenderer.hasRunnableWork,
+    };
+    const uploadBudget = renderUpload ? frameWork.continuation('upload', runnable, this._loadingContinuationMs) ?? frameBudget : frameBudget;
+    const pumped = this._sceneCollections.pumpFirstUpdates(frameState, uploadBudget, operation => frameWork.measure(operation), uploadBudget !== frameBudget, frameWork.tileBudget);
     // Select the current camera's tiles before spending the publish budget.
     // A quick pan can invalidate jobs queued by the preceding frame; drain()
     // must see the updated TilePyramid renderable set before building them.
-    if (this._tilePublishQueue.size > 0 && this._tilePublishQueue.drain(frameBudget, MAX_TILE_COMMITS, frameState.camera.positionCartographic) > 0) {
+    const buildBudget = frameWork.continuation('build', runnable, this._loadingContinuationMs) ?? frameBudget;
+    if (this._tilePublishQueue.size > 0 && frameWork.measure(() => this._tilePublishQueue.drain(
+      buildBudget,
+      MAX_TILE_COMMITS,
+      viewPriority(frameState),
+      buildBudget !== frameBudget,
+    )) > 0) {
       this._memoryBudgetDirty = true;
     }
     this._lastRenderableTiles = totalRenderable;
@@ -845,7 +1047,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._sceneCollections.queueSymbolRemoval(this._symbolRenderer.clearRetired());
       this._sceneCollections.applyPatternUpdate(this._patternRenderer.clearRetired());
     }
-    const collectionReplacements = this._vectorRenderer.updatePaint({
+    const paintFrame = {
       zoom: this._styleEvaluation.zoom,
       evaluationId: evaluatedStyle.evaluationId,
       force: transitionFlags.vector,
@@ -854,7 +1056,10 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       pixelRatio: pixelRatioCompensation,
       lightRevision: evaluatedStyle.lightRevision,
       budget: frameBudget,
-    });
+    };
+    this._vectorRenderer.updateLivePaint(paintFrame);
+    const collectionReplacements = frameWork.run('paint', runnable, budget =>
+      this._vectorRenderer.updatePaint({ ...paintFrame, budget }), this._loadingContinuationMs);
     if (this._vectorRenderer.needsPaintUpdate) {
       // Resume the records left by the frame paint budget.
       this._requestRender();
@@ -891,10 +1096,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._style.getLayer(this._style._getLayerOrder()[0])?.getCrossfadeParameters(),
     );
     this._tickSymbolFades();
-    this._updateSymbolPlacement(frameState);
-    // A symbol replacement can become placed after its upload. Settle that
-    // handoff now even when requestRenderMode has no other work left.
-    this._sceneCollections.finishReplacements(frameBudget);
+    this._updateSymbolPlacement(frameState, frameWork, runnable);
     // Publishing can add several renderer records after the renderable IDs
     // have already stabilized. Sync after all tracks' mutations, while a
     // settled frame still pays only the O(1) dirty check.
@@ -906,17 +1108,23 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._memoryBudgetDirty = true;
       this._requestRender();
     }
+    // Switch same-tile content only after its complete visible-owner layout
+    // activates. A future placement alone cannot release the drawn generation.
+    frameWork.measure(() => this._sceneCollections.finishReplacements(frameBudget));
     this._tileResidency.releaseReplacedFeatureIndices();
     // Draped collections are consumed by globe.beginFrame on the following
     // frame; their collection.update does not itself upload packed terrain data.
     if (frameState.frameNumber === undefined) {
       this._drapeFrameNumber += 1;
     }
-    this._vectorRenderer.markDrapedCollections(frameState.frameNumber ?? this._drapeFrameNumber);
+    this._sceneCollections.syncDrapedVisibility(this._renderLayerIndex.visibility());
+    if (this._vectorRenderer.markDrapedCollections(frameState.frameNumber ?? this._drapeFrameNumber, this._tileResidency.retainedLayerOrder ?? this._renderLayerIndex.order)) {
+      this._requestRender();
+    }
     // Draw completed collections after placement and visibility settle.
     // Newly queued resources enter Native preparation on the next frame.
     this._sceneCollections.updateChildren(frameState, pumped);
-    this._drawCommands.prepare(frameState, firstCommand, this._sceneMode, this._tileResidency.retainedLayerOrder ?? this._renderLayerIndex.order, this._sceneCovering.scene, this._tileResidency.drawRanks, this._tileResidency.hiddenSurfaceLayers, this._tileResidency.hiddenStyleTiles);
+    this._drawCommands.prepare(frameState, firstCommand, this._sceneMode, this._tileResidency.retainedLayerOrder ?? this._renderLayerIndex.order, this._sceneCovering.scene, this._tileResidency.drawRanks, this._tileResidency.hiddenSurfaceLayers, this._tileResidency.hiddenStyleTiles, this._renderLayerIndex.visibility());
     this._lastSubmittedCommands = (frameState.commandList?.length ?? firstCommand) - firstCommand;
     // Symbol atlases and picking data must survive the last old color frame.
     // Native afterRender also covers both date-line viewports before release.
@@ -932,6 +1140,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
         return false;
       });
     }
+    tileWorkFrame.successfulUpdate = frameState.passes?.render === true && frameState.newFrame !== false;
   }
 
   /**
@@ -957,9 +1166,12 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     }
   }
 
-  private _updateSymbolPlacement(frameState: RenderFrameState): void {
-    if (!this._symbolRenderer.hasDrawableSymbols
-      || (frameState.frameNumber !== undefined && this._lastPlacementFrame === frameState.frameNumber)) {
+  private _updateSymbolPlacement(frameState: RenderFrameState, frameWork: SceneFrameWork, runnable: RunnableStages): void {
+    if (!this._symbolRenderer.hasDrawableSymbols) {
+      this._cancelSymbolPlacementWake();
+      return;
+    }
+    if (frameState.frameNumber !== undefined && this._lastPlacementFrame === frameState.frameNumber) {
       return;
     }
     const snapshot = this._sceneCovering.cameraFrame;
@@ -969,49 +1181,8 @@ export class CesiumVectorTileset extends PrimitiveCollection {
       this._requestRender();
       return;
     }
-    const viewProjection = symbolViewProjection(snapshot.viewMatrix, snapshot.projectionMatrix);
-    const { mapProjection, centerLng } = snapshot;
-    const isPointVisible = this._sceneMode === SceneMode.SCENE3D
-      ? (() => {
-          const occluder = new EllipsoidalOccluder(mapProjection.ellipsoid, snapshot.positionWC);
-          const position = new Cartesian3();
-          return (x: number, y: number, z: number): boolean => {
-            position.x = x;
-            position.y = y;
-            position.z = z;
-            return occluder.isPointVisible(position);
-          };
-        })()
-      : undefined;
-    const projectPosition = this._sceneMode !== SceneMode.SCENE3D && mapProjection
-      ? (() => {
-          const ellipsoid = mapProjection.ellipsoid ?? Ellipsoid.WGS84;
-          const world = new Cartesian3();
-          const cartographic = new Cartographic();
-          const projected = new Cartesian3();
-          const position: [number, number, number] = [0, 0, 0];
-          const worldWidth = 2 * Math.PI * ellipsoid.maximumRadius;
-          const centerX = centerLng * Math.PI / 180 * ellipsoid.maximumRadius;
-          return (x: number, y: number, z: number): readonly [number, number, number] | undefined => {
-            world.x = x;
-            world.y = y;
-            world.z = z;
-            if (!ellipsoid.cartesianToCartographic(world, cartographic)) {
-              return undefined;
-            }
-            mapProjection.project(cartographic, projected);
-            if (this._sceneMode === SceneMode.SCENE2D) {
-              projected.x += worldWidth * Math.round((centerX - projected.x) / worldWidth);
-            }
-            // Cesium's GeometryPipeline.projectTo2D writes x,y,z, then
-            // czm_computePosition reorders them to z,x,y for 2D/CV.
-            position[0] = projected.z;
-            position[1] = projected.x;
-            position[2] = projected.y;
-            return position;
-          };
-        })()
-      : undefined;
+    const view = symbolFrame(snapshot, this._styleEvaluation.zoom);
+    const { viewProjection } = view;
     // The collision generation uses one full view; Cesium can draw that
     // generation through both of its date-line viewports.
     const viewChanged = !this._lastPlacementView || !sameViewProjection(viewProjection, this._lastPlacementView);
@@ -1023,29 +1194,53 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     // czm_pixelRatio, i.e. scene device pixels). A zero size (frameState
     // without a context, e.g. tests) would collapse every anchor onto one
     // point and hide all but the first label, so skip the pass instead.
-    const { drawingBufferWidth: width, drawingBufferHeight: height, pixelRatio } = snapshot;
+    const { drawingBufferWidth: width, drawingBufferHeight: height } = snapshot;
     if (width <= 0 || height <= 0) {
       return;
     }
     // Composite symbol sizes interpolate in the vertex shader between the two
     // zoom stops packed per vertex; hand the live style zoom to the renderer.
     this._symbolRenderer.cameraZoom = this._styleEvaluation.zoom;
-    this._symbolRenderer.update({
-      viewProjection,
-      projectPosition,
-      isPointVisible,
-      width,
-      height,
-      pixelRatio,
-      cameraZoom: this._styleEvaluation.zoom,
-    }, viewChanged, frameState.context);
+    this._symbolRenderer.update(view, viewChanged, frameState.context, operation => frameWork.run('placement', runnable, operation, this._loadingContinuationMs));
     this._lastPlacementFrame = frameState.frameNumber;
-    if (this._symbolRenderer.hasPendingWork) {
-      // Cesium may not have created the opacity VBO or line-label instance
-      // attributes yet. Request a follow-up under requestRenderMode so their
-      // pending writes complete after the first Primitive update.
+    this._continueSymbolPlacement();
+  }
+
+  private _cancelSymbolPlacementWake(): void {
+    if (this._symbolPlacementWake !== undefined)
+      clearTimeout(this._symbolPlacementWake);
+    this._symbolPlacementWake = undefined;
+    this._symbolPlacementDeadline = undefined;
+  }
+
+  private _continueSymbolPlacement(): boolean {
+    // Read the deadline first: the clock may cross it before the runnable read.
+    const deadline = this._symbolRenderer.nextPlacementTime;
+    if (this._symbolRenderer.hasRunnableWork) {
+      this._cancelSymbolPlacementWake();
       this._requestRender();
+      return true;
     }
+    if (deadline === undefined || !this.show || !this._ready || this._destroyed) {
+      this._cancelSymbolPlacementWake();
+      return false;
+    }
+    if (this._symbolPlacementDeadline === deadline)
+      return false;
+    this._cancelSymbolPlacementWake();
+    this._symbolPlacementDeadline = deadline;
+    const scene = this._renderScene;
+    this._symbolPlacementWake = setTimeout(() => {
+      this._symbolPlacementWake = undefined;
+      this._symbolPlacementDeadline = undefined;
+      if (this._destroyed || !this.show || !this._ready || this._renderScene !== scene)
+        return;
+      // The deadline may have moved after another scope committed. Recompute
+      // it; only runnable work wakes Native, without waiting for an idle tick.
+      if (this._continueSymbolPlacement())
+        scene?.requestRender?.();
+    }, Math.max(0, deadline - performance.now()));
+    return false;
   }
 
   private _onTileData(event: SourceDataEvent): void {
@@ -1061,12 +1256,14 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     this._tilePublishQueue.enqueue(event.sourceId, tile);
   }
 
-  destroy(): void {
-    if (this._destroyed) {
-      return;
-    }
+  /** Releases owned resources and returns undefined, following Cesium's lifecycle contract. */
+  destroy(): undefined {
+    this._assertNotDestroyed();
+    // Removal destroys this primitive before another update can observe it.
+    // The final frame must clear its old pixels even after its work is gone.
+    this._requestRemovalFrame();
+    this._releaseScene();
     this._destroyed = true;
-    this._sceneCovering.destroy();
     if (!this._readySettled) {
       this._readySettled = true;
       this._readyReject?.(new Error('CesiumVectorTileset was destroyed before it became ready'));
@@ -1078,6 +1275,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     this._tileResidency.clear();
     this._sceneCollections.queueSymbolRemoval(this._symbolRenderer.removeAll());
     this._backgroundRenderer.destroy();
+    this._drawCommands.destroy();
     this._style.destroy();
     this._sceneCollections.clearPendingReplacements();
     this._sceneCollections.flushRemovals();
@@ -1102,6 +1300,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     this._vectorRenderer.removeAll();
     this._vectorRenderer.dashMaterial?.destroy();
     super.destroy();
+    return undefined;
   }
 
   /**
@@ -1112,6 +1311,7 @@ export class CesiumVectorTileset extends PrimitiveCollection {
     layerId: string;
     properties: Record<string, unknown>;
   } | undefined {
+    this._assertNotDestroyed();
     if ('type' in pickObject && pickObject.type === 'raster') {
       if (!this._rasterRenderer.hasPickObject(pickObject)) {
         return undefined;

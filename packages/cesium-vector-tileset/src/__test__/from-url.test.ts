@@ -1,11 +1,56 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CesiumVectorTileset } from '../cesium-vector-tileset';
+import { browser } from '../util/browser';
 import { ResourceType } from '../util/request';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('fromUrl', () => {
+  it('returns an initialized tileset with the requested initial visibility', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: 8, sources: {}, layers: [] }),
+    }));
+    const tileset = await CesiumVectorTileset.fromUrl('https://example.com/style.json', { show: false });
+    try {
+      expect(tileset.ready).toBe(true);
+      expect(tileset.show).toBe(false);
+    }
+    finally { tileset.destroy(); }
+  });
+
+  it('rejects invalid styles and destroys the failed candidate', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: 8, sources: {}, layers: [{ id: 'bad', type: 'line', source: 'missing' }] }),
+    }));
+    const destroy = vi.spyOn(CesiumVectorTileset.prototype, 'destroy');
+    await expect(CesiumVectorTileset.fromUrl('https://example.com/style.json')).rejects.toThrow(/missing/);
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(destroy.mock.instances[0].isDestroyed()).toBe(true);
+  });
+
+  it('cancels and destroys a candidate while style initialization is pending', async () => {
+    const controller = new AbortController();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: 8, sources: {}, layers: [] }),
+    }));
+    const initialize = vi.spyOn(browser, 'frameAsync').mockImplementation(() => new Promise(() => {}));
+    const destroy = vi.spyOn(CesiumVectorTileset.prototype, 'destroy');
+    const pending = CesiumVectorTileset.fromUrl('https://example.com/style.json', { signal: controller.signal });
+    const rejected = expect(pending).rejects.toHaveProperty('name', 'AbortError');
+    await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+    controller.abort();
+    await rejected;
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(destroy.mock.instances[0].isDestroyed()).toBe(true);
+  });
+
   it('cancels a pending style fetch through the supplied signal', async () => {
     const controller = new AbortController();
     const fetchStyle = vi.fn((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
