@@ -24,6 +24,7 @@ import { addPatternDependencies, hasPattern } from './pattern-bucket-features';
 export class LineBucket extends LineBucketRuntime {
   patternFeatures: BucketFeature[];
   availableImages?: string[];
+
   private hasDataDrivenLineLayout = false;
 
   constructor(options: BucketParameters<LineStyleLayer>) {

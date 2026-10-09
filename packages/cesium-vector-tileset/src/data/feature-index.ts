@@ -20,7 +20,7 @@ export class FeatureIndex {
   featureIndexArray: FeatureIndexArray;
   promoteId?: PromoteIdSpecification;
   bucketLayerIDs: string[][];
-  /** Source-layer order used by WorkerTile's DictionaryCoder. */
+  /** Sorted source-layer order used to assign feature source-layer indices. */
   sourceLayerIds: string[] = [];
   features = new FeatureSnapshot([]);
 

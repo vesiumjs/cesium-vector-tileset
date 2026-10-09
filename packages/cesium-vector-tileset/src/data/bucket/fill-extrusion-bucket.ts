@@ -130,6 +130,9 @@ export class FillExtrusionBucket extends FillExtrusionBucketRuntime {
     this.programConfigurations.populatePaintArrays(paintSlotCount, feature, index, { imagePositions, canonical, availableImages: this.availableImages });
   }
 
+  /**
+   * @internal
+   */
   private processPolygon(
     feature: BucketFeature,
     polygon: Point[][],
@@ -242,6 +245,7 @@ export class FillExtrusionBucket extends FillExtrusionBucketRuntime {
   /**
    * Generates side faces for the supplied geometry. Assumes `geometry` to be a line string, like the output of {@link subdivideVertexLine}.
    * For rings, it is assumed that the first and last vertex of `geometry` are equal.
+   * @internal
    */
   private _generateSideFaces(geometry: Point[], segmentReference: { segment: Segment }): void {
     let edgeDistance = 0;

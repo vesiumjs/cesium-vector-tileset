@@ -10,7 +10,7 @@ import { GeoJSONVT } from '@maplibre/geojson-vt';
 import { encodeTile } from '@maplibre/mlt';
 import { fromGeojsonVt } from '@maplibre/vt-pbf';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CesiumVectorTileset } from '../../cesium-vector-tileset';
+import { pickedFeature } from '../../render/scene/picked-feature';
 import { projectWorkerBuckets } from '../../render/vector/bucket-geometry';
 import { GeoJSONWorkerSource } from '../../source/geojson-worker-source';
 import { VectorTileWorkerSource } from '../../source/vector-tile-worker-source';
@@ -95,10 +95,12 @@ function transport(result: WorkerTileWithData, id: OverscaledTileID, label: stri
 }
 
 function pick(index: Tile['latestFeatureIndex'], layerId: string, featureIndex = 0) {
-  const owner = Object.assign(Object.create(CesiumVectorTileset.prototype), {
-    _tileResidency: { featureIndex: () => index },
-  }) as CesiumVectorTileset;
-  return CesiumVectorTileset.prototype.pick.call(owner, { type: 'circle', tileId: 'interaction', generationId: 1, layerId, featureIndex });
+  return pickedFeature(
+    { type: 'circle', tileId: 'interaction', generationId: 1, layerId, featureIndex },
+    { hasPickObject: () => false },
+    { hasPickObject: () => false },
+    { featureIndex: () => index },
+  );
 }
 
 function radius(tile: Tile, layerId: string) {
@@ -112,7 +114,7 @@ afterAll(() => {
 });
 
 describe('worker feature interaction', () => {
-  it('keeps original sparse feature indices through filtering, transfer and public picking', async () => {
+  it('keeps original sparse feature indices through filtering, transfer and feature picking', async () => {
     const data = pointData({ name: 'rendered', keep: true });
     data.features.unshift({ ...data.features[0], id: 1, properties: { name: 'filtered', keep: false } });
     const index = new StyleLayerIndex([{ ...layer('roads'), filter: ['==', ['get', 'keep'], true] } as LayerSpecification]);
@@ -252,7 +254,7 @@ describe('worker feature interaction', () => {
     }
   });
 
-  it('mLT IDs preserve adjacent unsafe UINT64 IDs through state, expressions, reload and public picking', async () => {
+  it('mLT IDs preserve adjacent unsafe UINT64 IDs through state, expressions, reload and feature picking', async () => {
     const bytes = encodeTile([{ name: 'layer1', extent: 64, features: [
       { id: 9007199254740992n, properties: { name: 'first' }, geometry: { type: 'Point', coordinates: [12, 42] } },
       { id: 9007199254740993n, properties: { name: 'second' }, geometry: { type: 'Point', coordinates: [13, 42] } },

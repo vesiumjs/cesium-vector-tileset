@@ -14,7 +14,7 @@ class StructArrayLayout2i4 extends StructArray {
   declare uint8: Uint8Array;
   declare int16: Int16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
   }
@@ -46,7 +46,7 @@ class StructArrayLayout2i4i12 extends StructArray {
   declare uint8: Uint8Array;
   declare int16: Int16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
   }
@@ -81,7 +81,7 @@ class StructArrayLayout10ui20 extends StructArray {
   declare uint8: Uint8Array;
   declare uint16: Uint16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
   }
@@ -120,7 +120,7 @@ class StructArrayLayout8ui16 extends StructArray {
   declare uint8: Uint8Array;
   declare uint16: Uint16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
   }
@@ -160,7 +160,7 @@ class StructArrayLayout4i4ui4i24 extends StructArray {
   declare int16: Int16Array;
   declare uint16: Uint16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
@@ -206,7 +206,7 @@ class StructArrayLayout6i1ul2ui20 extends StructArray {
   declare uint32: Uint32Array;
   declare uint16: Uint16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
     this.uint32 = new Uint32Array(this.arrayBuffer);
@@ -257,7 +257,7 @@ class StructArrayLayout2i2ui3ul3ui2f3ub1ul1i48 extends StructArray {
   declare uint32: Uint32Array;
   declare float32: Float32Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
@@ -315,7 +315,7 @@ class StructArrayLayout8i15ui1ul2f2ui64 extends StructArray {
   declare uint32: Uint32Array;
   declare float32: Float32Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
@@ -376,7 +376,7 @@ class StructArrayLayout1f4 extends StructArray {
   declare uint8: Uint8Array;
   declare float32: Float32Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.float32 = new Float32Array(this.arrayBuffer);
   }
@@ -406,7 +406,7 @@ class StructArrayLayout3i6 extends StructArray {
   declare uint8: Uint8Array;
   declare int16: Int16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.int16 = new Int16Array(this.arrayBuffer);
   }
@@ -440,7 +440,7 @@ class StructArrayLayout1ui2f12 extends StructArray {
   declare uint16: Uint16Array;
   declare float32: Float32Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
     this.float32 = new Float32Array(this.arrayBuffer);
@@ -476,7 +476,7 @@ class StructArrayLayout1ul2ui8 extends StructArray {
   declare uint32: Uint32Array;
   declare uint16: Uint16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.uint32 = new Uint32Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
@@ -510,7 +510,7 @@ class StructArrayLayout3ui6 extends StructArray {
   declare uint8: Uint8Array;
   declare uint16: Uint16Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.uint16 = new Uint16Array(this.arrayBuffer);
   }
@@ -542,7 +542,7 @@ class StructArrayLayout2f8 extends StructArray {
   declare uint8: Uint8Array;
   declare float32: Float32Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.float32 = new Float32Array(this.arrayBuffer);
   }
@@ -573,7 +573,7 @@ class StructArrayLayout4f16 extends StructArray {
   declare uint8: Uint8Array;
   declare float32: Float32Array;
 
-  _refreshViews(): void {
+  refreshViews(): void {
     this.uint8 = new Uint8Array(this.arrayBuffer);
     this.float32 = new Float32Array(this.arrayBuffer);
   }

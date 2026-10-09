@@ -129,6 +129,9 @@ class SourceExpressionBinder implements AttributeBinder {
     this._setPaintValue(start, end, value);
   }
 
+  /**
+   * @internal
+   */
   private _setPaintValue(start: number, end: number, value: PaintValue): void {
     if (this.type === 'color') {
       if (!isColor(value)) {
@@ -180,6 +183,9 @@ class CompositeExpressionBinder implements AttributeBinder {
     this._setPaintValue(start, end, min, max);
   }
 
+  /**
+   * @internal
+   */
   private _setPaintValue(start: number, end: number, min: PaintValue, max: PaintValue): void {
     if (this.type === 'color') {
       if (!isColor(min) || !isColor(max)) {
@@ -231,7 +237,10 @@ abstract class CrossFadedBinder<T> implements AttributeBinder {
   protected abstract getPositions(options: PaintOptions): { [_: string]: T } | undefined;
   protected abstract emplace(array: StructArray, index: number, fromPos: T, toPos: T): void;
 
-  protected _setPaintValues(start: number, end: number, positionIds: { min: string; mid: string } | undefined, options: PaintOptions): void {
+  /**
+   * @internal
+   */
+  private _setPaintValues(start: number, end: number, positionIds: { min: string; mid: string } | undefined, options: PaintOptions): void {
     const positions = this.getPositions(options);
     if (!positions || !positionIds)
       return;

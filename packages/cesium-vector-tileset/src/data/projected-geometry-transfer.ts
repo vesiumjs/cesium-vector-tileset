@@ -61,6 +61,7 @@ const STRIP_STRIDE = 9;
 /** Reception restores owners, not one object and two typed views per path. */
 class GeometryList<T> implements ProjectedGeometryList<T> {
   private readonly _views = new Map<number, T>();
+
   private readonly _view: (index: number) => T;
   readonly length: number;
 

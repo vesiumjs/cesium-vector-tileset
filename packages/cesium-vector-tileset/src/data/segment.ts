@@ -22,6 +22,7 @@ export interface Segment {
 export class SegmentVector {
   static MAX_VERTEX_ARRAY_LENGTH: number;
   segments: Segment[];
+
   private _forceNewSegmentOnNextPrepare: boolean = false;
 
   constructor(segments: Segment[] = []) {
