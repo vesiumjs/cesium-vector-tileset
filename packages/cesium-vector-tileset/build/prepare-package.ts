@@ -1,10 +1,20 @@
-import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+const packageRequire = createRequire(import.meta.url);
 
 for (const name of ['README.md', 'README.zh-CN.md']) {
-  copyFileSync(
-    new URL(`../../../${name}`, import.meta.url),
-    new URL(`../${name}`, import.meta.url),
-  );
+  const readme = readFileSync(new URL(`../../../${name}`, import.meta.url), 'utf8');
+  // Repository docs and gallery images are not included in the npm package.
+  // Keep their links usable when the copied README is rendered on npm.
+  const publishedReadme = readme.replaceAll(/\]\(\.\/docs\/([^)]*)\)/g, (_match, relativePath: string) => {
+    const base = relativePath.startsWith('images/')
+      ? 'https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/'
+      : 'https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/';
+    return `](${base}${relativePath})`;
+  });
+  writeFileSync(new URL(`../${name}`, import.meta.url), publishedReadme);
 }
 
 // These dependencies are bundled into the main and Worker modules. Keep their
@@ -28,6 +38,16 @@ const licenses = [
 ];
 
 const notices = licenses.map(([name, file]) => `${name}\n\n${readFileSync(new URL(file, import.meta.url), 'utf8').trim()}`);
+
+// The Worker modules bundle Cesium's CPU runtime. Its complete upstream
+// licenses include notices for the third-party Core algorithms it contains.
+let runtimeRequire = packageRequire;
+for (const name of ['cesium', '@cesium/engine', '@cesium/core']) {
+  const entry = runtimeRequire.resolve(name);
+  const license = new URL('./LICENSE.md', pathToFileURL(entry));
+  notices.push(`${name} (geometry Worker runtime and upstream notices)\n\n${readFileSync(license, 'utf8').trim()}`);
+  runtimeRequire = createRequire(entry);
+}
 
 // murmurhash-js publishes its complete MIT license only in the README.
 const murmurReadme = readFileSync(new URL('../node_modules/murmurhash-js/README.md', import.meta.url), 'utf8');
