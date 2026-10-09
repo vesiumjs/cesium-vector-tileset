@@ -12,13 +12,13 @@
 
 点击截图，在在线演示中体验对应地图。
 
-| 上海 · 陆家嘴高层白模                                                                                                                                        | 香港 · 中环海岸高楼                                                                                                                                          |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [![上海 · 陆家嘴高层白模](./docs/images/shanghai-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=shanghai&source=buildings&mode=3d) | [![香港 · 中环海岸高楼](./docs/images/hong-kong-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=hong-kong&source=buildings&mode=3d) |
-| **伦敦 · 2D 路网与标注**                                                                                                                                     | **巴塞罗那 · 密集网格路口**                                                                                                                                  |
-| [![伦敦 · 2D 路网与标注](./docs/images/london-2d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=liberty&mode=2d)               | [![巴塞罗那 · 密集网格路口](./docs/images/barcelona-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=barcelona&source=liberty&mode=3d)      |
-| **芝加哥 · 高层与密集标注**                                                                                                                                  | **重庆 · 两江交汇与桥梁**                                                                                                                                    |
-| [![芝加哥 · 高层与密集标注](./docs/images/chicago-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chicago&source=liberty&mode=3d)          | [![重庆 · 两江交汇与桥梁](./docs/images/chongqing-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chongqing&source=liberty&mode=3d)        |
+| 上海 · 陆家嘴高层白模                                                                                                                                                                                                            | 香港 · 中环海岸高楼                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [![上海 · 陆家嘴高层白模](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/shanghai-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=shanghai&source=buildings&mode=3d) | [![香港 · 中环海岸高楼](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/hong-kong-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=hong-kong&source=buildings&mode=3d) |
+| **伦敦 · 2D 路网与标注**                                                                                                                                                                                                         | **巴塞罗那 · 密集网格路口**                                                                                                                                                                                                      |
+| [![伦敦 · 2D 路网与标注](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/london-2d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=liberty&mode=2d)               | [![巴塞罗那 · 密集网格路口](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/barcelona-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=barcelona&source=liberty&mode=3d)      |
+| **芝加哥 · 高层与密集标注**                                                                                                                                                                                                      | **重庆 · 两江交汇与桥梁**                                                                                                                                                                                                        |
+| [![芝加哥 · 高层与密集标注](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/chicago-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chicago&source=liberty&mode=3d)          | [![重庆 · 两江交汇与桥梁](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/chongqing-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chongqing&source=liberty&mode=3d)        |
 
 地图数据：[OpenFreeMap](https://openfreemap.org/) / [OpenMapTiles](https://www.openmaptiles.org/) / © [OpenStreetMap](https://www.openstreetmap.org/copyright)。
 
@@ -29,6 +29,8 @@
 ```bash
 pnpm add cesium@^1.146.0 cesium-vector-tileset
 ```
+
+默认入口使用未压缩版本。通过 `cesium-vector-tileset/min` 导入压缩版本；CDN 文件及其 Worker 使用 `.min.mjs` 后缀。
 
 以下示例假定应用已有 Cesium `Scene` 和渲染循环。将版本 8 的样式 JSON 部署在 `/styles/map.json`，或替换为地图提供方的样式地址：
 
@@ -72,11 +74,11 @@ if (!tileset.isDestroyed()) {
 - 支持 MapLibre 表达式、过滤器、数据驱动样式、虚线、图片图案、文字与图标。当前实现覆盖 MapLibre 的部分渲染能力；不支持 `heatmap`、`hillshade` 和 `raster-dem`，`line-gradient` 会被拒绝。
 - 场景提供 Cesium vector provider 时，`heightReference` 可让普通填充面贴附。线、点、标注、挤出建筑与图片图案保留椭球高度。文字与图标暂不支持拾取。
 - 从样式 URL 加载时，数据源 URL、瓦片模板、sprite 与 glyphs 的相对地址按样式 URL 解析。远程 GeoJSON `data` 和视频 `urls` 请使用绝对地址。
-- Cesium peer 范围为 `^1.146.0`，已有渲染基线使用 1.146.0。部分渲染集成访问 Cesium 内部接口，声明范围不代表每个后续版本都已测试。验证范围见[验收记录](./docs/research/performance-baseline.md)。
+- Cesium peer 范围为 `^1.146.0`，已有渲染基线使用 1.146.0。部分渲染集成访问 Cesium 内部接口，声明范围不代表每个后续版本都已测试。验证范围见[验收记录](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/research/performance-baseline.md)。
 
 ## 文档与支持
 
-实现细节见[架构](./docs/architecture.md)与[模块职责](./docs/module-responsibilities.md)。遇到问题可提交 [GitHub issue](https://github.com/vesiumjs/cesium-vector-tileset/issues)，附上可复现的样式、受影响的视角和 Cesium 版本。
+实现细节见[架构](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/architecture.md)与[模块职责](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/module-responsibilities.md)。遇到问题可提交 [GitHub issue](https://github.com/vesiumjs/cesium-vector-tileset/issues)，附上可复现的样式、受影响的视角和 Cesium 版本。
 
 ## 许可与致谢
 

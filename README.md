@@ -12,13 +12,13 @@ The library supports 3D, 2D, and Columbus View, works with any frontend framewor
 
 Click a screenshot to explore the map in the live demo.
 
-| Shanghai · Lujiazui skyline                                                                                                                                        | Hong Kong · Central waterfront                                                                                                                                          |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [![Shanghai · Lujiazui skyline](./docs/images/shanghai-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=shanghai&source=buildings&mode=3d) | [![Hong Kong · Central waterfront](./docs/images/hong-kong-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=hong-kong&source=buildings&mode=3d) |
-| **London · 2D roads and labels**                                                                                                                                   | **Barcelona · Dense street grid**                                                                                                                                       |
-| [![London · 2D roads and labels](./docs/images/london-2d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=liberty&mode=2d)             | [![Barcelona · Dense street grid](./docs/images/barcelona-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=barcelona&source=liberty&mode=3d)           |
-| **Chicago · Buildings and labels**                                                                                                                                 | **Chongqing · Rivers and bridges**                                                                                                                                      |
-| [![Chicago · Buildings and labels](./docs/images/chicago-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chicago&source=liberty&mode=3d)         | [![Chongqing · Rivers and bridges](./docs/images/chongqing-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chongqing&source=liberty&mode=3d)          |
+| Shanghai · Lujiazui skyline                                                                                                                                                                                                            | Hong Kong · Central waterfront                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [![Shanghai · Lujiazui skyline](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/shanghai-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=shanghai&source=buildings&mode=3d) | [![Hong Kong · Central waterfront](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/hong-kong-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=hong-kong&source=buildings&mode=3d) |
+| **London · 2D roads and labels**                                                                                                                                                                                                       | **Barcelona · Dense street grid**                                                                                                                                                                                                           |
+| [![London · 2D roads and labels](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/london-2d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=liberty&mode=2d)             | [![Barcelona · Dense street grid](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/barcelona-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=barcelona&source=liberty&mode=3d)           |
+| **Chicago · Buildings and labels**                                                                                                                                                                                                     | **Chongqing · Rivers and bridges**                                                                                                                                                                                                          |
+| [![Chicago · Buildings and labels](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/chicago-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chicago&source=liberty&mode=3d)         | [![Chongqing · Rivers and bridges](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/chongqing-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chongqing&source=liberty&mode=3d)          |
 
 Map data: [OpenFreeMap](https://openfreemap.org/) / [OpenMapTiles](https://www.openmaptiles.org/) / © [OpenStreetMap](https://www.openstreetmap.org/copyright).
 
@@ -29,6 +29,8 @@ Install the library and Cesium:
 ```bash
 pnpm add cesium@^1.146.0 cesium-vector-tileset
 ```
+
+The default entry is unminified. Import from `cesium-vector-tileset/min` to use the minified version; CDN files use the `.min.mjs` suffix, including their Workers.
 
 The example assumes you already have a Cesium `Scene` and a render loop. Serve a version 8 style JSON at `/styles/map.json`, or replace the URL with your map provider's style URL:
 
@@ -72,11 +74,11 @@ if (!tileset.isDestroyed()) {
 - MapLibre expressions and filters, data-driven styling, dashed lines, image patterns, text, and icons are supported. This is a subset of MapLibre's rendering capabilities; `heatmap`, `hillshade`, and `raster-dem` are unavailable, and `line-gradient` is rejected.
 - `heightReference` can drape ordinary fill polygons when the scene provides Cesium's vector provider. Lines, points, labels, extrusions, and image patterns keep ellipsoid heights. Label and icon picking is currently unavailable.
 - Style URL loading resolves relative source URLs, tile templates, sprites, and glyphs against the style URL. Use absolute URLs for remote GeoJSON `data` and video `urls`.
-- The Cesium peer range is `^1.146.0`; the recorded rendering baseline uses 1.146.0. Some rendering integrations use Cesium internals, so the declared range does not mean every later release has been tested. See the [validation record](./docs/research/performance-baseline.md).
+- The Cesium peer range is `^1.146.0`; the recorded rendering baseline uses 1.146.0. Some rendering integrations use Cesium internals, so the declared range does not mean every later release has been tested. See the [validation record](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/research/performance-baseline.md).
 
 ## Documentation and support
 
-See the [architecture](./docs/architecture.md) and [module responsibilities](./docs/module-responsibilities.md) for implementation details. Report problems through [GitHub issues](https://github.com/vesiumjs/cesium-vector-tileset/issues), including a reproducible style, the affected view, and your Cesium version.
+See the [architecture](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/architecture.md) and [module responsibilities](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/module-responsibilities.md) for implementation details. Report problems through [GitHub issues](https://github.com/vesiumjs/cesium-vector-tileset/issues), including a reproducible style, the affected view, and your Cesium version.
 
 ## License and credits
 

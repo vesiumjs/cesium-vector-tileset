@@ -20,8 +20,8 @@ TypeScript 固定在 `6.0.x`：`vue-tsc` 需要 `typescript/lib/tsc`（TS 7 已�
 样式代码生成（`src/**/*.g.ts`，勿手改）：
 
 ```bash
-pnpm --filter cesium-vector-tileset codegen                # 样式属性 + struct array
-pnpm --filter cesium-vector-tileset generate-unicode-data  # Unicode 属性表
+pnpm codegen                # 样式属性 + struct array
+pnpm generate-unicode-data  # Unicode 属性表
 ```
 
 生成物需跑一次 `pnpm lint:eslint` 才会与提交态一致。
@@ -31,6 +31,7 @@ pnpm --filter cesium-vector-tileset generate-unicode-data  # Unicode 属性表
 - 禁止临时兼容层、猜测式编码、新旧双轨逻辑
 - 文件名使用 `kebab-case`
 - 命名简洁但勿滥简写（`value` 勿 `val`）
+- 单次使用且只转调函数、构造器或读取属性的包装直接内联；独立模块应承载算法、状态、资源生命周期或实际复用的规则。删除接口前核对生产代码、测试、构建脚本和公开导出。
 
 ## 测试
 
