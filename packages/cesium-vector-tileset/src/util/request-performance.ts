@@ -4,7 +4,9 @@
  */
 export class RequestPerformance {
   private start: string;
+
   private end: string;
+
   private measure: string;
 
   constructor(url: string) {

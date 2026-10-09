@@ -64,4 +64,9 @@ export const browser = {
     return (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
   },
 
+  /** Current CSS-to-device pixel ratio for sprites, imagery and symbols. */
+  get devicePixelRatio(): number {
+    return typeof window !== 'undefined' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  },
+
 };

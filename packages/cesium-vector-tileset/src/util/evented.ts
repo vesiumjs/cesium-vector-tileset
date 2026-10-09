@@ -69,7 +69,8 @@ export abstract class Evented<EventType extends { [K in keyof EventType]: Event 
   _listeners?: Listeners;
   _oneTimeListeners?: Listeners;
   _eventedParent?: Evented;
-  _eventedParentData?: unknown | (() => unknown);
+
+  private _eventedParentData?: unknown | (() => unknown);
 
   /**
    * Adds a listener to a specified event type.

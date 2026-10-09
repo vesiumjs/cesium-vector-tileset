@@ -58,16 +58,6 @@ export function filterObject<T extends object>(this: unknown, input: T, iterator
   return output;
 }
 
-/**
- * Gets a property from an object.
- * @param value - the object to read
- * @param key - the property name to read
- * @returns the property's value
- */
-function getObjectProperty(value: object, key: string): unknown {
-  return (value as Record<string, unknown>)[key];
-}
-
 export function deepEqual(a?: unknown, b?: unknown): boolean {
   if (Array.isArray(a)) {
     if (!Array.isArray(b) || a.length !== b.length)
@@ -79,11 +69,13 @@ export function deepEqual(a?: unknown, b?: unknown): boolean {
     return true;
   }
   if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
+    const objectA = a as Record<string, unknown>;
+    const objectB = b as Record<string, unknown>;
     const keys = Object.keys(a);
     if (keys.length !== Object.keys(b).length)
       return false;
     for (const key in a) {
-      if (!deepEqual(getObjectProperty(a, key), getObjectProperty(b, key)))
+      if (!deepEqual(objectA[key], objectB[key]))
         return false;
     }
     return true;

@@ -116,7 +116,6 @@ export class SourceDataEvent extends Event {
 
   /**
    * Options to determine whether a tile should be reloaded.
-   * @internal
    */
   declare shouldReloadTileOptions: GeoJSONSourceShouldReloadTileOptions;
 

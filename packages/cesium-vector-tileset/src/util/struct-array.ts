@@ -30,7 +30,9 @@ const viewTypes: {
  */
 export type ViewType = keyof typeof viewTypes;
 
-/** @internal */
+/**
+ * @internal
+ */
 class Struct {
   _pos1: number;
   _pos2: number;
@@ -85,14 +87,12 @@ export interface SerializedStructArray {
 /**
  * `StructArray` provides an abstraction over `ArrayBuffer` and `TypedArray`
  * making it behave like an array of typed structs.
- *
  * Conceptually, a StructArray is comprised of elements, i.e., instances of its
  * associated struct type. Each particular struct type, together with an
  * alignment size, determines the memory layout of a StructArray whose elements
  * are of that type.  Thus, for each such layout that we need, we have
  * a corresponding StructArrayLayout class, inheriting from StructArray and
- * implementing `emplaceBack()` and `_refreshViews()`.
- *
+ * implementing `emplaceBack()` and `refreshViews()`.
  * In some cases, where we need to access particular elements of a StructArray,
  * we implement a more specific subclass that inherits from one of the
  * StructArrayLayouts and adds a `get(i): T` accessor that returns a structured
@@ -150,18 +150,18 @@ abstract class StructArray {
     structArray.capacity = input.arrayBuffer.byteLength / structArray.bytesPerElement;
     structArray.isTransferred = false;
     structArray.uint8 = new Uint8Array(input.arrayBuffer);
-    structArray._refreshViews();
+    structArray.refreshViews();
     return structArray;
   }
 
   /**
    * Resize the array to discard unused capacity.
    */
-  _trim(): void {
+  private _trim(): void {
     if (this.length !== this.capacity) {
       this.capacity = this.length;
       this.arrayBuffer = this.arrayBuffer.slice(0, this.length * this.bytesPerElement);
-      this._refreshViews();
+      this.refreshViews();
     }
   }
 
@@ -194,7 +194,7 @@ abstract class StructArray {
       this.arrayBuffer = new ArrayBuffer(this.capacity * this.bytesPerElement);
 
       const oldUint8Array = this.uint8;
-      this._refreshViews();
+      this.refreshViews();
       if (oldUint8Array)
         this.uint8.set(oldUint8Array);
     }
@@ -203,8 +203,8 @@ abstract class StructArray {
   /**
    * Create TypedArray views for the current ArrayBuffer.
    */
-  _refreshViews(): void {
-    throw new Error('_refreshViews() must be implemented by each concrete StructArray layout');
+  refreshViews(): void {
+    throw new Error('refreshViews() must be implemented by each concrete StructArray layout');
   }
 
   /**
@@ -212,7 +212,7 @@ abstract class StructArray {
    */
   freeBufferAfterUpload(): void {
     this.arrayBuffer = new ArrayBuffer(0);
-    this._refreshViews();
+    this.refreshViews();
   }
 }
 
@@ -233,7 +233,7 @@ function createLayout(
   let offset = 0;
   let maxSize = 0;
   const layoutMembers = members.map((member) => {
-    const typeSize = sizeOf(member.type);
+    const typeSize = viewTypes[member.type].BYTES_PER_ELEMENT;
     const memberOffset = offset = align(offset, Math.max(alignment, typeSize));
     const components = member.components || 1;
 
@@ -255,10 +255,6 @@ function createLayout(
     size,
     alignment,
   };
-}
-
-function sizeOf(type: ViewType): number {
-  return viewTypes[type].BYTES_PER_ELEMENT;
 }
 
 function align(offset: number, size: number): number {
