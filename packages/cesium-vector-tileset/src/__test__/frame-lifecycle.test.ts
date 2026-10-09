@@ -50,16 +50,8 @@ async function uploadedWaterLifecycle(mode = SceneMode.SCENE3D, projection?: Map
   });
   const tileset = new CesiumVectorTileset({ style: makeStyle() });
   await tileset.whenReady();
-  const internals = tileset as unknown as {
-    _style: Style;
-    _vectorRenderer: VectorTileRenderer;
-    _tileResidency: TileResidency;
-    _sceneCollections: SceneCollections;
-    _tilePublishQueue: TilePublishQueue;
-    _styleEvaluation: StyleEvaluation;
-    _symbolRenderer: { hasPendingWork: boolean; hasDrawableSymbols: boolean };
-  };
-  const pyramid = internals._style.tilePyramids.world;
+  const internals = (tileset as unknown as { _renderer: { style: Style; vector: VectorTileRenderer; residency: TileResidency; collections: SceneCollections; publishQueue: TilePublishQueue; evaluation: StyleEvaluation; symbol: { hasPendingWork: boolean; hasDrawableSymbols: boolean } } })._renderer;
+  const pyramid = internals.style.tilePyramids.world;
   pyramid._sourceLoaded = true;
   const load = vi.spyOn(pyramid.getSource(), 'loadTile').mockImplementation(() => new Promise(() => {}));
   const tileID = new OverscaledTileID(13, 0, 13, 4093, 2724);
@@ -86,8 +78,8 @@ async function uploadedWaterLifecycle(mode = SceneMode.SCENE3D, projection?: Map
     state.cullingVolume = state.camera.frustum.computeCullingVolume(state.camera.positionWC, state.camera.directionWC, state.camera.upWC);
   };
   position(3000);
-  internals._styleEvaluation.evaluate(zoomForFrame(pyramid, state, new WeakMap())!.styleZoom);
-  const layer = internals._style.getLayer('water') as FillStyleLayer;
+  internals.evaluation.evaluate(zoomForFrame(pyramid, state, new WeakMap())!.styleZoom);
+  const layer = internals.style.getLayer('water') as FillStyleLayer;
   layer.recalculate(new EvaluationParameters(14), []);
   const bucket = new FillBucket({ layers: [layer], zoom: 13 } as never);
   bucket.addFeature({} as never, [[new Point(0, 0), new Point(4096, 0), new Point(4096, 4096), new Point(0, 4096)]], 0, tileID, {});
@@ -97,8 +89,8 @@ async function uploadedWaterLifecycle(mode = SceneMode.SCENE3D, projection?: Map
   data.buckets.water = bucket;
   pyramid._activeTiles.setTile(tileID.key, data);
   const tileId = `world/${tileID.key}`;
-  buildVectorTile(internals._vectorRenderer, { mode, tileId, tileID, buckets: data.buckets, styleZoom: 14, styleRevision: internals._style.styleRevision });
-  const [surface] = internals._vectorRenderer.getTileCollections(tileId);
+  buildVectorTile(internals.vector, { mode, tileId, tileID, buckets: data.buckets, styleZoom: 14, styleRevision: internals.style.styleRevision });
+  const [surface] = internals.vector.getTileCollections(tileId);
   tileset.add(surface);
   const native = Cesium as unknown as { DrawCommand: new (options: object) => NonNullable<RenderFrameState['commandList']>[number]; Pass: { OPAQUE: number } };
   const uploads = new WeakMap<BufferPolygonCollection | GeometryPrimitive, { vertexArray: object; command: NonNullable<RenderFrameState['commandList']>[number] }>();
@@ -128,15 +120,15 @@ async function uploadedWaterLifecycle(mode = SceneMode.SCENE3D, projection?: Map
   const upload = mode === SceneMode.SCENE3D
     ? vi.spyOn(BufferPolygonCollection.prototype, 'update').mockImplementation(draw)
     : vi.spyOn(GeometryPrimitive.prototype, 'update').mockImplementation(draw);
-  internals._tileResidency.commit({
+  internals.residency.commit({
     sourceId: 'world',
     tileId,
     tileID,
-    generationId: internals._vectorRenderer.tileBuildLayers(tileId)!.generationId,
+    generationId: internals.vector.tileBuildLayers(tileId)!.generationId,
     stage: 'complete',
     progress: { vector: 'complete', pattern: true, symbol: true },
     buckets: data.buckets,
-    styleRevision: internals._style.styleRevision,
+    styleRevision: internals.style.styleRevision,
     mode: state.mode!,
     featureIndex: data.latestFeatureIndex,
     retainPreviousGeneration: false,
@@ -188,12 +180,12 @@ async function uploadedWaterLifecycle(mode = SceneMode.SCENE3D, projection?: Map
   const renderScene = scene as typeof scene & { render: (viewports?: number) => ReturnType<typeof tick> };
   renderScene.render = tick;
   const quiet = () => {
-    expect(internals._tilePublishQueue.size).toBe(0);
-    expect(internals._sceneCollections.pendingFirstUpdateCount).toBe(0);
-    expect(internals._vectorRenderer.needsPaintUpdate).toBe(false);
-    expect(internals._symbolRenderer.hasDrawableSymbols).toBe(false);
-    expect(internals._symbolRenderer.hasPendingWork).toBe(false);
-    const collections = internals._vectorRenderer.getTileCollections(tileId);
+    expect(internals.publishQueue.size).toBe(0);
+    expect(internals.collections.pendingFirstUpdateCount).toBe(0);
+    expect(internals.vector.needsPaintUpdate).toBe(false);
+    expect(internals.symbol.hasDrawableSymbols).toBe(false);
+    expect(internals.symbol.hasPendingWork).toBe(false);
+    const collections = internals.vector.getTileCollections(tileId);
     const water = collections.flatMap(collection => collection instanceof PrimitiveCollection
       ? Array.from({ length: collection.length }, (_, index) => collection.get(index) as GeometryPrimitive)
       : [collection]).filter(collection => drawBatchForOwner(collection)?.layerId === 'water');
@@ -252,10 +244,10 @@ describe('stationary loading service', () => {
     const line = new GeometryPrimitive({ geometryInstances: new Cesium.GeometryInstance({ geometry: geometry as never }), appearance: new Cesium.Appearance() }, 'line');
     const collection = new PrimitiveCollection();
     collection.add(line);
-    const internals = owner.tileset as unknown as { _sceneCollections: SceneCollections };
+    const internals = (owner.tileset as unknown as { _renderer: { collections: SceneCollections } })._renderer;
     try {
-      internals._sceneCollections.add(collection);
-      internals._sceneCollections.queueFirstUpdate([collection]);
+      internals.collections.add(collection);
+      internals.collections.queueFirstUpdate([collection]);
       updateGeometryWithBudget(owner.state, { exhausted: true }, () => line.update(owner.state as never));
       const continuation = vi.spyOn(SceneFrameWork.prototype, 'continuation');
       vi.mocked(performance.now).mockReturnValue(condition === 'early' ? 100 : 300);
@@ -296,11 +288,11 @@ describe('primitive frame lifecycle', () => {
     const owner = await uploadedWaterLifecycle(mode, projection);
     let now = 0;
     vi.mocked(performance.now).mockImplementation(() => now);
-    const internals = owner.tileset as unknown as { _sceneCollections: SceneCollections; _tilePublishQueue: TilePublishQueue };
-    const publish = vi.spyOn(internals._tilePublishQueue, 'drain');
+    const internals = (owner.tileset as unknown as { _renderer: { collections: SceneCollections; publishQueue: TilePublishQueue } })._renderer;
+    const publish = vi.spyOn(internals.publishQueue, 'drain');
     let drawnCommands: object[] = [];
     let drawCalls = 0;
-    const advance = vi.spyOn(internals._sceneCollections, 'advancePreparations').mockImplementation((state, budget, measure, minimum) => {
+    const advance = vi.spyOn(internals.collections, 'advancePreparations').mockImplementation((state, budget, measure, minimum) => {
       expect(state.commandList).toEqual(drawnCommands);
       expect(owner.upload).toHaveBeenCalledTimes(drawCalls);
       expect(minimum).toBe(false);
@@ -316,7 +308,7 @@ describe('primitive frame lifecycle', () => {
         drawnCommands = [...owner.state.commandList!];
         drawCalls = owner.upload.mock.calls.length;
         publish.mockClear();
-        vi.spyOn(internals._sceneCollections, 'hasRunnablePreparations', 'get').mockReturnValue(true);
+        vi.spyOn(internals.collections, 'hasRunnablePreparations', 'get').mockReturnValue(true);
       } });
       owner.tileset.add(child);
       owner.position(3000, 0.000001);
@@ -339,19 +331,19 @@ describe('primitive frame lifecycle', () => {
     const owner = await uploadedWaterLifecycle();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 0;
-    const internals = owner.tileset as unknown as { _symbolRenderer: SymbolTileRenderer; _continueSymbolPlacement: () => boolean };
+    const internals = (owner.tileset as unknown as { _renderer: { symbol: SymbolTileRenderer; wake: { continuePlacement: () => boolean } } })._renderer;
     vi.mocked(performance.now).mockImplementation(() => now);
-    vi.spyOn(internals._symbolRenderer, 'nextPlacementTime', 'get').mockImplementation(() => now < 300 ? 300 : undefined);
-    vi.spyOn(internals._symbolRenderer, 'hasRunnableWork', 'get').mockImplementation(() => now >= 300);
+    vi.spyOn(internals.symbol, 'nextPlacementTime', 'get').mockImplementation(() => now < 300 ? 300 : undefined);
+    vi.spyOn(internals.symbol, 'hasRunnableWork', 'get').mockImplementation(() => now >= 300);
     try {
-      expect(internals._continueSymbolPlacement()).toBe(false);
+      expect(internals.wake.continuePlacement()).toBe(false);
       expect(vi.getTimerCount()).toBe(1);
       now = 299;
       vi.advanceTimersByTime(299);
       expect(owner.requestRender).not.toHaveBeenCalled();
       expect(owner.tick().rendered).toBe(false);
       // Reading the same absolute deadline never postpones the pending wake.
-      expect(internals._continueSymbolPlacement()).toBe(false);
+      expect(internals.wake.continuePlacement()).toBe(false);
       expect(vi.getTimerCount()).toBe(1);
       now = 300;
       vi.advanceTimersByTime(1);
@@ -376,11 +368,8 @@ describe('primitive frame lifecycle', () => {
     let now = 0;
     vi.mocked(performance.now).mockImplementation(() => now);
     const batch = { geometry: { pairs: [] }, options: { pairs: [] } };
-    const internals = owner.tileset as unknown as {
-      _symbolRenderer: { _targetPlacement: SymbolPlacementScope<typeof batch> };
-      _continueSymbolPlacement: () => boolean;
-    };
-    const scope = internals._symbolRenderer._targetPlacement;
+    const internals = (owner.tileset as unknown as { _renderer: { symbol: { _targetPlacement: SymbolPlacementScope<typeof batch> }; wake: { continuePlacement: () => boolean } } })._renderer;
+    const scope = internals.symbol._targetPlacement;
     const view = { viewProjection: new Float64Array(16), width: 1000, height: 1000, pixelRatio: 1, cameraZoom: 10 };
     scope.prepare([batch]);
     scope.advance(view, UNBOUNDED_BUDGET, new SymbolProjectionContext());
@@ -390,7 +379,7 @@ describe('primitive frame lifecycle', () => {
     const advance = vi.spyOn(scope, 'advance');
     try {
       expect(scope.nextPlacementTime).toBe(300);
-      internals._continueSymbolPlacement();
+      internals.wake.continuePlacement();
       expect(vi.getTimerCount()).toBe(1);
       now = 40;
       vi.advanceTimersByTime(20);
@@ -420,12 +409,12 @@ describe('primitive frame lifecycle', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 0;
     let deadline = 300;
-    const internals = owner.tileset as unknown as { _symbolRenderer: SymbolTileRenderer; _continueSymbolPlacement: () => boolean };
+    const internals = (owner.tileset as unknown as { _renderer: { symbol: SymbolTileRenderer; wake: { continuePlacement: () => boolean } } })._renderer;
     vi.mocked(performance.now).mockImplementation(() => now);
-    vi.spyOn(internals._symbolRenderer, 'nextPlacementTime', 'get').mockImplementation(() => now < deadline ? deadline : undefined);
-    vi.spyOn(internals._symbolRenderer, 'hasRunnableWork', 'get').mockImplementation(() => now >= deadline);
+    vi.spyOn(internals.symbol, 'nextPlacementTime', 'get').mockImplementation(() => now < deadline ? deadline : undefined);
+    vi.spyOn(internals.symbol, 'hasRunnableWork', 'get').mockImplementation(() => now >= deadline);
     try {
-      internals._continueSymbolPlacement();
+      internals.wake.continuePlacement();
       // Another scope can adopt a result before the existing timeout fires.
       deadline = 600;
       now = 300;
@@ -448,12 +437,12 @@ describe('primitive frame lifecycle', () => {
     const owner = await uploadedWaterLifecycle();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 0;
-    const internals = owner.tileset as unknown as { _symbolRenderer: SymbolTileRenderer; _continueSymbolPlacement: () => boolean; _releaseScene: () => void };
+    const internals = (owner.tileset as unknown as { _renderer: { symbol: SymbolTileRenderer; wake: { continuePlacement: () => boolean }; _releaseScene: () => void } })._renderer;
     vi.mocked(performance.now).mockImplementation(() => now);
-    vi.spyOn(internals._symbolRenderer, 'nextPlacementTime', 'get').mockImplementation(() => now < 300 ? 300 : undefined);
-    vi.spyOn(internals._symbolRenderer, 'hasRunnableWork', 'get').mockImplementation(() => now >= 300);
+    vi.spyOn(internals.symbol, 'nextPlacementTime', 'get').mockImplementation(() => now < 300 ? 300 : undefined);
+    vi.spyOn(internals.symbol, 'hasRunnableWork', 'get').mockImplementation(() => now >= 300);
     try {
-      internals._continueSymbolPlacement();
+      internals.wake.continuePlacement();
       expect(vi.getTimerCount()).toBe(1);
       if (action === 'hide') {
         owner.tileset.show = false;
@@ -601,15 +590,15 @@ describe('primitive frame lifecycle', () => {
   it.each(preparationModes)('continues admitted $name CPU work on idle demand ticks without a full tileset update or publication', async ({ mode, projection }) => {
     const owner = await uploadedWaterLifecycle(mode, projection);
     const { tileset, state } = owner;
-    const internals = tileset as unknown as { _sceneCollections: SceneCollections; _tilePublishQueue: TilePublishQueue; _styleEvaluation: StyleEvaluation };
+    const internals = (tileset as unknown as { _renderer: { collections: SceneCollections; publishQueue: TilePublishQueue; evaluation: StyleEvaluation } })._renderer;
     try {
       const update = vi.spyOn(tileset, 'update');
-      const evaluate = vi.spyOn(internals._styleEvaluation, 'evaluate');
-      const publish = vi.spyOn(internals._tilePublishQueue, 'drain');
+      const evaluate = vi.spyOn(internals.evaluation, 'evaluate');
+      const publish = vi.spyOn(internals.publishQueue, 'drain');
       const commands = [...state.commandList!];
       const draws = owner.upload.mock.calls.length;
-      vi.spyOn(internals._sceneCollections, 'hasRunnablePreparations', 'get').mockReturnValue(true);
-      const advance = vi.spyOn(internals._sceneCollections, 'advancePreparations').mockReturnValue({ units: 1, renderNeeded: false });
+      vi.spyOn(internals.collections, 'hasRunnablePreparations', 'get').mockReturnValue(true);
+      const advance = vi.spyOn(internals.collections, 'advancePreparations').mockReturnValue({ units: 1, renderNeeded: false });
       expect(owner.tick().rendered).toBe(false);
       expect(advance).toHaveBeenCalledOnce();
       expect(update).not.toHaveBeenCalled();
@@ -628,16 +617,16 @@ describe('primitive frame lifecycle', () => {
   it.each(preparationModes)('continues an admitted $name build before requesting evaluation of its unprepared sibling', async ({ mode, projection }) => {
     const owner = await uploadedWaterLifecycle(mode, projection);
     const { tileset, state, scene } = owner;
-    const internals = tileset as unknown as { _sceneCollections: SceneCollections; _tilePublishQueue: TilePublishQueue; _styleEvaluation: StyleEvaluation };
+    const internals = (tileset as unknown as { _renderer: { collections: SceneCollections; publishQueue: TilePublishQueue; evaluation: StyleEvaluation } })._renderer;
     try {
       const update = vi.spyOn(tileset, 'update');
-      const evaluate = vi.spyOn(internals._styleEvaluation, 'evaluate');
-      const publish = vi.spyOn(internals._tilePublishQueue, 'drain');
+      const evaluate = vi.spyOn(internals.evaluation, 'evaluate');
+      const publish = vi.spyOn(internals.publishQueue, 'drain');
       const commands = [...state.commandList!];
       const draws = owner.upload.mock.calls.length;
-      vi.spyOn(internals._sceneCollections, 'hasRunnablePreparations', 'get').mockReturnValue(false);
-      vi.spyOn(internals._tilePublishQueue, 'inspectBuilds').mockReturnValue({ runnable: true, renderNeeded: true });
-      const advance = vi.spyOn(internals._tilePublishQueue, 'advanceBuilds').mockReturnValue({ steps: 1, ready: 0, renderNeeded: true });
+      vi.spyOn(internals.collections, 'hasRunnablePreparations', 'get').mockReturnValue(false);
+      vi.spyOn(internals.publishQueue, 'inspectBuilds').mockReturnValue({ runnable: true, renderNeeded: true });
+      const advance = vi.spyOn(internals.publishQueue, 'advanceBuilds').mockReturnValue({ steps: 1, ready: 0, renderNeeded: true });
       state.newFrame = false;
       scene.preUpdate.raiseEvent(scene);
       tileset.prePassesUpdate(state);
@@ -661,7 +650,7 @@ describe('primitive frame lifecycle', () => {
 
   it.each(['unknown projection', 'mode mismatch', '3D only', '2D', 'morph'] as const)('keeps %s on the normal-render preparation path', async (capability) => {
     const owner = await uploadedWaterLifecycle(SceneMode.COLUMBUS_VIEW);
-    const internals = owner.tileset as unknown as { _sceneCollections: SceneCollections; _tilePublishQueue: TilePublishQueue };
+    const internals = (owner.tileset as unknown as { _renderer: { collections: SceneCollections; publishQueue: TilePublishQueue } })._renderer;
     try {
       if (capability === 'unknown projection') {
         const projection = new GeographicProjection();
@@ -680,17 +669,17 @@ describe('primitive frame lifecycle', () => {
       else {
         owner.state.mode = owner.scene.mode = capability === '2D' ? SceneMode.SCENE2D : SceneMode.MORPHING;
       }
-      vi.spyOn(internals._sceneCollections, 'hasRunnablePreparations', 'get').mockReturnValue(true);
-      vi.spyOn(internals._tilePublishQueue, 'inspectBuilds').mockReturnValue({ runnable: true, renderNeeded: true });
-      const prepare = vi.spyOn(internals._sceneCollections, 'advancePreparations');
-      const build = vi.spyOn(internals._tilePublishQueue, 'advanceBuilds');
+      vi.spyOn(internals.collections, 'hasRunnablePreparations', 'get').mockReturnValue(true);
+      vi.spyOn(internals.publishQueue, 'inspectBuilds').mockReturnValue({ runnable: true, renderNeeded: true });
+      const prepare = vi.spyOn(internals.collections, 'advancePreparations');
+      const build = vi.spyOn(internals.publishQueue, 'advanceBuilds');
       const commands = [...owner.state.commandList!];
       const draws = owner.upload.mock.calls.length;
       owner.state.newFrame = false;
       owner.scene.preUpdate.raiseEvent(owner.scene);
       owner.tileset.prePassesUpdate(owner.state);
-      expect(internals._sceneCollections.idlePreparationsEnabled).toBe(false);
-      expect(internals._tilePublishQueue.idlePreparationsEnabled).toBe(false);
+      expect(internals.collections.idlePreparationsEnabled).toBe(false);
+      expect(internals.publishQueue.idlePreparationsEnabled).toBe(false);
       expect(prepare).not.toHaveBeenCalled();
       expect(build).not.toHaveBeenCalled();
       expect(owner.state.commandList).toEqual(commands);
@@ -707,13 +696,13 @@ describe('primitive frame lifecycle', () => {
     const state = frame();
     let now = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const evaluation = (tileset as unknown as { _styleEvaluation: StyleEvaluation })._styleEvaluation;
+    const evaluation = ((tileset as unknown as { _renderer: { evaluation: StyleEvaluation } })._renderer).evaluation;
     const evaluate = evaluation.evaluate.bind(evaluation);
     vi.spyOn(evaluation, 'evaluate').mockImplementation((zoom) => {
       now += 13;
       return evaluate(zoom);
     });
-    const renderer = (tileset as unknown as { _vectorRenderer: VectorTileRenderer })._vectorRenderer;
+    const renderer = ((tileset as unknown as { _renderer: { vector: VectorTileRenderer } })._renderer).vector;
     vi.spyOn(renderer, 'needsPaintUpdate', 'get').mockReturnValue(true);
     vi.spyOn(renderer, 'updateLivePaint').mockImplementation(() => {
       now += 3;
@@ -745,7 +734,7 @@ describe('primitive frame lifecycle', () => {
   it('passes the current oblique ground center to tile publication', async () => {
     const tileset = new CesiumVectorTileset({ style: { version: 8, sources: {}, layers: [] } });
     const state: RenderFrameState = { ...cityOrbitFrame(), frameNumber: 1, commandList: [], afterRender: [] };
-    const queue = (tileset as unknown as { _tilePublishQueue: TilePublishQueue })._tilePublishQueue;
+    const queue = ((tileset as unknown as { _renderer: { publishQueue: TilePublishQueue } })._renderer).publishQueue;
     vi.spyOn(performance, 'now').mockReturnValue(0);
     vi.spyOn(queue, 'size', 'get').mockReturnValue(1);
     const drain = vi.spyOn(queue, 'drain').mockReturnValue(0);
@@ -769,7 +758,7 @@ describe('primitive frame lifecycle', () => {
     const state = frame();
     const budgets: unknown[] = [];
     for (const tileset of [first, second]) {
-      const collections = (tileset as unknown as { _sceneCollections: SceneCollections })._sceneCollections;
+      const collections = ((tileset as unknown as { _renderer: { collections: SceneCollections } })._renderer).collections;
       vi.spyOn(collections, 'pumpFirstUpdates').mockImplementation((_state, budget) => {
         budgets.push(budget);
         return [];
@@ -795,14 +784,14 @@ describe('primitive frame lifecycle', () => {
     const state = frame();
     let now = 0;
     const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const evaluation = (tileset as unknown as { _styleEvaluation: StyleEvaluation })._styleEvaluation;
+    const evaluation = ((tileset as unknown as { _renderer: { evaluation: StyleEvaluation } })._renderer).evaluation;
     const evaluate = evaluation.evaluate.bind(evaluation);
     const style = vi.spyOn(evaluation, 'evaluate').mockImplementation((zoom) => {
       // Mandatory preparation exceeds the physical tile cutoff, 16.67 - 2ms.
       now += 15;
       return evaluate(zoom);
     });
-    const collections = (tileset as unknown as { _sceneCollections: SceneCollections })._sceneCollections;
+    const collections = ((tileset as unknown as { _renderer: { collections: SceneCollections } })._renderer).collections;
     const allowances: boolean[] = [];
     const upload = vi.spyOn(collections, 'pumpFirstUpdates').mockImplementation((_frame, budget) => {
       allowances.push(budget.exhausted);
@@ -962,8 +951,8 @@ describe('primitive frame lifecycle', () => {
     try {
       tileset.update(state);
       await tileset.whenReady();
-      const renderer = (tileset as unknown as { _vectorRenderer: VectorTileRenderer })._vectorRenderer;
-      const sceneCollections = (tileset as unknown as { _sceneCollections: SceneCollections })._sceneCollections;
+      const renderer = ((tileset as unknown as { _renderer: { vector: VectorTileRenderer } })._renderer).vector;
+      const sceneCollections = ((tileset as unknown as { _renderer: { collections: SceneCollections } })._renderer).collections;
       const tileID = new OverscaledTileID(0, 0, 0, 0, 0);
       const layer = new FillStyleLayer({ id: 'land', type: 'fill', source: 'land', paint: { 'fill-antialias': false } });
       layer.recalculate(new EvaluationParameters(0), []);

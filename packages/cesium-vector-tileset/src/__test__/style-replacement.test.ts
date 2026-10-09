@@ -28,14 +28,14 @@ function style(color = '#3366aa', source = 'land'): StyleSpecification {
 async function loadedSurface(initial = style()) {
   const tileset = new CesiumVectorTileset({ style: initial });
   await tileset.whenReady();
-  const internals = tileset as unknown as { _style: Style; _vectorRenderer: VectorTileRenderer };
+  const internals = (tileset as unknown as { _renderer: { style: Style; vector: VectorTileRenderer } })._renderer;
   const tileID = new OverscaledTileID(12, 0, 12, 2048, 1362);
-  const layer = internals._style.getLayer('land') as FillStyleLayer;
+  const layer = internals.style.getLayer('land') as FillStyleLayer;
   layer.recalculate(new EvaluationParameters(12), []);
   const bucket = new FillBucket({ layers: [layer], zoom: 12 } as never);
   bucket.addFeature({} as never, [[new Point(0, 0), new Point(4096, 0), new Point(4096, 4096), new Point(0, 4096)]], 0, tileID, {});
-  buildVectorTile(internals._vectorRenderer, { tileId: `land/${tileID.key}`, buckets: { land: bucket }, tileID });
-  const [surface] = internals._vectorRenderer.getTileCollections(`land/${tileID.key}`);
+  buildVectorTile(internals.vector, { tileId: `land/${tileID.key}`, buckets: { land: bucket }, tileID });
+  const [surface] = internals.vector.getTileCollections(`land/${tileID.key}`);
   tileset.add(surface);
   return { tileset, internals, surface, tileID };
 }
@@ -43,8 +43,8 @@ async function loadedSurface(initial = style()) {
 describe('style replacement resource lifetime', () => {
   it('holds a deleted source until the new source has finished uploading', async () => {
     const { tileset, surface, tileID } = await loadedSurface();
-    const internals = tileset as unknown as { _tileResidency: TileResidency; _sceneCollections: SceneCollections };
-    internals._tileResidency.published('land', tileID);
+    const internals = (tileset as unknown as { _renderer: { residency: TileResidency; collections: SceneCollections } })._renderer;
+    internals.residency.published('land', tileID);
     try {
       const next = style('#22aa55', 'city');
       tileset.setStyle(next);
@@ -52,32 +52,32 @@ describe('style replacement resource lifetime', () => {
       expect(surface.show).toBe(true);
       expect(surface.isDestroyed()).toBe(false);
       const successor = new OverscaledTileID(12, 0, 12, 2048, 1362);
-      internals._tileResidency.published('city', successor);
-      expect(internals._tileResidency.hiddenStyleTiles.has(`city/${successor.key}`)).toBe(true);
-      expect(internals._tileResidency.completeSourceReplacement()).toBe(true);
+      internals.residency.published('city', successor);
+      expect(internals.residency.hiddenStyleTiles.has(`city/${successor.key}`)).toBe(true);
+      expect(internals.residency.completeSourceReplacement()).toBe(true);
       expect(tileset.contains(surface)).toBe(false);
-      expect(internals._tileResidency.hiddenStyleTiles.size).toBe(0);
-      internals._sceneCollections.flushRemovals();
-      expect(internals._tileResidency.completeSourceReplacement()).toBe(false);
+      expect(internals.residency.hiddenStyleTiles.size).toBe(0);
+      internals.collections.flushRemovals();
+      expect(internals.residency.completeSourceReplacement()).toBe(false);
     }
     finally { tileset.destroy(); }
   });
 
   it('releases hidden intermediate sources while preserving the visible predecessor', async () => {
     const { tileset, surface, tileID } = await loadedSurface();
-    const internals = tileset as unknown as { _tileResidency: TileResidency; _vectorRenderer: VectorTileRenderer };
-    internals._tileResidency.published('land', tileID);
+    const internals = (tileset as unknown as { _renderer: { residency: TileResidency; vector: VectorTileRenderer } })._renderer;
+    internals.residency.published('land', tileID);
     try {
       const next = style('#3366aa', 'city');
       tileset.setStyle(next);
-      internals._tileResidency.published('city', tileID);
+      internals.residency.published('city', tileID);
       const third = style('#3366aa', 'region');
       tileset.setStyle(third);
       expect(tileset.contains(surface)).toBe(true);
-      expect(internals._tileResidency.drawRanks.has(`city/${tileID.key}`)).toBe(false);
-      internals._tileResidency.published('region', tileID);
-      expect([...internals._tileResidency.hiddenStyleTiles]).toEqual([`region/${tileID.key}`]);
-      expect(internals._vectorRenderer.getTileCollections(`land/${tileID.key}`)).toContain(surface);
+      expect(internals.residency.drawRanks.has(`city/${tileID.key}`)).toBe(false);
+      internals.residency.published('region', tileID);
+      expect([...internals.residency.hiddenStyleTiles]).toEqual([`region/${tileID.key}`]);
+      expect(internals.vector.getTileCollections(`land/${tileID.key}`)).toContain(surface);
     }
     finally { tileset.destroy(); }
   });
@@ -98,8 +98,8 @@ describe('style replacement resource lifetime', () => {
       projection: { type: 'globe' },
     };
     const { tileset, surface, tileID } = await loadedSurface(initial);
-    const internals = tileset as unknown as { _tileResidency: TileResidency };
-    internals._tileResidency.published('land', tileID);
+    const internals = (tileset as unknown as { _renderer: { residency: TileResidency } })._renderer;
+    internals.residency.published('land', tileID);
     try {
       const next = { ...initial, ...style('#3366aa', 'city') };
       tileset.setStyle(next);
@@ -108,8 +108,8 @@ describe('style replacement resource lifetime', () => {
       tileset.setStyle(background);
       expect(tileset.contains(surface)).toBe(false);
       expect(tileset.stats().bucket.tiles).toBe(0);
-      expect(internals._tileResidency.hiddenStyleTiles.size).toBe(0);
-      expect(internals._tileResidency.completeSourceReplacement()).toBe(false);
+      expect(internals.residency.hiddenStyleTiles.size).toBe(0);
+      expect(internals.residency.completeSourceReplacement()).toBe(false);
       expect(tileset.styleSpec).toEqual(background);
       tileset.setStyle(initial);
       expect(tileset.styleSpec).toEqual(initial);
@@ -121,18 +121,18 @@ describe('style replacement resource lifetime', () => {
 
   it('keeps recovered source coverage while its new pyramid is still loading', async () => {
     const { tileset, surface, tileID } = await loadedSurface();
-    const internals = tileset as unknown as { _tileResidency: TileResidency; _style: Style };
-    internals._tileResidency.published('land', tileID);
+    const internals = (tileset as unknown as { _renderer: { residency: TileResidency; style: Style } })._renderer;
+    internals.residency.published('land', tileID);
     try {
       tileset.setStyle(style('#3366aa', 'city'));
       tileset.setStyle(style());
-      const pyramid = internals._style.tilePyramids.land;
+      const pyramid = internals.style.tilePyramids.land;
       const loaded = vi.spyOn(pyramid, 'loaded').mockReturnValue(false);
       try {
-        internals._tileResidency.syncSource('land', pyramid, [], SceneMode.SCENE3D);
+        internals.residency.syncSource('land', pyramid, [], SceneMode.SCENE3D);
         expect(tileset.contains(surface)).toBe(true);
         expect(surface.show).toBe(true);
-        expect(internals._tileResidency.hiddenStyleTiles.size).toBe(0);
+        expect(internals.residency.hiddenStyleTiles.size).toBe(0);
       }
       finally { loaded.mockRestore(); }
     }
@@ -152,7 +152,7 @@ describe('style replacement resource lifetime', () => {
         next.layers[0].paint = { 'fill-pattern': 'texture' };
       }
       tileset.setStyle(next);
-      const { _renderLayerIndex: plan } = tileset as unknown as { _renderLayerIndex: RenderLayerIndex };
+      const { layerIndex: plan } = (tileset as unknown as { _renderer: { layerIndex: RenderLayerIndex } })._renderer;
       expect(plan.patternLayers.map(layer => layer.id)).toEqual(patterned ? [] : ['land']);
     }
     finally { tileset.destroy(); }
@@ -165,8 +165,8 @@ describe('style replacement resource lifetime', () => {
       expect(tileset.contains(surface)).toBe(true);
       expect(surface.show).toBe(true);
       expect(tileset.stats().bucket.tiles).toBe(1);
-      internals._style.update(new EvaluationParameters(12));
-      expect(internals._vectorRenderer.updatePaint({ zoom: 12, styleRevision: internals._style.styleRevision, budget: UNBOUNDED_BUDGET })).toEqual([]);
+      internals.style.update(new EvaluationParameters(12));
+      expect(internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET })).toEqual([]);
       expect((surface as BufferPolygonCollection).get(0, new BufferPolygon()).getMaterial(new BufferPolygonMaterial()).color).toEqual(Color.fromCssColorString('#22aa55'));
       expect(surface.isDestroyed()).toBe(false);
       expect(tileset.styleSpec.layers).toEqual(style('#22aa55').layers);
@@ -190,45 +190,40 @@ describe('style replacement resource lifetime', () => {
 
   it('retains old LOD coverage through worker reparse and releases it after the new surface uploads', async () => {
     const { tileset, surface, tileID } = await loadedSurface();
-    const internals = tileset as unknown as {
-      _style: Style;
-      _vectorRenderer: VectorTileRenderer;
-      _tileResidency: TileResidency;
-      _sceneCollections: SceneCollections;
-    };
-    internals._tileResidency.published('land', tileID);
+    const internals = (tileset as unknown as { _renderer: { style: Style; vector: VectorTileRenderer; residency: TileResidency; collections: SceneCollections } })._renderer;
+    internals.residency.published('land', tileID);
     const next = style('#22aa55');
     next.layers[0].filter = ['==', ['get', 'kind'], 'water'];
     const childID = new OverscaledTileID(13, 0, 13, 4096, 2724);
     const child = new Tile(childID, 512);
     child.state = 'reloading';
-    const pyramid = internals._style.tilePyramids.land;
+    const pyramid = internals.style.tilePyramids.land;
     const loaded = vi.spyOn(pyramid, 'loaded').mockImplementation(() => child.state === 'loaded');
     const lookup = vi.spyOn(pyramid, 'getTileByID').mockImplementation(key => key === childID.key ? child : undefined);
     try {
       tileset.setStyle(next);
-      expect(internals._style._updatedSources.land).toBe('reload');
-      internals._tileResidency.syncSource('land', pyramid, [childID.key], SceneMode.SCENE3D);
+      expect(internals.style._updatedSources.land).toBe('reload');
+      internals.residency.syncSource('land', pyramid, [childID.key], SceneMode.SCENE3D);
       expect(tileset.contains(surface)).toBe(true);
       expect(surface.show).toBe(true);
-      expect(internals._vectorRenderer.getTileCollections(`land/${tileID.key}`)).toContain(surface);
+      expect(internals.vector.getTileCollections(`land/${tileID.key}`)).toContain(surface);
 
-      const layer = internals._style.getLayer('land') as FillStyleLayer;
+      const layer = internals.style.getLayer('land') as FillStyleLayer;
       layer.recalculate(new EvaluationParameters(13), []);
       const bucket = new FillBucket({ layers: [layer], zoom: 13 } as never);
       bucket.addFeature({} as never, [[new Point(0, 0), new Point(4096, 0), new Point(4096, 4096), new Point(0, 4096)]], 0, childID, {});
       child.buckets = { land: bucket };
       child.state = 'loaded';
-      buildVectorTile(internals._vectorRenderer, { tileId: `land/${childID.key}`, buckets: child.buckets, tileID: childID });
-      internals._tileResidency.commit({
+      buildVectorTile(internals.vector, { tileId: `land/${childID.key}`, buckets: child.buckets, tileID: childID });
+      internals.residency.commit({
         sourceId: 'land',
         tileId: `land/${childID.key}`,
         tileID: childID,
-        generationId: internals._vectorRenderer.tileBuildLayers(`land/${childID.key}`)!.generationId,
+        generationId: internals.vector.tileBuildLayers(`land/${childID.key}`)!.generationId,
         stage: 'complete',
         progress: { vector: 'complete', pattern: true, symbol: true },
         buckets: child.buckets,
-        styleRevision: internals._style.styleRevision,
+        styleRevision: internals.style.styleRevision,
         mode: SceneMode.SCENE3D,
         featureIndex: child.latestFeatureIndex,
         retainPreviousGeneration: false,
@@ -240,20 +235,20 @@ describe('style replacement resource lifetime', () => {
         removedSymbols: [],
         firstUpdateSymbols: [],
       });
-      const [successor] = internals._vectorRenderer.getTileCollections(`land/${childID.key}`);
+      const [successor] = internals.vector.getTileCollections(`land/${childID.key}`);
       tileset.add(successor);
-      internals._sceneCollections.queueFirstUpdate([successor]);
-      internals._tileResidency.syncSource('land', pyramid, [childID.key], SceneMode.SCENE3D);
+      internals.collections.queueFirstUpdate([successor]);
+      internals.residency.syncSource('land', pyramid, [childID.key], SceneMode.SCENE3D);
       expect(surface.show).toBe(true);
       expect(tileset.contains(surface)).toBe(true);
-      expect(internals._sceneCollections.hasPendingFirstUpdate(successor)).toBe(true);
+      expect(internals.collections.hasPendingFirstUpdate(successor)).toBe(true);
 
       // The native Buffer collection uploads synchronously. Control its GPU
       // update seam while exercising the real scene queue and residency.
       vi.spyOn(successor as BufferPolygonCollection & { update: (frame: unknown) => void }, 'update').mockImplementation(() => {});
-      internals._sceneCollections.pumpFirstUpdates({ mode: SceneMode.SCENE3D, commandList: [] } as never, UNBOUNDED_BUDGET);
-      expect(internals._sceneCollections.hasPendingFirstUpdate(successor)).toBe(false);
-      internals._tileResidency.syncSource('land', pyramid, [childID.key], SceneMode.SCENE3D);
+      internals.collections.pumpFirstUpdates({ mode: SceneMode.SCENE3D, commandList: [] } as never, UNBOUNDED_BUDGET);
+      expect(internals.collections.hasPendingFirstUpdate(successor)).toBe(false);
+      internals.residency.syncSource('land', pyramid, [childID.key], SceneMode.SCENE3D);
       expect(surface.show).toBe(false);
       expect(tileset.contains(surface)).toBe(false);
       expect(successor.show).toBe(true);
@@ -275,8 +270,8 @@ describe('style replacement resource lifetime', () => {
       const next = style();
       next.layers[0].paint = { 'fill-color': ['get', 'color'], 'fill-antialias': false };
       tileset.setStyle(next);
-      internals._style.update(new EvaluationParameters(12));
-      internals._vectorRenderer.updatePaint({ zoom: 12, styleRevision: internals._style.styleRevision, budget: UNBOUNDED_BUDGET });
+      internals.style.update(new EvaluationParameters(12));
+      internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET });
       expect(color()).toEqual(previous);
       expect(collection.show).toBe(true);
       expect(collection.isDestroyed()).toBe(false);
@@ -294,8 +289,8 @@ describe('style replacement resource lifetime', () => {
       const next = style();
       next.layers[0].paint = { 'fill-pattern': 'texture', 'fill-antialias': false };
       tileset.setStyle(next);
-      internals._style.update(new EvaluationParameters(12));
-      internals._vectorRenderer.updatePaint({ zoom: 12, styleRevision: internals._style.styleRevision, budget: UNBOUNDED_BUDGET });
+      internals.style.update(new EvaluationParameters(12));
+      internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET });
       expect(color()).toEqual(previous);
       expect(collection.show).toBe(true);
       expect(collection.isDestroyed()).toBe(false);
@@ -309,20 +304,20 @@ describe('style replacement resource lifetime', () => {
       const next = style('#aa3355');
       next.layers[0].filter = ['==', ['get', 'kind'], 'water'];
       tileset.setStyle(next);
-      internals._style.update(new EvaluationParameters(12));
+      internals.style.update(new EvaluationParameters(12));
       const tileID = new OverscaledTileID(12, 0, 12, 2048, 1362);
-      const layer = internals._style.getLayer('land') as FillStyleLayer;
+      const layer = internals.style.getLayer('land') as FillStyleLayer;
       const bucket = new FillBucket({ layers: [layer], zoom: 12 } as never);
       bucket.addFeature({} as never, [[new Point(0, 0), new Point(4096, 0), new Point(4096, 4096), new Point(0, 4096)]], 0, tileID, {});
-      buildVectorTile(internals._vectorRenderer, { tileId: `land/${tileID.key}`, buckets: { land: bucket }, tileID });
-      const [successor] = internals._vectorRenderer.getTileCollections(`land/${tileID.key}`) as BufferPolygonCollection[];
+      buildVectorTile(internals.vector, { tileId: `land/${tileID.key}`, buckets: { land: bucket }, tileID });
+      const [successor] = internals.vector.getTileCollections(`land/${tileID.key}`) as BufferPolygonCollection[];
       expect(successor).not.toBe(surface);
       tileset.add(successor);
       const painted = style('#22aa55');
       painted.layers[0].filter = next.layers[0].filter;
       tileset.setStyle(painted);
-      internals._style.update(new EvaluationParameters(12));
-      internals._vectorRenderer.updatePaint({ zoom: 12, styleRevision: internals._style.styleRevision, budget: UNBOUNDED_BUDGET });
+      internals.style.update(new EvaluationParameters(12));
+      internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET });
       expect(successor.get(0, new BufferPolygon()).getMaterial(new BufferPolygonMaterial()).color).toEqual(Color.fromCssColorString('#22aa55'));
       expect((surface as BufferPolygonCollection).get(0, new BufferPolygon()).getMaterial(new BufferPolygonMaterial()).color).toEqual(Color.fromCssColorString('#3366aa'));
     }
