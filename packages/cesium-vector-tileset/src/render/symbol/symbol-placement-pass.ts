@@ -11,9 +11,13 @@ export interface SymbolPlacementBatch {
 /** Own a frozen view, collision index and unpublished visibility generation. */
 export class SymbolPlacementPass {
   private readonly _batches: readonly SymbolPlacementBatch[];
+
   private readonly _view: PlacementView;
+
   private readonly _collision = new SymbolCollisionIndex();
+
   private readonly _placements: SymbolTilePlacement[] = [];
+
   private _batchIndex = 0;
 
   constructor(
@@ -117,17 +121,29 @@ export interface SymbolPlacementGeneration<Batch extends SymbolPlacementBatch> {
  */
 export class SymbolPlacementScope<Batch extends SymbolPlacementBatch> {
   private readonly _sameBatch: (a: Batch, b: Batch) => boolean;
+
   private readonly _recencyMs: number;
+
   private _batches: readonly Batch[] = [];
+
   private _revision = 0;
+
   private _job: SymbolPlacementGeneration<Batch> | undefined;
+
   private _complete: SymbolPlacementGeneration<Batch> | undefined;
+
   private _view: PlacementView | undefined;
+
   private _dirty = false;
+
   private _urgent = false;
+
   private _lastCommitMs = Number.NEGATIVE_INFINITY;
+
   private _recencyDeadline = Number.NEGATIVE_INFINITY;
+
   private _currentZoom: number | undefined;
+
   private _zoomAtLastRecencyCheck: number | undefined;
 
   constructor(sameBatch: (a: Batch, b: Batch) => boolean, recencyMs: number) {
@@ -161,6 +177,9 @@ export class SymbolPlacementScope<Batch extends SymbolPlacementBatch> {
     return this._observeRecency(this._currentZoom);
   }
 
+  /**
+   * @internal
+   */
   private _observeRecency(zoom: number | undefined): boolean {
     const placedZoom = this._view?.cameraZoom;
     // MapLibre Placement.stillRecent reduces recency only once zoom stops.
@@ -174,6 +193,9 @@ export class SymbolPlacementScope<Batch extends SymbolPlacementBatch> {
     return changed;
   }
 
+  /**
+   * @internal
+   */
   private _commitRecency(view: PlacementView, current: PlacementView): void {
     this._lastCommitMs = performance.now();
     this._recencyDeadline = this._lastCommitMs + this._recencyMs;

@@ -439,13 +439,6 @@ interface AtlasSource {
   shareKey: string;
 }
 
-function createCanvas(width: number, height: number): HTMLCanvasElement {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  return canvas;
-}
-
 // Atlas canvases are expensive (a full putImageData of a 1024x1024 atlas) and
 // their pixel data is immutable once a tile's worker result has arrived, so
 // tiles whose atlas payload object is reused — republished tiles and tiles
@@ -491,7 +484,9 @@ export function iconAtlasShareKey(positions: Record<string, ImagePosition>): str
 }
 
 function writeAtlasCanvas(data: Uint8Array | Uint8ClampedArray, width: number, height: number, gray: boolean, shareKey: string): AtlasSource {
-  const canvas = createCanvas(width, height);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext('2d');
   if (!context) {
     throw new Error('A 2D canvas context is required to upload the glyph atlas');
@@ -820,7 +815,9 @@ export interface MergedSymbolCollections {
 /** Keep Cesium's point-anchor pipeline and draw the shader-expanded quads. */
 class SymbolPrimitive extends Primitive {
   private readonly _halves: SymbolHalf[] = [];
+
   private readonly _halfVisibility = new Map<SymbolHalf, boolean>();
+
   private _visibleHalves = 0;
 
   addHalf(half: SymbolHalf): void {
@@ -1263,34 +1260,60 @@ const EMPTY_SYMBOL_COLLECTIONS: readonly PrimitiveCollection[] = [];
  */
 export class SymbolTileRenderer {
   private _tiles: Map<string, SymbolTileEntry> = new Map();
-  /** The currently drawn generation may precede the tile's latest prepared entry. */
+  /**
+   * The currently drawn generation may precede the tile's latest prepared entry.
+   */
   private _visibleEntries: Map<string, SymbolTileEntry> = new Map();
+
   private _imageUpdateRevision = -1;
+
   private _pendingImageEntries = new Set<SymbolTileEntry>();
+
   private _held = new Map<number, SymbolTileEntry>();
+
   private _nextHeldId = 0;
+
   private _excludedPlacementTiles = new Set<string>();
+
   private _lineView: PlacementView | undefined;
+
   private _liveSelectionView: PlacementView | undefined;
+
   private readonly _liveCollision = new SymbolCollisionIndex();
+
   private _liveSelections = new WeakMap<SymbolTileGeometry, { selection: SymbolTileSelection; origin: object; order: number; fresh: boolean }>();
+
   private _liveSelectionRevision = 0;
+
   private _appliedLiveSelectionRevision = -1;
+
   private _liveSelectionPlanRevision = -1;
-  /** Scene visibility and replacement readiness are different collision scopes. */
+  /**
+   * Scene visibility and replacement readiness are different collision scopes.
+   */
   private _hiddenPlacementTiles = new Set<string>();
+
   private _visibleInputsDirty = false;
+
   private _placementLayerInputs = new WeakMap<SymbolTileEntry, readonly boolean[]>();
+
   private _placementPlanRevision = 0;
+
   private _placementPlans = new Map<SymbolPlacementPlanKind, SymbolPlacementPlan>();
+
   private _placementEntryIndexes = new WeakMap<SymbolTileEntry, SymbolPlacementEntryIndex>();
   /** MapLibre keeps a completed placement recent for its 300ms fade interval. */
   static readonly PLACEMENT_RECENCY_MS = 300;
   static readonly PLACEMENT_BUDGET_MS = 2;
+
   private _placementScopeTurn = 0;
+
   private readonly _targetPlacement = new SymbolPlacementScope<OrderedSymbolBatch>(sameSymbolBatch, SymbolTileRenderer.PLACEMENT_RECENCY_MS);
+
   private readonly _visiblePlacement = new SymbolPlacementScope<OrderedSymbolBatch>(sameSymbolBatch, SymbolTileRenderer.PLACEMENT_RECENCY_MS);
+
   private readonly _handoffPlacement = new SymbolPlacementScope<OrderedSymbolBatch>(sameSymbolBatch, SymbolTileRenderer.PLACEMENT_RECENCY_MS);
+
   private _prospectiveVisibleTiles: ReadonlySet<string> | undefined;
   /**
    * A removal leaves ghost boxes in an active generation, so the next
@@ -1311,6 +1334,7 @@ export class SymbolTileRenderer {
    * shareKey with the same entry-counted lifetime.
    */
   private _materials = new Map<string, Material>();
+
   private _materialRefs = new Map<Material, number>();
   /**
    * Live style zoom, set by the tileset every frame. Composite symbol sizes
@@ -1319,8 +1343,11 @@ export class SymbolTileRenderer {
    * at tile boundaries.
    */
   cameraZoom = 0;
+
   private _shared = new SharedAtlasTextures({ premultiplyAlpha: true });
+
   private _payloadIds = new WeakMap<object, number>();
+
   private _payloadNextId = 1;
 
   get tileIds(): string[] {
@@ -1446,6 +1473,9 @@ export class SymbolTileRenderer {
     return true;
   }
 
+  /**
+   * @internal
+   */
   private _preparedForOwners(batches: readonly OrderedSymbolBatch[]): SymbolPlacementGeneration<OrderedSymbolBatch> | undefined {
     for (const scope of [this._targetPlacement, this._handoffPlacement, this._visiblePlacement]) {
       const prepared = scope.complete;
@@ -1458,6 +1488,9 @@ export class SymbolTileRenderer {
     return undefined;
   }
 
+  /**
+   * @internal
+   */
   private _canActivatePlacement(prepared: SymbolPlacementGeneration<OrderedSymbolBatch>): boolean {
     if (!this._lineView || samePlacementView(prepared.view, this._lineView)) {
       return true;
@@ -1615,6 +1648,7 @@ export class SymbolTileRenderer {
   /**
    * Bake one layer's halves during tile publication. Halves merge by shared
    * material at commit; collision changes only update their opacity VBOs.
+   * @internal
    */
   private _buildLayer(
     input: SymbolTileInput,
@@ -1661,6 +1695,9 @@ export class SymbolTileRenderer {
     });
   }
 
+  /**
+   * @internal
+   */
   private _payloadId(data: object): number {
     let id = this._payloadIds.get(data);
     if (id === undefined) {
@@ -1698,6 +1735,9 @@ export class SymbolTileRenderer {
     return { canvas: canvas as HTMLCanvasElement, width: canvas.width, height: canvas.height, shareKey };
   }
 
+  /**
+   * @internal
+   */
   private _materialKey(
     color: Color,
     isText: boolean,
@@ -1726,6 +1766,7 @@ export class SymbolTileRenderer {
    * content is one Material (one GPU texture) no matter how many tiles or
    * layers use it. Lifecycle is entry-counted (_retainEntry/_releaseEntry),
    * so a key change here never destroys - it just stops sharing.
+   * @internal
    */
   private _cachedMaterial(key: string, create: () => Material): Material {
     let material = this._materials.get(key);
@@ -1736,6 +1777,9 @@ export class SymbolTileRenderer {
     return material;
   }
 
+  /**
+   * @internal
+   */
   private _retainMaterial(material: Material): void {
     // Tile extraction can finish after this frame's camera update. A new
     // atlas material must already use the current units on its first paint.
@@ -1748,6 +1792,9 @@ export class SymbolTileRenderer {
     this._materialRefs.set(material, (this._materialRefs.get(material) ?? 0) + 1);
   }
 
+  /**
+   * @internal
+   */
   private _retainBuildMaterials(state: SymbolBuildState, materials: Iterable<Material>): void {
     for (const material of materials) {
       if (!state.retainedMaterials.has(material)) {
@@ -1757,6 +1804,9 @@ export class SymbolTileRenderer {
     }
   }
 
+  /**
+   * @internal
+   */
   private _releaseMaterial(material: Material): void {
     const refs = (this._materialRefs.get(material) ?? 0) - 1;
     if (refs > 0) {
@@ -1774,7 +1824,10 @@ export class SymbolTileRenderer {
     }
   }
 
-  /** Retain an entry's materials (call before releasing the entry it replaces). */
+  /**
+   * Retain an entry's materials (call before releasing the entry it replaces).
+   * @internal
+   */
   private _retainEntryMaterials(entry: SymbolTileEntry): void {
     for (const material of entry.materials) {
       this._retainMaterial(material);
@@ -1786,6 +1839,7 @@ export class SymbolTileRenderer {
    * zeros. Atlas holds arrive with the build (beginBuild retains) and
    * transfer to the committed entry, so addTile/commitBuild must retain
    * materials only - never re-retain the holds.
+   * @internal
    */
   private _releaseEntry(entry: SymbolTileEntry): void {
     const tileId = entry.input.tileId;
@@ -1807,7 +1861,10 @@ export class SymbolTileRenderer {
     }
   }
 
-  /** Destroy every material and atlas texture (style swap / destroy). */
+  /**
+   * Destroy every material and atlas texture (style swap / destroy).
+   * @internal
+   */
   private _destroyAllMaterials(): void {
     for (const material of new Set([...this._materials.values(), ...this._materialRefs.keys()])) {
       if (!material.isDestroyed()) {
@@ -1819,7 +1876,10 @@ export class SymbolTileRenderer {
     this._shared.clear();
   }
 
-  /** Every Material referenced by an entry's live collections. */
+  /**
+   * Every Material referenced by an entry's live collections.
+   * @internal
+   */
   private static _entryMaterials(entry: SymbolTileEntry): Set<Material> {
     const materials = new Set<Material>();
     for (const collection of entry.collections) {
@@ -1934,8 +1994,12 @@ export class SymbolTileRenderer {
   }
 
   private _pendingOpacityHalves = new Set<SymbolHalf>();
+
   private _pendingDynamicHalves = new Set<SymbolHalf>();
 
+  /**
+   * @internal
+   */
   private _syncOpacity(half: SymbolHalf): void {
     syncHalfOpacity(half);
     if (half.opacity?.geometry.opacityDirty) {
@@ -1946,6 +2010,9 @@ export class SymbolTileRenderer {
     }
   }
 
+  /**
+   * @internal
+   */
   private _syncDynamic(half: SymbolHalf): void {
     syncHalfDynamic(half);
     if (half.dynamic?.dirty) {
@@ -1956,6 +2023,9 @@ export class SymbolTileRenderer {
     }
   }
 
+  /**
+   * @internal
+   */
   private _drainPendingAttributes(): void {
     for (const half of [...this._pendingOpacityHalves]) {
       this._syncOpacity(half);
@@ -1965,7 +2035,10 @@ export class SymbolTileRenderer {
     }
   }
 
-  /** Reproject recoverable candidates, preserving each held/fading generation. */
+  /**
+   * Reproject recoverable candidates, preserving each held/fading generation.
+   * @internal
+   */
   private _updateLineLabels(view: PlacementView, entries: Iterable<SymbolTileEntry>, projections: SymbolProjectionContext): void {
     for (const entry of entries) {
       const metadata = this._placementEntryIndexFor(entry);
@@ -1977,7 +2050,10 @@ export class SymbolTileRenderer {
     }
   }
 
-  /** Camera movement and new selections publish through the same current view. */
+  /**
+   * Camera movement and new selections publish through the same current view.
+   * @internal
+   */
   private _updateSelectedLineBatch(view: PlacementView, geometry: SymbolTileGeometry, halves: readonly SymbolHalf[], selection: SymbolTileSelection | undefined, projections: SymbolProjectionContext): void {
     for (const half of halves) {
       const dynamic = half.dynamic;
@@ -1991,6 +2067,9 @@ export class SymbolTileRenderer {
     }
   }
 
+  /**
+   * @internal
+   */
   private* _drawableLineEntries(): IterableIterator<SymbolTileEntry> {
     yield* this._tiles.values();
     yield* this._held.values();
@@ -2017,6 +2096,9 @@ export class SymbolTileRenderer {
     return changed;
   }
 
+  /**
+   * @internal
+   */
   private _refreshEntryImages(entry: SymbolTileEntry, images: StyleImages): boolean {
     const atlas = entry.input.iconAtlas;
     if (!atlas) {
@@ -2077,11 +2159,17 @@ export class SymbolTileRenderer {
     return true;
   }
 
+  /**
+   * @internal
+   */
   private _invalidatePlacementInputs(): void {
     this._placementPlanRevision++;
     this._fullReplaceNeeded = true;
   }
 
+  /**
+   * @internal
+   */
   private _placementEntryIndexFor(entry: SymbolTileEntry): SymbolPlacementEntryIndex {
     let metadata = this._placementEntryIndexes.get(entry);
     if (!metadata) {
@@ -2100,7 +2188,10 @@ export class SymbolTileRenderer {
     return metadata;
   }
 
-  /** Cache ordering and metadata independently from the moving collision view. */
+  /**
+   * Cache ordering and metadata independently from the moving collision view.
+   * @internal
+   */
   private _placementPlanFor(kind: SymbolPlacementPlanKind, cameraZoom: number, owners: ReadonlySet<string>, entries: ReadonlyMap<string, SymbolTileEntry> = this._tiles): readonly OrderedSymbolBatch[] {
     const cached = this._placementPlans.get(kind);
     if (cached && cached.revision === this._placementPlanRevision && cached.entries === entries && sameTileSet(cached.owners, owners)) {
@@ -2141,6 +2232,9 @@ export class SymbolTileRenderer {
     return ordered;
   }
 
+  /**
+   * @internal
+   */
   private _commitPlacement(pass: SymbolPlacementPass, batches: readonly OrderedSymbolBatch[], include: (batchIndex: number) => boolean, projections: SymbolProjectionContext, view: PlacementView | undefined): void {
     const origin = {};
     pass.commit((batchIndex, selection) => {
@@ -2170,7 +2264,10 @@ export class SymbolTileRenderer {
     });
   }
 
-  /** Keep the completed candidates collision-safe in the current visible view. */
+  /**
+   * Keep the completed candidates collision-safe in the current visible view.
+   * @internal
+   */
   private _filterVisibleSelection(view: PlacementView, projections: SymbolProjectionContext): void {
     if (this._appliedLiveSelectionRevision === this._liveSelectionRevision
       && this._liveSelectionPlanRevision === this._placementPlanRevision
@@ -2336,6 +2433,9 @@ export class SymbolTileRenderer {
       || this.hasRunnableWork;
   }
 
+  /**
+   * @internal
+   */
   private get _hasSeparateHandoffScope(): boolean {
     return this._prospectiveVisibleTiles !== undefined
       && !this._targetPlacement.matches(this._handoffPlacement.batches)
@@ -2426,6 +2526,9 @@ export class SymbolTileRenderer {
    */
   private _fading = new Map<string, FadingSymbolEntry>();
 
+  /**
+   * @internal
+   */
   private _takeFading(tileId: string): FadingSymbolEntry | undefined {
     const fading = this._fading.get(tileId);
     if (fading) {
@@ -2438,6 +2541,7 @@ export class SymbolTileRenderer {
    * Resolve the fade write targets of an entry, or undefined when the entry
    * never rendered (no batch table yet, so nothing visible to fade and
    * `getGeometryInstanceAttributes` would throw).
+   * @internal
    */
   private _fadeTargets(entry: SymbolTileEntry): Array<{ set: (value: number) => void }> | undefined {
     const targets: Array<{ set: (value: number) => void }> = [];
@@ -2467,7 +2571,10 @@ export class SymbolTileRenderer {
     return targets;
   }
 
-  /** Insert an entry into the retired pool, evicting the oldest past the cap. */
+  /**
+   * Insert an entry into the retired pool, evicting the oldest past the cap.
+   * @internal
+   */
   private _poolEntry(tileId: string, entry: SymbolTileEntry): PrimitiveCollection[] {
     this._pendingImageEntries.delete(entry);
     return this._retired.retire(tileId, entry).flatMap(gone => this._evictRetired(gone.value));
@@ -2491,6 +2598,7 @@ export class SymbolTileRenderer {
    * footprint (see setRetiredCapacity).
    */
   static readonly MAX_RETIRED_TILES = 64;
+
   private _retired = new RetiredPool<SymbolTileEntry>(SymbolTileRenderer.MAX_RETIRED_TILES);
 
   /**
@@ -2627,42 +2735,13 @@ export class SymbolTileRenderer {
     return entry.collections;
   }
 
-  /** Release a retired entry and return its collections for destruction. */
+  /**
+   * Release a retired entry and return its collections for destruction.
+   * @internal
+   */
   private _evictRetired(entry: SymbolTileEntry): PrimitiveCollection[] {
     this._releaseEntry(entry);
     return entry.collections;
-  }
-
-  /**
-   * Evict retired entries predating newly arrived layers: the entry never
-   * built them, so restoring it would show a tile without its new labels
-   * (live tiles rebuild through the publish queue instead). Newly hidden
-   * layers need no eviction — the placement pass hides them on restore.
-   */
-  evictRetiredMissingLayers(newLayerIds: ReadonlySet<string>): PrimitiveCollection[] {
-    if (newLayerIds.size === 0) {
-      return [];
-    }
-    const evicted: PrimitiveCollection[] = [];
-    for (const [tileId, entry] of [...this._retired.entries()]) {
-      const bucketIds = new Set(Object.keys(entry.input.buckets));
-      const built = new Set(entry.layerIds);
-      let stale = false;
-      for (const layerId of newLayerIds) {
-        if (bucketIds.has(layerId) && !built.has(layerId)) {
-          stale = true;
-          break;
-        }
-      }
-      if (!stale) {
-        continue;
-      }
-      const retired = this._retired.take(tileId);
-      if (retired) {
-        evicted.push(...this._evictRetired(retired));
-      }
-    }
-    return evicted;
   }
 
   /** Drop retired entries (style change invalidates pooled paints). */

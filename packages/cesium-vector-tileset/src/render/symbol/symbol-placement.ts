@@ -230,7 +230,9 @@ export function rotateOffsetYDown(ox: number, oy: number, angle: number): { x: n
  */
 export class SymbolCollisionIndex {
   private _cells: Map<number, PlacedBox[]> = new Map();
+
   private readonly _boxes: PlacedBox[] = [];
+
   private readonly _largeBoxes: PlacedBox[] = [];
 
   clear(): void {
@@ -306,12 +308,19 @@ interface SymbolSelectionVisibility {
 /** A completed candidate set; camera filtering never promotes hidden halves. */
 export class SymbolTileSelection {
   readonly view: PlacementView;
+
   private readonly _text: SymbolPrimitiveGeometry | undefined;
+
   private readonly _icon: SymbolPrimitiveGeometry | undefined;
+
   private readonly _visibility: SymbolSelectionVisibility;
+
   private readonly _pairs: SymbolPlacementOptions['pairs'];
+
   private readonly _textOptional: boolean;
+
   private readonly _iconOptional: boolean;
+
   private _placement: SymbolTilePlacement | undefined;
 
   constructor(text: SymbolPrimitiveGeometry | undefined, icon: SymbolPrimitiveGeometry | undefined, view: PlacementView, options: SymbolPlacementOptions, visibility: SymbolSelectionVisibility) {
@@ -366,16 +375,27 @@ export class SymbolTileSelection {
  */
 export class SymbolTilePlacement {
   private readonly _text: SymbolPrimitiveGeometry | undefined;
+
   private readonly _icon: SymbolPrimitiveGeometry | undefined;
+
   private _view: PlacementView;
+
   private _index: SymbolCollisionIndex;
+
   private _options: SymbolPlacementOptions;
+
   private readonly _eligibility: SymbolSelectionVisibility | undefined;
+
   private readonly _textVisibility: Uint8Array;
+
   private readonly _iconVisibility: Uint8Array;
+
   private _cursor = 0;
+
   private _done = false;
+
   private _selectedHalves = 0;
+
   private _selection: SymbolTileSelection | undefined;
 
   constructor(
@@ -435,6 +455,9 @@ export class SymbolTilePlacement {
     return this._cursor - start;
   }
 
+  /**
+   * @internal
+   */
   private _placePair(pair: { text: number; icon: number }, projections: SymbolProjectionContext): void {
     const text = pair.text === -1 ? undefined : this._text!;
     const icon = pair.icon === -1 ? undefined : this._icon!;

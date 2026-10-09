@@ -1,5 +1,4 @@
 import {
-  codePointAllowsIdeographicBreaking,
   codePointHasNeutralVerticalOrientation,
   codePointHasUprightVerticalOrientation,
   codePointRequiresComplexTextShaping,
@@ -15,14 +14,6 @@ function codePointAtStart(char: string): number {
     throw new Error('Expected a non-empty string.');
   }
   return codePoint;
-}
-
-export function allowsIdeographicBreaking(chars: string): boolean {
-  for (const char of chars) {
-    if (!codePointAllowsIdeographicBreaking(codePointAtStart(char)))
-      return false;
-  }
-  return true;
 }
 
 export function allowsVerticalWritingMode(chars: string): boolean {

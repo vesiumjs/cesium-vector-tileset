@@ -1,5 +1,5 @@
 import type { RenderFrameState } from '../../scene/render-frame';
-import type { SceneTileCovering } from '../../scene/scene-tile-covering';
+import type { TilesetRenderer } from '../../scene/tileset-renderer';
 import type { SymbolPrimitiveGeometry, SymbolTileGeometry } from '../symbol-geometry';
 import type { PlacementView } from '../symbol-placement';
 import { Cartesian3, Color, Event, Primitive, PrimitiveCollection, PrimitiveType } from 'cesium';
@@ -1314,8 +1314,7 @@ describe('symbol placement throughput through renderer updates', () => {
     vi.spyOn(performance, 'now').mockReturnValue(0);
     const tileset = new CesiumVectorTileset({ style: { version: 8, sources: {}, layers: [] } });
     const state: RenderFrameState = { ...cameraFrame(), frameNumber: 1, commandList: [], afterRender: [] };
-    const renderer = (tileset as unknown as { _symbolRenderer: SymbolTileRenderer })._symbolRenderer;
-    const covering = (tileset as unknown as { _sceneCovering: SceneTileCovering })._sceneCovering;
+    const { symbol: renderer, covering } = (tileset as unknown as { _renderer: TilesetRenderer })._renderer;
     vi.spyOn(covering, 'cameraFrame', 'get').mockImplementation(() => captureCameraForFrame(state, new WeakMap(), state.mode!));
     try {
       await tileset.whenReady();
