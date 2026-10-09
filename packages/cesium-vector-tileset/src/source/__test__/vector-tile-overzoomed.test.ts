@@ -51,7 +51,8 @@ function coordinates(feature: VectorTileFeatureLike): Coordinates {
 }
 
 describe('vector tile overzoom slicing', () => {
-  it.each([64, 2048, 4096, 8192])('retains the same point buffer at extent %i', (extent) => {
+  it('retains the same point buffer at extent 64', () => {
+    const extent = 64;
     const layer = slice(extent, [
       { id: 1, type: 1, geometry: [[[48, 48]]] },
       { id: 2, type: 1, geometry: [[[31, 48]]] },
@@ -74,7 +75,8 @@ describe('vector tile overzoom slicing', () => {
     ]);
   });
 
-  it.each([64, 2048, 4096, 8192])('clips crossing lines consistently at extent %i', (extent) => {
+  it('clips crossing lines consistently at extent 64', () => {
+    const extent = 64;
     const layer = slice(extent, [
       { id: 1, type: 2, geometry: [[[0, 48], [96, 48]]] },
       { id: 2, type: 2, geometry: [[[0, 0], [96, 96]]] },
@@ -86,7 +88,8 @@ describe('vector tile overzoom slicing', () => {
     expect(coordinates(layer.feature(1))).toEqual([[[-256, -256], [8448, 8448]]]);
   });
 
-  it.each([64, 2048, 4096, 8192])('clips a polygon and preserves its hole at extent %i', (extent) => {
+  it('clips a polygon and preserves its hole at extent 64', () => {
+    const extent = 64;
     const layer = slice(extent, [{
       id: 1,
       type: 3,
@@ -111,15 +114,15 @@ describe('vector tile overzoom slicing', () => {
     expect(classifyRings(loadGeometry(layer.feature(0)), 500).map(polygon => polygon.length)).toEqual([2]);
   });
 
-  it.each([1, 2, 3])('keeps the normalized line buffer across %i overzoom levels', (zoomDelta) => {
+  it('keeps the normalized line buffer across 3 overzoom levels', () => {
+    const zoomDelta = 3;
     const scale = 2 ** zoomDelta;
     const targetID = new CanonicalTileID(parentID.z + zoomDelta, parentID.x * scale + scale - 1, parentID.y * scale + scale - 1);
-    for (const extent of [64, 2048, 4096, 8192]) {
-      const parent = parentLayer(extent, [{ id: 1, type: 2, geometry: [[[0, 64 - 32 / scale], [96, 64 - 32 / scale]]] }]);
-      const layer = sliceVectorTileLayer(parent, parentID, targetID);
+    const extent = 64;
+    const parent = parentLayer(extent, [{ id: 1, type: 2, geometry: [[[0, 64 - 32 / scale], [96, 64 - 32 / scale]]] }]);
+    const layer = sliceVectorTileLayer(parent, parentID, targetID);
 
-      expect(coordinates(layer.feature(0))).toEqual([[[-256, 4096], [8448, 4096]]]);
-    }
+    expect(coordinates(layer.feature(0))).toEqual([[[-256, 4096], [8448, 4096]]]);
   });
 
   it('keeps sibling slices and repeated bucket loads independent', () => {

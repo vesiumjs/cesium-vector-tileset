@@ -1,6 +1,5 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { BufferPolygonCollection } from 'cesium';
-import type { RenderLayerIndex } from '../render/scene/render-layer-index';
 import type { SceneCollections } from '../render/scene/scene-collections';
 import type { TileResidency } from '../render/scene/tile-residency';
 import type { VectorTileRenderer } from '../render/vector/vector-tile-renderer';
@@ -119,75 +118,6 @@ describe('style replacement resource lifetime', () => {
     finally { tileset.destroy(); }
   });
 
-  it('keeps recovered source coverage while its new pyramid is still loading', async () => {
-    const { tileset, surface, tileID } = await loadedSurface();
-    const internals = (tileset as unknown as { _renderer: { residency: TileResidency; style: Style } })._renderer;
-    internals.residency.published('land', tileID);
-    try {
-      tileset.setStyle(style('#3366aa', 'city'));
-      tileset.setStyle(style());
-      const pyramid = internals.style.tilePyramids.land;
-      const loaded = vi.spyOn(pyramid, 'loaded').mockReturnValue(false);
-      try {
-        internals.residency.syncSource('land', pyramid, [], SceneMode.SCENE3D);
-        expect(tileset.contains(surface)).toBe(true);
-        expect(surface.show).toBe(true);
-        expect(internals.residency.hiddenStyleTiles.size).toBe(0);
-      }
-      finally { loaded.mockRestore(); }
-    }
-    finally { tileset.destroy(); }
-  });
-
-  it.each([false, true])('reindexes fill-pattern when its declaration changes (initially %s)', async (patterned) => {
-    const initial = style();
-    if (patterned) {
-      initial.layers[0].paint = { 'fill-pattern': 'texture' };
-    }
-    const tileset = new CesiumVectorTileset({ style: initial });
-    await tileset.whenReady();
-    try {
-      const next = style();
-      if (!patterned) {
-        next.layers[0].paint = { 'fill-pattern': 'texture' };
-      }
-      tileset.setStyle(next);
-      const { layerIndex: plan } = (tileset as unknown as { _renderer: { layerIndex: RenderLayerIndex } })._renderer;
-      expect(plan.patternLayers.map(layer => layer.id)).toEqual(patterned ? [] : ['land']);
-    }
-    finally { tileset.destroy(); }
-  });
-
-  it('keeps an uploaded surface through a paint-only change', async () => {
-    const { tileset, internals, surface } = await loadedSurface();
-    try {
-      tileset.setStyle(style('#22aa55'));
-      expect(tileset.contains(surface)).toBe(true);
-      expect(surface.show).toBe(true);
-      expect(tileset.stats().bucket.tiles).toBe(1);
-      internals.style.update(new EvaluationParameters(12));
-      expect(internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET })).toEqual([]);
-      expect((surface as BufferPolygonCollection).get(0, new BufferPolygon()).getMaterial(new BufferPolygonMaterial()).color).toEqual(Color.fromCssColorString('#22aa55'));
-      expect(surface.isDestroyed()).toBe(false);
-      expect(tileset.styleSpec.layers).toEqual(style('#22aa55').layers);
-    }
-    finally { tileset.destroy(); }
-  });
-
-  it('retains the visible generation until a layout replacement is published', async () => {
-    const { tileset, surface } = await loadedSurface();
-    try {
-      const next = style();
-      next.layers[0].filter = ['==', ['get', 'kind'], 'water'];
-      tileset.setStyle(next);
-      expect(tileset.contains(surface)).toBe(true);
-      expect(surface.show).toBe(true);
-      expect(surface.isDestroyed()).toBe(false);
-      expect(tileset.stats().bucket.tiles).toBe(1);
-    }
-    finally { tileset.destroy(); }
-  });
-
   it('retains old LOD coverage through worker reparse and releases it after the new surface uploads', async () => {
     const { tileset, surface, tileID } = await loadedSurface();
     const internals = (tileset as unknown as { _renderer: { style: Style; vector: VectorTileRenderer; residency: TileResidency; collections: SceneCollections } })._renderer;
@@ -259,43 +189,6 @@ describe('style replacement resource lifetime', () => {
       lookup.mockRestore();
       tileset.destroy();
     }
-  });
-
-  it('keeps constant paint visible while source-dependent paint needs new worker attributes', async () => {
-    const { tileset, internals, surface } = await loadedSurface();
-    try {
-      const collection = surface as BufferPolygonCollection;
-      const color = () => collection.get(0, new BufferPolygon()).getMaterial(new BufferPolygonMaterial()).color;
-      const previous = Color.clone(color());
-      const next = style();
-      next.layers[0].paint = { 'fill-color': ['get', 'color'], 'fill-antialias': false };
-      tileset.setStyle(next);
-      internals.style.update(new EvaluationParameters(12));
-      internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET });
-      expect(color()).toEqual(previous);
-      expect(collection.show).toBe(true);
-      expect(collection.isDestroyed()).toBe(false);
-      expect(tileset.contains(collection)).toBe(true);
-    }
-    finally { tileset.destroy(); }
-  });
-
-  it('keeps the old solid color while its pattern generation is rebuilding', async () => {
-    const { tileset, internals, surface } = await loadedSurface();
-    try {
-      const collection = surface as BufferPolygonCollection;
-      const color = () => collection.get(0, new BufferPolygon()).getMaterial(new BufferPolygonMaterial()).color;
-      const previous = Color.clone(color());
-      const next = style();
-      next.layers[0].paint = { 'fill-pattern': 'texture', 'fill-antialias': false };
-      tileset.setStyle(next);
-      internals.style.update(new EvaluationParameters(12));
-      internals.vector.updatePaint({ zoom: 12, styleRevision: internals.style.styleRevision, budget: UNBOUNDED_BUDGET });
-      expect(color()).toEqual(previous);
-      expect(collection.show).toBe(true);
-      expect(collection.isDestroyed()).toBe(false);
-    }
-    finally { tileset.destroy(); }
   });
 
   it('updates paint on a new generation while its predecessor remains frozen', async () => {

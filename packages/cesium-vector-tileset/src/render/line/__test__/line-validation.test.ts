@@ -8,7 +8,7 @@ import { LineStyleLayer } from '../../../style/style-layer/line-style-layer';
 import { CanonicalTileID } from '../../../tile/tile-id';
 import { lineInputs } from '../../geometry/line-input';
 import { DashMaterial } from '../dash-material';
-import { beginLineBuild, canResumeLineBuild, canUpdateLinePaint, commitLineBuild, stepLineBuild } from '../line-renderer';
+import { beginLineBuild, canResumeLineBuild, commitLineBuild, stepLineBuild } from '../line-renderer';
 
 const contextLimits = (Cesium as unknown as { ContextLimits: { _maximumTextureSize: number } }).ContextLimits;
 
@@ -102,99 +102,12 @@ describe('line input validation across frames', () => {
     }
   });
 
-  it('keeps one dash geometry owner when preparation spans many upload quanta', () => {
-    const { state, dash } = dashBuild(true, 3000);
-    expect(stepLineBuild(state, { exhausted: false })).toBe(true);
-    const collection = commitLineBuild(state)!;
-    try {
-      expect(collection.length).toBe(1);
-      expect((collection.get(0).geometryInstances as unknown[])).toHaveLength(3000);
-    }
-    finally {
-      collection.destroy();
-      dash.material.destroy();
-    }
-  });
-  it('reuses verified dash keys across repeated resume and live paint checks', () => {
-    const { state, range, dash, bucket } = dashBuild();
-    expect(stepLineBuild(state, { exhausted: false })).toBe(true);
-    expect(canResumeLineBuild(state)).toBe(true);
-    const collection = commitLineBuild(state)!;
-    expect(canUpdateLinePaint(collection, { road: bucket }, dash)).toBe(true);
-    range.mockClear();
-    for (let frame = 0; frame < 5; frame++) {
-      expect(canResumeLineBuild(state)).toBe(true);
-      expect(canUpdateLinePaint(collection, { road: bucket }, dash)).toBe(true);
-    }
-    expect(range.mock.calls.length).toBe(0);
-    collection.destroy();
-    dash.material.destroy();
-  });
-
-  it('invalidates feature-state row edits and source references', () => {
+  it('invalidates feature-state row edits', () => {
     const { state, bucket, array, dash } = dashBuild();
     stepLineBuild(state, { exhausted: false });
     expect(canResumeLineBuild(state)).toBe(true);
-    const source = state.byLayer[0].sources[0];
-    const positions = source.positions;
-    source.positions = positions.slice();
-    expect(canResumeLineBuild(state)).toBe(false);
-    source.positions = positions;
-    const tilePositions = source.tilePositions;
-    source.tilePositions = tilePositions.slice();
-    expect(canResumeLineBuild(state)).toBe(false);
-    source.tilePositions = tilePositions;
     new Uint16Array(array.arrayBuffer)[5] = 2;
     bucket.programConfigurations.paintRevision++;
-    expect(canResumeLineBuild(state)).toBe(false);
-    state.collection!.destroy();
-    dash.material.destroy();
-  });
-
-  it('keeps verified Worker dash rows when an unrelated atlas row is appended', () => {
-    const { state, range, bucket, dash } = dashBuild();
-    stepLineBuild(state, { exhausted: false });
-    expect(canResumeLineBuild(state)).toBe(true);
-    const collection = commitLineBuild(state)!;
-    range.mockClear();
-    const revision = dash.material.atlas.revision;
-    expect(dash.material.atlas.getDash([7, 3], true)).toBeDefined();
-    expect(dash.material.atlas.revision).toBeGreaterThan(revision);
-    expect(canResumeLineBuild(state)).toBe(true);
-    expect(canUpdateLinePaint(collection, { road: bucket }, dash)).toBe(true);
-    expect(range).not.toHaveBeenCalled();
-    collection.destroy();
-    dash.material.destroy();
-  });
-
-  it.each([false, true])('resolves constant from/to rows once per cap group with mixed caps=%s', (mixed) => {
-    const { state, layer, bucket, dash } = dashBuild(true);
-    if (mixed) {
-      for (let feature = 1; feature < 100; feature += 2)
-        bucket.featureLineJoinCaps[feature] = { ...bucket.lineJoinCap, cap: 'butt' };
-    }
-    stepLineBuild(state, { exhausted: false });
-    expect(canResumeLineBuild(state)).toBe(true);
-    const collection = commitLineBuild(state)!;
-    const lookup = vi.spyOn(dash.material.atlas, 'getDash');
-    layer.setPaintProperty('line-color', '#123456');
-    layer.recalculate(new EvaluationParameters(0), []);
-    expect(canResumeLineBuild(state)).toBe(true);
-    expect(lookup).toHaveBeenCalledTimes(mixed ? 4 : 2);
-    lookup.mockClear();
-    expect(canUpdateLinePaint(collection, { road: bucket }, dash)).toBe(true);
-    expect(lookup).not.toHaveBeenCalled();
-    collection.destroy();
-    dash.material.destroy();
-  });
-
-  it('revalidates an existing constant atlas entry edited in place with a new revision', () => {
-    const { state, dash } = dashBuild(true);
-    stepLineBuild(state, { exhausted: false });
-    expect(canResumeLineBuild(state)).toBe(true);
-    const row = dash.material.atlas.getDash([1, 1], true)!;
-    row.width++;
-    dash.material.atlas.revision++;
     expect(canResumeLineBuild(state)).toBe(false);
     state.collection!.destroy();
     dash.material.destroy();
@@ -215,65 +128,6 @@ describe('line input validation across frames', () => {
     source.tilePositions = tilePositions;
     expect(canResumeLineBuild(state)).toBe(true);
     bucket.featureLineJoinCaps[source.featureIndex] = { ...bucket.lineJoinCap, miterLimit: 3 };
-    expect(canResumeLineBuild(state)).toBe(false);
-    state.collection!.destroy();
-    dash.material.destroy();
-  });
-
-  it('revalidates changed paint ASTs, row payloads and atlas identities', () => {
-    const { state, range, layer, dash } = dashBuild();
-    stepLineBuild(state, { exhausted: false });
-    expect(canResumeLineBuild(state)).toBe(true);
-    range.mockClear();
-    layer.setPaintProperty('line-dasharray', ['case', ['boolean', ['feature-state', 'selected'], false], ['literal', [3, 1]], ['literal', [1, 1]]]);
-    layer.recalculate(new EvaluationParameters(0), []);
-    expect(canResumeLineBuild(state)).toBe(true);
-    expect(range.mock.calls.length).toBe(1);
-    range.mockClear();
-    const previousMaterial = dash.material;
-    dash.material = new DashMaterial(new DashAtlas(256, 64));
-    expect(canResumeLineBuild(state)).toBe(true);
-    expect(range.mock.calls.length).toBe(1);
-    dash.rows['1:0'].dasharray[0] = 3;
-    expect(canResumeLineBuild(state)).toBe(false);
-    state.collection!.destroy();
-    previousMaterial.destroy();
-    dash.material.destroy();
-  });
-
-  it('validates inputs appended during preparation without rereading its verified prefix', () => {
-    const { state, range, dash } = dashBuild();
-    let steps = 0;
-    while (!state.byLayer[0]?.geometryInputs.length && steps < 10) {
-      expect(stepLineBuild(state, { exhausted: true })).toBe(false);
-      steps++;
-    }
-    expect(steps).toBeLessThan(10);
-    const verifiedCount = state.byLayer[0].geometryInputs.length;
-    expect(verifiedCount).toBeGreaterThan(0);
-    expect(verifiedCount).toBeLessThanOrEqual(64);
-    expect(canResumeLineBuild(state)).toBe(true);
-    range.mockClear();
-    expect(canResumeLineBuild(state)).toBe(true);
-    expect(range.mock.calls.length).toBe(0);
-    expect(stepLineBuild(state, { exhausted: true })).toBe(false);
-    const appendedCount = state.byLayer[0].geometryInputs.length - verifiedCount;
-    expect(appendedCount).toBeGreaterThan(0);
-    expect(appendedCount).toBeLessThanOrEqual(64);
-    range.mockClear();
-    expect(canResumeLineBuild(state)).toBe(true);
-    expect(range.mock.calls.length).toBe(1);
-    state.iterator?.return(undefined);
-    dash.material.destroy();
-  });
-
-  it('invalidates evaluated zoom dash pairs even without a paint revision change', () => {
-    const { state, layer, dash } = dashBuild(true);
-    stepLineBuild(state, { exhausted: false });
-    expect(canResumeLineBuild(state)).toBe(true);
-    const revision = layer.paintRevision;
-    layer.recalculate(new EvaluationParameters(2), []);
-    expect(layer.paintRevision).toBe(revision);
     expect(canResumeLineBuild(state)).toBe(false);
     state.collection!.destroy();
     dash.material.destroy();

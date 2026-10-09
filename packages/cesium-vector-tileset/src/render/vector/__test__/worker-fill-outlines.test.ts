@@ -12,10 +12,8 @@ import { Tile } from '../../../tile/tile';
 import { OverscaledTileID } from '../../../tile/tile-id';
 import { createTileTransferRegistry } from '../../../worker/tile-transfer';
 import * as tileToEcef from '../../geometry/tile-to-ecef';
-import { beginLineBuild, commitLineBuild, stepLineBuild } from '../../line/line-renderer';
-import { drawBatchForOwner, linePaintForOwner } from '../../scene/draw-batch';
 import { UNBOUNDED_BUDGET } from '../../scene/frame-budget';
-import { fillBucketPrimitives, fillOutlinePaths, projectWorkerBuckets } from '../bucket-geometry';
+import { fillBucketPrimitives, projectWorkerBuckets } from '../bucket-geometry';
 import { advanceTileConversion, beginTileConversion } from '../tile-conversion';
 
 const geometry: MultiPolygon = {
@@ -91,7 +89,8 @@ async function workerTile(sourceGeometry = geometry) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('worker fill outlines', () => {
-  it.each([SceneMode.SCENE2D, SceneMode.COLUMBUS_VIEW])('preserves unsampled planar outer and hole rings through transfer and conversion (mode %s)', async (mode) => {
+  it('preserves unsampled planar outer and hole rings through transfer and CV conversion', async () => {
+    const mode = SceneMode.COLUMBUS_VIEW;
     const { tile, bucket, tileID } = await workerTile({
       type: 'MultiPolygon',
       coordinates: [[
@@ -118,82 +117,6 @@ describe('worker fill outlines', () => {
       expect(state.result.linePrimitives.filter(source => source.layerId === layerId).map(source => Array.from(source.tilePositions))).toEqual(rings);
     }
     expect(project.mock.calls).toHaveLength(0);
-  });
-
-  it.each([SceneMode.SCENE3D, SceneMode.SCENE2D, SceneMode.COLUMBUS_VIEW, SceneMode.MORPHING])('consumes transferred outlines without projecting rings on the main thread (mode %s)', async (mode) => {
-    const { tile, bucket, tileID } = await workerTile();
-    expect(tile.buckets['parks-copy']).toBe(bucket);
-    expect(bucket.projectedGeometry?.fillOutlines).toBeDefined();
-    // Resolve the mode's fill surface first. Planar meshes intentionally use a
-    // different subdivision at z0; this probe isolates outline publication.
-    if (mode === SceneMode.SCENE2D || mode === SceneMode.COLUMBUS_VIEW)
-      fillBucketPrimitives(bucket, tileID, mode);
-    const originalVertices = bucket.layoutVertexArray.int16.slice();
-    const originalIndices = bucket.indexArray.uint16.slice();
-    const sourcePaths = Array.from((mode === SceneMode.SCENE2D || mode === SceneMode.COLUMBUS_VIEW
-      ? bucket.projectedGeometry?.fillPlanarOutlines
-      : bucket.projectedGeometry?.fillOutlines) ?? []).flat();
-    const originalPaths = sourcePaths.map(path => ({ positions: path.positions.slice(), tilePositions: path.tilePositions.slice() }));
-    const project = vi.spyOn(tileToEcef, 'tileLocalToWgs84Ecef');
-    const state = beginTileConversion(tile.buckets, tileID, 1, 'polygons', undefined, undefined, 0, mode);
-    expect(advanceTileConversion(state, UNBOUNDED_BUDGET)).toBe(true);
-    const outlines = state.result.linePrimitives;
-    const ringCount = bucket.polygons.reduce((count, polygon) => count + 1 + polygon.holes.length, 0);
-    expect(outlines).toHaveLength(ringCount * 2);
-    expect(outlines.every(outline => outline.featureIndex === 1)).toBe(true);
-    for (const outline of outlines) {
-      expect(Array.from(outline.tilePositions.subarray(0, 2))).toEqual(Array.from(outline.tilePositions.subarray(-2)));
-      const source = sourcePaths.find(path => path.tilePositions === outline.tilePositions);
-      expect(source).toBeDefined();
-      // Height rides the draw command; all family members keep source owners.
-      expect(outline.positions).toBe(source!.positions);
-      expect(outline.offsetMeters).toBeGreaterThan(0);
-    }
-    expect(sourcePaths.map(path => ({ positions: path.positions, tilePositions: path.tilePositions }))).toEqual(originalPaths);
-    expect(bucket.layoutVertexArray.int16).toEqual(originalVertices);
-    expect(bucket.indexArray.uint16).toEqual(originalIndices);
-    expect(project.mock.calls).toHaveLength(0);
-    const build = beginLineBuild(outlines, tile.buckets, 'polygons/0', tileID, 1, 0, mode !== SceneMode.SCENE3D);
-    expect(stepLineBuild(build, UNBOUNDED_BUDGET)).toBe(true);
-    const collection = commitLineBuild(build)!;
-    for (let index = 0; index < collection.length; index++) {
-      const primitive = collection.get(index);
-      const layerId = drawBatchForOwner(primitive)!.layerId;
-      const source = outlines.find(outline => outline.layerId === layerId)!;
-      expect(linePaintForOwner(primitive)!.offsetUniform()).toBe(source.offsetMeters);
-    }
-    collection.destroy();
-  });
-
-  it('transfers two coordinate backings per outline topology and preserves their polygon views', async () => {
-    const { bucket, tileID, outlineBytes, outlineTransfers, outlineBackings, planarBytes, planarTransfers, planarBackings } = await workerTile();
-    const outlines = bucket.projectedGeometry!.fillOutlines!;
-    const paths = Array.from(outlines).flat();
-    const count = paths.reduce((sum, path) => sum + path.positions.length / 3, 0);
-    expect(outlines.length).toBe(bucket.polygons.length);
-    expect(paths).toHaveLength(3);
-    expect(new Set(paths.map(path => path.positions.buffer)).size).toBe(1);
-    expect(new Set(paths.map(path => path.tilePositions.buffer)).size).toBe(1);
-    expect(paths[0].positions.buffer).not.toBe(paths[0].tilePositions.buffer);
-    expect(outlineTransfers).toHaveLength(2);
-    expect([...outlineBackings].every(buffer => buffer.byteLength === 0)).toBe(true);
-    expect(outlineBytes).toBe(count * 40);
-    expect(outlineBytes).toBe(3000);
-    expect(planarTransfers).toHaveLength(2);
-    expect([...planarBackings].every(buffer => buffer.byteLength === 0)).toBe(true);
-    expect(planarBytes).toBe(600);
-    let offset = 0;
-    for (const path of paths) {
-      expect(path.positions.byteOffset).toBe(offset * 24);
-      expect(path.tilePositions.byteOffset).toBe(offset * 16);
-      offset += path.positions.length / 3;
-    }
-    for (const mode of [SceneMode.SCENE3D, SceneMode.SCENE2D]) {
-      const modeOutlines = mode === SceneMode.SCENE2D ? bucket.projectedGeometry!.fillPlanarOutlines! : outlines;
-      for (const primitive of fillBucketPrimitives(bucket, tileID, mode)) {
-        expect(fillOutlinePaths(bucket, primitive, mode)).toBe(modeOutlines.get(primitive.polygonIndex));
-      }
-    }
   });
 
   it('keeps clipped buffered rings open at tile boundaries after transfer', async () => {

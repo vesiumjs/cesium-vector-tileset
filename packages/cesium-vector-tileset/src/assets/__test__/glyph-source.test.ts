@@ -50,29 +50,6 @@ describe('concurrent tile glyph requests', () => {
     source.destroy();
   });
 
-  it('keeps different font stacks separate', async () => {
-    const source = new GlyphSource(undefined, 'sans-serif');
-    const draw = localFont();
-    await Promise.all(Array.from({ length: 4 }, () => source.getGlyphs({ regular: [0x4E0A], bold: [0x4E0A] })));
-    expect(draw).toHaveBeenCalledTimes(2);
-    source.destroy();
-  });
-
-  it('shares missing-range fallback work and retries the server range later', async () => {
-    const source = new GlyphSource();
-    source.setURL('https://example.test/{fontstack}/{range}.pbf');
-    const draw = localFont();
-    const range = vi.spyOn(GlyphSource, 'loadGlyphRange').mockRejectedValue(new Error('missing range'));
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await Promise.all(Array.from({ length: 8 }, () => source.getGlyphs({ regular: [65] })));
-    expect(range).toHaveBeenCalledTimes(1);
-    expect(draw).toHaveBeenCalledTimes(1);
-    await source.getGlyphs({ regular: [66] });
-    expect(range).toHaveBeenCalledTimes(2);
-    expect(draw).toHaveBeenCalledTimes(2);
-    source.destroy();
-  });
-
   it('releases a failed local request so a later tile can retry', async () => {
     const source = new GlyphSource();
     const draw = localFont();

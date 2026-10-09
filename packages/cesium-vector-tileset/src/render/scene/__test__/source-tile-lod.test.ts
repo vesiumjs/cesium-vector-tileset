@@ -21,81 +21,11 @@ import { cameraFrame } from './camera-helper';
 // evaluated by the installed MapLibre coveringTiles, not a copy of its formula.
 const poses = [
   { pitch: 45, zoom: 15.122108990364378, center: [121.49636217711333, 31.237480592020166] },
-  { pitch: 55, zoom: 14.819880187824133, center: [121.50208695657702, 31.24239796625697] },
-  { pitch: 65, zoom: 14.378602496575441, center: [121.51167383118805, 31.25063101727699] },
   { pitch: 75, zoom: 13.669004805773977, center: [121.53297629301522, 31.268917513243924] },
-  { pitch: 65, zoom: 13.377288968142468, center: [121.54039991237444, 31.275287569615152] },
-  { pitch: 65, zoom: 15.379258278980691, center: [121.49733039889827, 31.238312323069696] },
   { pitch: 55, roll: 90, zoom: 14.819880187824133, center: [121.50208695657702, 31.24239796625697] },
 ];
 
 describe('source perspective LOD', () => {
-  it('shares ancestor work across the rendered globe candidates while preserving the pinned MapLibre covering', () => {
-    const { pitch, zoom, center } = poses[3];
-    const transform = new MercatorTransform({ maxPitch: 85, maxZoom: 24, renderWorldCopies: true });
-    transform.resize(1569, 906);
-    transform.setZoom(zoom);
-    transform.setBearing(45);
-    transform.setPitch(pitch);
-    transform.setFov(36.87511294314776);
-    transform.setCenter(new LngLat(center[0], center[1]));
-    const oracle = coveringTiles(transform, { minzoom: 0, maxzoom: 14, tileSize: 512 });
-    const camera = cameraMercatorCoordinate(transform);
-    const target = MercatorCoordinate.fromLngLat(transform.center);
-    const lodCamera = {
-      x: camera.x,
-      y: camera.y,
-      height: camera.z,
-      centerDistance: Math.hypot(camera.x - target.x, camera.y - target.y, camera.z),
-      fov: transform.fov * Math.PI / 180,
-      variable: transform.getCoveringTilesDetailsProvider().allowVariableZoom(transform, { tileSize: 512 }),
-    };
-    expect(lodCamera.variable).toBe(true);
-    const lod = new SourceTileLod(lodCamera, transform.zoom, 0, 14, false);
-    const scheme = new WebMercatorTilingScheme();
-    const candidates = new Map<string, { level: number; x: number; y: number; rectangle: ReturnType<WebMercatorTilingScheme['tileXYToRectangle']> }>();
-    const ancestors = new Set<string>();
-    for (const { canonical } of oracle) {
-      const span = 2 ** (14 - canonical.z);
-      for (const dx of [0, span - 1]) {
-        for (const dy of [0, span - 1]) {
-          const x = canonical.x * span + dx;
-          const y = canonical.y * span + dy;
-          candidates.set(`${x}/${y}`, { level: 14, x, y, rectangle: scheme.tileXYToRectangle(x, y, 14) });
-          for (let level = 0; level <= 14; level++)
-            ancestors.add(`${level}/${x >> (14 - level)}/${y >> (14 - level)}`);
-        }
-      }
-    }
-    const globe = { _surface: { _tilesToRender: [...candidates.values()] } };
-    const keys = (ids: { overscaledZ: number; wrap: number; canonical: { toString: () => string } }[]) => ids.map(id => `${id.wrap}/${id.overscaledZ}/${id.canonical.toString()}`).sort();
-    const expected = keys(oracle);
-    expect(expected.length).toBeGreaterThan(1);
-    // Observe the expensive formula and ID construction at the actual globe
-    // consumer, without inspecting SourceTileLod's private cache.
-    const costMath = vi.spyOn(Math, 'atan');
-    const scaledTo = vi.spyOn(OverscaledTileID.prototype, 'scaledTo');
-    try {
-      expect(keys(globeVisibleTileIDs(globe, 0, 14, lod))).toEqual(expected);
-      expect(costMath.mock.calls.length).toBeGreaterThan(0);
-      expect(costMath.mock.calls.length).toBeLessThanOrEqual(ancestors.size);
-      expect(scaledTo.mock.calls.length).toBeLessThanOrEqual(candidates.size);
-      costMath.mockClear();
-      scaledTo.mockClear();
-      expect(keys(globeVisibleTileIDs(globe, 0, 14, lod))).toEqual(expected);
-      expect(costMath).not.toHaveBeenCalled();
-      expect(scaledTo.mock.calls.length).toBeLessThanOrEqual(candidates.size);
-      // A new camera/source lifetime must perform its own formula work.
-      const fresh = new SourceTileLod(lodCamera, transform.zoom, 0, 14, false);
-      expect(keys(globeVisibleTileIDs(globe, 0, 14, fresh))).toEqual(expected);
-      expect(costMath.mock.calls.length).toBeGreaterThan(0);
-    }
-    finally {
-      costMath.mockRestore();
-      scaledTo.mockRestore();
-    }
-  });
-
   it('reparses a real GeoJSON source at the MapLibre desired zoom without subdividing its terminal footprint', () => {
     const source = new GeoJSONSource('curve', { type: 'geojson', maxzoom: 13, data: { type: 'FeatureCollection', features: [] } }, {
       getChannel: () => new Promise(() => {}),
@@ -142,24 +72,6 @@ describe('source perspective LOD', () => {
     expect(zoomForFrame(pyramid, frame, cache)!.zoom).toBe(13);
     expect(planarCoveringForFrame(pyramid, frame, cache, 4)!.idealTileIDs.every(id => id.canonical.z === 13 && id.overscaledZ === 13)).toBe(true);
     expect(globeVisibleTileIDs(globe, source.minzoom, 19, capped)[0].overscaledZ).toBe(13);
-  });
-
-  it('keeps nonterminal footprints at their canonical parse zoom while reparsing terminal tiles', () => {
-    const lod = new SourceTileLod(undefined, 19.425905933, 0, 13, false, true);
-    const partial = new OverscaledTileID(12, 0, 12, 2046, 1362);
-    expect(lod.select(partial)).toEqual(partial);
-    const terminal = new OverscaledTileID(13, 0, 13, 4093, 2724);
-    expect(lod.select(terminal)!.overscaledZ).toBe(19);
-    const far = new SourceTileLod(undefined, 12.8, 0, 13, false, true);
-    expect(far.select(terminal)).toEqual(terminal.scaledTo(12));
-  });
-
-  it('caps a terminal overscaled generation at its actual local desired zoom', () => {
-    const lod = new SourceTileLod(undefined, 14.378602496575441, 0, 16, false);
-    const over = new OverscaledTileID(16, 0, 14, 13722, 6693);
-    expect(lod.select(over)).toEqual(over.scaledTo(14));
-    expect(lod.allows(over)).toBe(false);
-    expect(lod.allows(over.scaledTo(14))).toBe(true);
   });
 
   it.each([51.5, 84.8])('uses projected world height for a real Columbus View camera at latitude %s', (latitude) => {

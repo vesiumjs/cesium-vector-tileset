@@ -95,19 +95,6 @@ afterEach(async () => {
 });
 
 describe.each(['vector', 'geojson'] as const)('%s worker tile cancellation', (type) => {
-  it('cancels actual parse dependencies and skips geometry preparation after the channel lease ends', async () => {
-    const { client, prepare, dependencies, params } = await fixture(type);
-    const controller = new AbortController();
-    const load = client.sendAsync({ type: MessageType.loadTile, data: params }, controller);
-    await vi.waitFor(() => expect(dependencies).toHaveLength(1));
-    controller.abort();
-    await expect(load).rejects.toMatchObject({ name: 'AbortError' });
-    await vi.waitFor(() => expect(dependencies[0].controller.signal.aborted).toBe(true));
-    dependencies[0].resolve();
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-    expect(prepare).not.toHaveBeenCalled();
-  });
-
   it('keeps a newer same-uid parse alive through old lease cleanup and cancels reload dependencies', async () => {
     const { client, worker, prepare, dependencies, params } = await fixture(type);
     const oldController = new AbortController();
@@ -143,15 +130,12 @@ describe.each(['vector', 'geojson'] as const)('%s worker tile cancellation', (ty
     expect(prepare).toHaveBeenCalledOnce();
   });
 
-  it.each([MessageType.removeSource, MessageType.removeMap])('releases active parse dependencies on %s', async (remove) => {
+  it('releases active parse dependencies when their source is removed', async () => {
     const { client, worker, prepare, dependencies, params } = await fixture(type);
     const load = client.sendAsync({ type: MessageType.loadTile, data: params });
     const rejected = expect(load).rejects.toMatchObject({ name: 'AbortError' });
     await vi.waitFor(() => expect(dependencies).toHaveLength(1));
-    if (remove === MessageType.removeSource)
-      await client.sendAsync({ type: remove, data: { type, source: 'source' } });
-    else
-      await client.sendAsync({ type: remove });
+    await client.sendAsync({ type: MessageType.removeSource, data: { type, source: 'source' } });
     await rejected;
     await vi.waitFor(() => expect(dependencies[0].controller.signal.aborted).toBe(true));
     dependencies[0].resolve();

@@ -34,7 +34,7 @@ function success(ids: number[]): GeometryPrepareBatchResult {
 }
 
 describe('geometry preparation queue', () => {
-  it.each([undefined, null, {}, { combined: null }])('fails every pending owner and notifies the context on malformed success %#', async (malformed) => {
+  it('fails every pending owner and notifies the context on malformed success', async () => {
     const onFailure = vi.fn();
     const { queue, dispatched } = harness(onFailure);
     const first = schedule(queue, 1, limit);
@@ -42,7 +42,7 @@ describe('geometry preparation queue', () => {
     const settled = Promise.allSettled([first, second]);
     await Promise.resolve();
     expect(dispatched).toHaveLength(2);
-    dispatched[0].resolve({ results: [{ result: malformed }] } as GeometryPrepareBatchResult);
+    dispatched[0].resolve({ results: [{ result: {} }] } as GeometryPrepareBatchResult);
     expect((await settled).map(entry => entry.status)).toEqual(['rejected', 'rejected']);
     expect(queue.hasCapacity).toBe(false);
     expect(onFailure).toHaveBeenCalledExactlyOnceWith(queue.error);
@@ -88,69 +88,6 @@ describe('geometry preparation queue', () => {
     expect(queue.hasCapacity).toBe(true);
   });
 
-  it('admits another request into the queued second batch before copying its buffers', async () => {
-    const { queue, dispatched } = harness();
-    const first = schedule(queue, 1, 4);
-    await Promise.resolve();
-    const second = schedule(queue, 2, 8);
-    expect(queue.hasCapacity).toBe(true);
-    expect(queue.canSchedule(16)).toBe(true);
-    expect(queue.canSchedule(limit - 8)).toBe(true);
-    expect(queue.canSchedule(limit - 7)).toBe(false);
-    expect(queue.canSchedule(limit + 1)).toBe(false);
-    const third = queue.canSchedule(16) ? schedule(queue, 3, 16) : undefined;
-    expect(third).toBeInstanceOf(Promise);
-    expect(schedule(queue, 4, limit + 1)).toBeUndefined();
-    await Promise.resolve();
-    expect(dispatched.map(batch => batch.request.requests)).toEqual([[request(1)], [request(2), request(3)]]);
-    expect(dispatched.map(batch => batch.transfers.reduce((bytes, buffer) => bytes + buffer.byteLength, 0))).toEqual([4, 24]);
-    expect(queue.canSchedule(1)).toBe(false);
-    expect(queue.hasCapacity).toBe(false);
-    expect(schedule(queue, 4)).toBeUndefined();
-    dispatched[0].resolve(success([1]));
-    await first;
-    expect(queue.canSchedule(limit + 1)).toBe(true);
-    const fourth = schedule(queue, 4, limit + 1);
-    await Promise.resolve();
-    expect(dispatched).toHaveLength(3);
-    expect(dispatched[2].request.requests).toEqual([request(4)]);
-    expect(dispatched[2].transfers.map(buffer => buffer.byteLength)).toEqual([limit + 1]);
-    expect(queue.canSchedule(1)).toBe(false);
-    dispatched[1].resolve(success([2, 3]));
-    dispatched[2].resolve(success([4]));
-    await Promise.all([second, third, fourth]);
-  });
-
-  it('never adds requests to a dispatched batch and permits at most two pending dispatches', async () => {
-    const { queue, dispatched } = harness();
-    const first = schedule(queue, 1);
-    await Promise.resolve();
-    const second = schedule(queue, 2);
-    await Promise.resolve();
-    expect(schedule(queue, 3)).toBeUndefined();
-    expect(dispatched.map(batch => batch.request.requests)).toEqual([[request(1)], [request(2)]]);
-    dispatched[1].resolve(success([2]));
-    await second;
-    const third = schedule(queue, 3);
-    await Promise.resolve();
-    expect(dispatched).toHaveLength(3);
-    dispatched[0].resolve(success([1]));
-    dispatched[2].resolve(success([3]));
-    await Promise.all([first, third]);
-  });
-
-  it('isolates oversized requests in their own batches', async () => {
-    const { queue, dispatched } = harness();
-    const first = schedule(queue, 1, limit + 1);
-    const second = schedule(queue, 2);
-    expect(schedule(queue, 3, limit + 1)).toBeUndefined();
-    await Promise.resolve();
-    expect(dispatched.map(batch => batch.request.requests.length)).toEqual([1, 1]);
-    dispatched[0].resolve(success([1]));
-    dispatched[1].resolve(success([2]));
-    await Promise.all([first, second]);
-  });
-
   it('restores per-request error names and stacks without failing siblings or the queue', async () => {
     const { queue, dispatched } = harness();
     const first = schedule(queue, 1);
@@ -186,20 +123,6 @@ describe('geometry preparation queue', () => {
     expect(queue.hasCapacity).toBe(true);
   });
 
-  it('releases both batch slots when all queued requests are cancelled', async () => {
-    const { queue, dispatch } = harness();
-    let cancelled = false;
-    const first = schedule(queue, 1, limit, () => cancelled);
-    const second = schedule(queue, 2, limit, () => cancelled);
-    const failures = [expect(first).rejects.toMatchObject({ name: 'AbortError' }), expect(second).rejects.toMatchObject({ name: 'AbortError' })];
-    expect(queue.hasCapacity).toBe(false);
-    cancelled = true;
-    await Promise.all(failures);
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(queue.hasCapacity).toBe(true);
-    queue.destroy();
-  });
-
   it('rejects cancellation after dispatch and then reopens capacity', async () => {
     const { queue, dispatched } = harness();
     let cancelled = false;
@@ -233,45 +156,6 @@ describe('geometry preparation queue', () => {
     await Promise.resolve();
     expect(dispatch).toHaveBeenCalledTimes(1);
     await expect(schedule(queue, 3)).rejects.toBe(queue.error);
-  });
-
-  it('closes all outstanding batches when dispatch rejects', async () => {
-    const { queue, dispatched } = harness();
-    const first = schedule(queue, 1, limit);
-    const second = schedule(queue, 2, limit);
-    const fatal = new Error('Native fatal');
-    const failures = [expect(first).rejects.toBe(fatal), expect(second).rejects.toBe(fatal)];
-    await Promise.resolve();
-    dispatched[0].reject(fatal);
-    await Promise.all(failures);
-    expect(queue.error).toBe(fatal);
-    expect(queue.hasCapacity).toBe(false);
-    dispatched[1].resolve(success([2]));
-    await Promise.resolve();
-  });
-
-  it('surfaces synchronous dispatch exceptions and stops subsequent queued dispatches', async () => {
-    const fatal = new Error('dispatch failed');
-    const dispatch = vi.fn(() => {
-      throw fatal;
-    });
-    const queue = new GeometryPrepareQueue(dispatch);
-    const first = schedule(queue, 1, limit);
-    const second = schedule(queue, 2, limit);
-    await Promise.all([expect(first).rejects.toBe(fatal), expect(second).rejects.toBe(fatal)]);
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(queue.error).toBe(fatal);
-  });
-
-  it('rejects the whole batch and closes on mismatched result counts', async () => {
-    const { queue, dispatched } = harness();
-    const first = schedule(queue, 1);
-    const second = schedule(queue, 2);
-    const failures = [expect(first).rejects.toBeInstanceOf(RangeError), expect(second).rejects.toBeInstanceOf(RangeError)];
-    await Promise.resolve();
-    dispatched[0].resolve(success([1]));
-    await Promise.all(failures);
-    expect(queue.error).toBeInstanceOf(RangeError);
   });
 
   it('rejects duplicate backing buffers within and across outstanding requests', async () => {

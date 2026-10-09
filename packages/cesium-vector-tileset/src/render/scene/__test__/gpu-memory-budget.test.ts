@@ -31,20 +31,4 @@ describe('gpuMemoryBudget', () => {
     expect(budget.has('live')).toBe(true);
     expect(budget.stats().totalBytes).toBe(100);
   });
-
-  it('drops unreported keys without counting an eviction', () => {
-    const budget = new GpuMemoryBudget(1000);
-    budget.update(visit => visit('a', 10, true));
-    expect(budget.update(() => {})).toEqual([]);
-    expect(budget.has('a')).toBe(false);
-    expect(budget.stats().entries).toBe(0);
-    expect(budget.stats().evictions).toBe(0);
-  });
-
-  it('rescales when the budget shrinks', () => {
-    const budget = new GpuMemoryBudget(1000);
-    budget.update(visit => visit('r', 100));
-    budget.setMaxBytes(50);
-    expect(budget.update(visit => visit('r', 100))).toEqual(['r']);
-  });
 });

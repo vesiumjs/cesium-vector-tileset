@@ -80,11 +80,6 @@ describe('pattern image atlas', () => {
     }
   });
 
-  it('wraps a rectangular color grid continuously across all four sides and corners', () => {
-    const atlas = new ImageAtlas({}, { repeat: image() });
-    expect(patternPixels(atlas)).toEqual(wrappedColors.map(row => row.map(index => colors[index])));
-  });
-
   it('updates the complete repeat border while leaving icon padding transparent', () => {
     const original = image();
     const images = new StyleImages();

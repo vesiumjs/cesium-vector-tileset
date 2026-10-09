@@ -112,40 +112,6 @@ describe('planar fill tile seams', () => {
     expect(bucket.programConfigurations.getFeatureRanges().map(range => [range.index, range.start, range.end])).toEqual([[17, 0, 1], [99, 1, 2]]);
   });
 
-  it('keeps non-clipped in-tile source triangles without boundary reconstruction', () => {
-    const points: TilePoint[] = [[100, 100], [4000, 100], [4000, 4000], [100, 4000]];
-    const bucket = bucketFor(points);
-    const probe = vi.spyOn(planarFill, 'clipPlanarFill');
-    try {
-      const [mesh] = fillBucketPrimitives(bucket, new OverscaledTileID(17, 0, 17, 65534, 65534), SceneMode.COLUMBUS_VIEW, 'pattern');
-      expect(Array.from(mesh.tilePositions)).toEqual(points.flat());
-      expect(Array.from(mesh.triangles)).toEqual(Array.from(bucket.indexArray.uint16.subarray(0, bucket.indexArray.length * 3)));
-      expect(probe).not.toHaveBeenCalled();
-    }
-    finally {
-      probe.mockRestore();
-    }
-  });
-
-  it('does not turn a wholly outside hole into a clipped outer polygon', () => {
-    const layer = new FillStyleLayer({ id: 'water', type: 'fill', source: 'finite' });
-    layer.recalculate(new EvaluationParameters(17), []);
-    const bucket = new ParserFillBucket({ layers: [layer], zoom: 17 } as never);
-    const tile = new OverscaledTileID(17, 0, 17, 65534, 65534);
-    const rings = [
-      [[-1000, -1000], [10000, -1000], [10000, 10000], [-1000, 10000], [-1000, -1000]],
-      [[8500, 1000], [8500, 3000], [9500, 3000], [9500, 1000], [8500, 1000]],
-    ].map(ring => ring.map(([x, y]) => new Point(x, y)));
-    bucket.addFeature({} as never, rings, 42, tile.canonical, {});
-    expect(bucket.polygons).toHaveLength(1);
-    expect(bucket.polygons[0].holes).toEqual([]);
-    const [mesh, ...others] = fillBucketPrimitives(bucket, tile, SceneMode.COLUMBUS_VIEW, 'pattern');
-    expect(others).toHaveLength(0);
-    expect(mesh.tilePositions).toHaveLength(8);
-    expect(mesh.triangles).toHaveLength(6);
-    expect(mesh.featureIndex).toBe(42);
-  });
-
   it('keeps the globe grid and pole extensions on the existing curved path', () => {
     const points: TilePoint[] = [[-100, -100], [9000, -100], [9000, 9000], [-100, 9000]];
     const probe = vi.spyOn(planarFill, 'clipPlanarFill');

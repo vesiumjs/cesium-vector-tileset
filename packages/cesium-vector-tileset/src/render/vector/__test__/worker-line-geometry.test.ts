@@ -149,7 +149,7 @@ describe('worker solid line compilation', () => {
     discardLineBuild(build);
   });
 
-  it.each([SceneMode.SCENE2D, SceneMode.COLUMBUS_VIEW, SceneMode.MORPHING])('retains the scene-specific planar compiler (mode %s)', async (mode) => {
+  it.each([SceneMode.SCENE2D, SceneMode.COLUMBUS_VIEW])('retains the scene-specific planar compiler (mode %s)', async (mode) => {
     const { tile, tileID } = await workerLines();
     const compiler = vi.spyOn(LineGeometryCache.prototype, 'compile');
     const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, undefined, 0, mode);

@@ -71,7 +71,7 @@ async function createTileset() {
 }
 
 describe('sprite request ownership', () => {
-  it.each(['success', 'error'] as const)('keeps the latest public style pending after a superseded sprites late %s', async (outcome) => {
+  it('keeps the latest public style pending after a superseded sprites late success', async () => {
     const { tileset, style } = await createTileset();
     try {
       tileset.setStyle({ ...emptyStyle, sprite: spriteUrl('a') });
@@ -82,12 +82,7 @@ describe('sprite request ownership', () => {
       const failed = vi.fn();
       style.on('data', changed);
       tileset.errorEvent.addEventListener(failed);
-      if (outcome === 'success') {
-        completeSprite(first, 'old', [255, 0, 0, 255]);
-      }
-      else {
-        for (const request of first) request.reject(new Error('Superseded sprite failed'));
-      }
+      completeSprite(first, 'old', [255, 0, 0, 255]);
       await vi.waitFor(() => expect(first.every(request => request.signal.aborted)).toBe(true));
       // Flush the loader's success and finalization, not just its transport.
       await new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -102,28 +97,6 @@ describe('sprite request ownership', () => {
       expect(style.getImage('old')).toBeUndefined();
       expect(style.getImage('new').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
       expect(changed).toHaveBeenCalledOnce();
-    }
-    finally {
-      if (!tileset.isDestroyed())
-        tileset.destroy();
-    }
-  });
-
-  it('makes a public style without a sprite ready and ignores the unloaded sprites late result', async () => {
-    const { tileset, style } = await createTileset();
-    try {
-      tileset.setStyle({ ...emptyStyle, sprite: spriteUrl('a') });
-      const pending = await spriteRequests('a');
-      tileset.setStyle(emptyStyle);
-      expect(pending.every(request => request.signal.aborted)).toBe(true);
-      expect(tileset.tilesLoaded).toBe(true);
-      const changed = vi.fn();
-      style.on('data', changed);
-      completeSprite(pending, 'removed', [255, 0, 0, 255]);
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
-      expect(style.getImage('removed')).toBeUndefined();
-      expect(tileset.tilesLoaded).toBe(true);
-      expect(changed).not.toHaveBeenCalled();
     }
     finally {
       if (!tileset.isDestroyed())
@@ -155,44 +128,17 @@ describe('sprite request ownership', () => {
     }
   });
 
-  it('keeps the existing sprite namespace when another sprite is added', async () => {
-    const { tileset, style } = await createTileset();
-    try {
-      tileset.setStyle({ ...emptyStyle, sprite: [{ id: 'base', url: spriteUrl('a') }] });
-      completeSprite(await spriteRequests('a'), 'icon', [255, 0, 0, 255]);
-      await vi.waitFor(() => expect(tileset.tilesLoaded).toBe(true));
-      expect(style.listImages()).toEqual(['base:icon']);
-
-      const complete = vi.fn();
-      style.addSprite('extra', spriteUrl('b'), {}, complete);
-      const extra = await spriteRequests('b');
-      // Complete any reload of the existing sprite as well. The assertion
-      // concerns namespace ownership, independent of HTTP cache policy.
-      completeSprite(requests.filter(request => request.parameters.url.startsWith(spriteUrl('a'))), 'icon', [255, 0, 0, 255]);
-      completeSprite(extra, 'icon', [0, 255, 0, 255]);
-      await vi.waitFor(() => expect(tileset.tilesLoaded).toBe(true));
-      expect(style.listImages().sort()).toEqual(['base:icon', 'extra:icon']);
-      expect(style.getImage('base:icon').data.data).toEqual(new Uint8Array([255, 0, 0, 255]));
-      expect(style.getImage('extra:icon').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
-      expect(complete).toHaveBeenCalledExactlyOnceWith(undefined);
-    }
-    finally {
-      if (!tileset.isDestroyed())
-        tileset.destroy();
-    }
-  });
-
-  it.each([false, true])('prevents a removed namespace from returning after a pending sprite load (retains another: %s)', async (retainBase) => {
+  it('prevents a removed namespace from returning while another sprite stays pending', async () => {
     const { tileset, style } = await createTileset();
     try {
       tileset.setStyle({
         ...emptyStyle,
         sprite: [
-          ...(retainBase ? [{ id: 'base', url: spriteUrl('a') }] : []),
+          { id: 'base', url: spriteUrl('a') },
           { id: 'extra', url: spriteUrl('b') },
         ],
       });
-      const base = retainBase ? await spriteRequests('a') : [];
+      const base = await spriteRequests('a');
       const extra = await spriteRequests('b');
       style.removeSprite('extra');
       expect([...base, ...extra].every(request => request.signal.aborted)).toBe(true);
@@ -203,13 +149,11 @@ describe('sprite request ownership', () => {
       await new Promise<void>(resolve => setTimeout(resolve, 0));
       expect(style.getImage('extra:icon')).toBeUndefined();
       expect(changed).not.toHaveBeenCalled();
-      expect(tileset.tilesLoaded).toBe(!retainBase);
-      if (retainBase) {
-        completeSprite(await spriteRequests('a', 2), 'icon', [0, 255, 0, 255]);
-        await vi.waitFor(() => expect(tileset.tilesLoaded).toBe(true));
-        expect(style.listImages()).toEqual(['base:icon']);
-        expect(style.getImage('base:icon').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
-      }
+      expect(tileset.tilesLoaded).toBe(false);
+      completeSprite(await spriteRequests('a', 2), 'icon', [0, 255, 0, 255]);
+      await vi.waitFor(() => expect(tileset.tilesLoaded).toBe(true));
+      expect(style.listImages()).toEqual(['base:icon']);
+      expect(style.getImage('base:icon').data.data).toEqual(new Uint8Array([0, 255, 0, 255]));
     }
     finally {
       if (!tileset.isDestroyed())

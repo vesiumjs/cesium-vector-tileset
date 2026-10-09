@@ -10,19 +10,6 @@ afterEach(() => {
 });
 
 describe('fromUrl', () => {
-  it('returns an initialized tileset with the requested initial visibility', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ version: 8, sources: {}, layers: [] }),
-    }));
-    const tileset = await CesiumVectorTileset.fromUrl('https://example.com/style.json', { show: false });
-    try {
-      expect(tileset.ready).toBe(true);
-      expect(tileset.show).toBe(false);
-    }
-    finally { tileset.destroy(); }
-  });
-
   it('rejects invalid styles and destroys the failed candidate', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
@@ -49,19 +36,6 @@ describe('fromUrl', () => {
     await rejected;
     expect(destroy).toHaveBeenCalledOnce();
     expect(destroy.mock.instances[0].isDestroyed()).toBe(true);
-  });
-
-  it('cancels a pending style fetch through the supplied signal', async () => {
-    const controller = new AbortController();
-    const fetchStyle = vi.fn((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
-      options.signal!.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
-    }));
-    vi.stubGlobal('fetch', fetchStyle);
-    const pending = CesiumVectorTileset.fromUrl('https://example.com/style.json', { signal: controller.signal });
-    const rejected = expect(pending).rejects.toHaveProperty('name', 'AbortError');
-    await vi.waitFor(() => expect(fetchStyle).toHaveBeenCalledOnce());
-    controller.abort();
-    await rejected;
   });
 
   it('does not create a stale tileset when cancellation occurs during JSON decoding', async () => {

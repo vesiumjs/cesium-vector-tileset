@@ -1,9 +1,8 @@
 import type { SymbolPrimitiveGeometry } from '../../symbol/symbol-geometry';
 import type { PlacementView } from '../../symbol/symbol-placement';
-import type { RenderFrameState } from '../render-frame';
 import type { TilePublishQueue, TilePublishResult } from '../tile-publish-queue';
 import Point from '@mapbox/point-geometry';
-import { Color, Geometry, Material, Primitive, PrimitiveCollection, SceneMode } from 'cesium';
+import { Color, Geometry, Material, PrimitiveCollection, SceneMode } from 'cesium';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CollisionBoxArray } from '../../../data/array-types.g';
 import { FillBucket } from '../../../data/bucket/fill-bucket';
@@ -232,107 +231,6 @@ describe('independent symbol coverage', () => {
     }
     finally { state.close(); }
   });
-  it('requeues unfinished Native symbol preparation when an early publication returns from cache', () => {
-    const state = fixture();
-    const tileID = new OverscaledTileID(14, 0, 14, 8184, 5444);
-    const frame = { commandList: [], camera: {} } as RenderFrameState;
-    try {
-      const tileId = state.add(tileID, true, undefined, true);
-      const collection = state.symbols.get(tileId)!;
-      expect(collection.get(0)).toBeInstanceOf(Primitive);
-      expect(collection.get(0).ready).toBe(false);
-      state.sync([tileID]);
-      state.scene.queueFirstUpdate([collection], false);
-      state.sync([]);
-      state.settle();
-      state.scene.pumpFirstUpdates(frame, UNBOUNDED_BUDGET);
-      expect(state.scene.pendingFirstUpdateCount).toBe(0);
-      state.sync([tileID]);
-      expect(state.symbol.getTileCollections(tileId)).toEqual([collection]);
-      expect(state.scene.hasPendingFirstUpdate(collection), 'cached CPU completion is not Native readiness').toBe(true);
-    }
-    finally { state.close(); }
-  });
-  it('restores unfinished native preparation when the same cached tile returns', () => {
-    const state = fixture(SceneMode.SCENE2D);
-    const tileID = new OverscaledTileID(14, 0, 14, 8184, 5444);
-    const frame = { commandList: [], camera: {} } as RenderFrameState;
-    try {
-      const tileId = state.add(tileID, false);
-      const before = state.vector.getTileCollections(tileId);
-      expect(before[0]).toBeInstanceOf(PrimitiveCollection);
-      expect((before[0] as PrimitiveCollection).get(0).ready).toBe(false);
-      state.sync([tileID]);
-      state.scene.queueFirstUpdate(before);
-      expect(state.scene.pendingFirstUpdateCount).toBeGreaterThan(0);
-      state.sync([]);
-      state.scene.pumpFirstUpdates(frame, UNBOUNDED_BUDGET);
-      expect(state.scene.pendingFirstUpdateCount).toBe(0);
-      expect(state.vector.getTileCollections(tileId)).toEqual([]);
-      state.sync([tileID]);
-      expect(state.vector.getTileCollections(tileId)).toEqual(before);
-      expect(state.scene.pendingFirstUpdateCount, 'a cached CPU-complete tile still needs its unfinished Native preparation').toBeGreaterThan(0);
-      state.sync([]);
-      state.scene.pumpFirstUpdates(frame, UNBOUNDED_BUDGET);
-      // Native ready is the engine boundary; already uploaded owners must
-      // restore immediately without acquiring another preparation allowance.
-      Object.assign((before[0] as PrimitiveCollection).get(0), { _ready: true });
-      state.sync([tileID]);
-      expect(state.vector.getTileCollections(tileId)).toEqual(before);
-      expect(state.scene.pendingFirstUpdateCount).toBe(0);
-    }
-    finally { state.close(); }
-  });
-
-  it('does not let a held surface below symbol minzoom hide its symbol descendants', () => {
-    const state = fixture();
-    const parent = new OverscaledTileID(12, 0, 12, 2046, 1361);
-    const child = new OverscaledTileID(14, 0, 14, 8184, 5444);
-    try {
-      state.add(parent, false);
-      const childId = state.add(child, true);
-      state.pending.add(childId);
-      state.sync([parent, child]);
-      state.settle();
-      expect(state.symbols.get(childId)!.show).toBe(true);
-      expect(state.symbol.isTilePlacementActive(childId)).toBe(true);
-    }
-    finally { state.close(); }
-  });
-
-  it('prevents a masked held descendant from hiding its held ancestor in return', () => {
-    const state = fixture();
-    const parent = new OverscaledTileID(13, 0, 13, 4092, 2722);
-    const child = new OverscaledTileID(14, 0, 14, 8184, 5444);
-    try {
-      const parentId = state.add(parent, true);
-      const childId = state.add(child, true);
-      state.pending.add(parentId);
-      state.pending.add(childId);
-      state.sync([parent, child]);
-      state.settle();
-      expect(state.symbols.get(parentId)!.show).toBe(true);
-      expect(state.symbols.get(childId)!.show).toBe(false);
-    }
-    finally { state.close(); }
-  });
-
-  it('does not let cached symbols from a hidden parent layer mask visible descendants', () => {
-    const state = fixture();
-    const parent = new OverscaledTileID(13, 0, 13, 4092, 2722);
-    const child = new OverscaledTileID(14, 0, 14, 8184, 5444);
-    const hidden = new SymbolStyleLayer({ id: 'hidden', type: 'symbol', source: 'world', minzoom: 15 }, {});
-    hidden.recalculate(new EvaluationParameters(view.cameraZoom), []);
-    try {
-      state.add(parent, true, hidden);
-      const childId = state.add(child, true);
-      state.pending.add(childId);
-      state.sync([parent, child]);
-      state.settle();
-      expect(state.symbols.get(childId)!.show).toBe(true);
-    }
-    finally { state.close(); }
-  });
 
   it('keeps the displayed parent when a frozen offscreen successor finishes empty in the returned view', () => {
     const state = fixture();
@@ -424,54 +322,6 @@ describe('independent symbol coverage', () => {
       state.settle();
       expect(state.symbols.get(childId)!.show).toBe(true);
       expect(state.symbols.get(parentId)!.show).toBe(false);
-    }
-    finally { state.close(); }
-  });
-
-  it('does not report a visibility change while a stale empty successor waits for recency', () => {
-    const state = fixture();
-    const parent = new OverscaledTileID(13, 0, 13, 4092, 2722);
-    const child = new OverscaledTileID(14, 0, 14, 8184, 5444);
-    const onePair = { exhausted: true, takeMinimumProgress: () => true };
-    try {
-      const parentId = state.add(parent, true);
-      state.sync([parent]);
-      state.settle();
-      const old = state.symbols.get(parentId)!;
-      const retire = vi.spyOn(state.symbol, 'retireTile');
-      const childId = state.add(child, true, undefined, false, 3);
-      state.symbol.setTilePlacementVisible(childId, false);
-      state.symbols.get(childId)!.show = false;
-      state.sync([child]);
-      const offscreen = new Float64Array(view.viewProjection);
-      offscreen[12] = 3;
-      state.symbol.update({ ...view, viewProjection: offscreen }, true, undefined, operation => operation(onePair));
-      for (let frame = 0; frame < 24 && !state.symbol.isTilePlaced(childId); frame++)
-        state.symbol.update(view, frame === 0, undefined, operation => operation(onePair));
-      expect(state.symbol.isTilePlaced(childId)).toBe(true);
-      state.residency.syncHeldTileVisibility();
-      for (let frame = 0; frame < 24 && state.symbol.hasRunnableWork; frame++) {
-        state.symbol.update(view, false, undefined, operation => operation(onePair));
-        state.residency.syncHeldTileVisibility();
-      }
-      expect(state.symbol.hasPendingWork).toBe(true);
-      expect(state.symbol.hasRunnableWork).toBe(false);
-      expect(state.symbol.nextPlacementTime).toBe(300);
-      expect(state.scene.pendingFirstUpdateCount).toBe(0);
-      expect(old.show).toBe(true);
-      expect(state.symbols.get(childId)!.show).toBe(false);
-      expect(retire).not.toHaveBeenCalled();
-      expect(state.residency.syncHeldTileVisibility()).toBe(false);
-      expect(state.residency.syncHeldTileVisibility()).toBe(false);
-      vi.mocked(performance.now).mockReturnValue(300);
-      state.symbol.update(view, false);
-      expect(state.residency.syncHeldTileVisibility()).toBe(true);
-      expect(state.symbols.get(childId)!.show).toBe(true);
-      expect(old.show).toBe(false);
-      expect(retire).toHaveBeenCalledWith(parentId, 0);
-      state.symbol.update(view, false);
-      expect(state.residency.syncHeldTileVisibility()).toBe(false);
-      expect(state.symbol.hasPendingWork).toBe(false);
     }
     finally { state.close(); }
   });

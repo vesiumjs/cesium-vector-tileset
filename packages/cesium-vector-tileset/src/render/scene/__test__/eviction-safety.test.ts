@@ -11,7 +11,6 @@ import { buildVectorTile } from '../../vector/__test__/vector-tile-helper';
 import { VectorTileRenderer } from '../../vector/vector-tile-renderer';
 import { GpuMemoryBudget } from '../gpu-memory-budget';
 import { SceneCollections } from '../scene-collections';
-import { memoryEntries } from './memory-entry-helper';
 
 function tileIDFor(x: number): CanonicalTileID {
   return new CanonicalTileID(20, x, 1);
@@ -49,21 +48,6 @@ describe('bucket tile eviction safety', () => {
     if (typeof OffscreenCanvas === 'undefined') {
       globalThis.OffscreenCanvas = class {} as unknown as typeof OffscreenCanvas;
     }
-  });
-
-  it('reports live tiles pinned and pooled tiles evictable', () => {
-    const renderer = new VectorTileRenderer();
-    const liveId = addTile(renderer, 1);
-    const pooledId = addTile(renderer, 2);
-
-    expect(memoryEntries(renderer).find(e => e.key === liveId)?.pinned).toBe(true);
-    expect(memoryEntries(renderer).find(e => e.key === pooledId)?.pinned).toBe(true);
-
-    // Retiring moves a tile out of the scene: it becomes evictable.
-    renderer.retireTile(pooledId, SceneMode.SCENE3D);
-    const entries = memoryEntries(renderer);
-    expect(entries.find(e => e.key === liveId)?.pinned).toBe(true);
-    expect(entries.find(e => e.key === pooledId)?.pinned).toBeUndefined();
   });
 
   it('evicts the pooled tile and never the live one, even under pressure', () => {

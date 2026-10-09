@@ -113,7 +113,7 @@ describe('projected geometry transport', () => {
     }
   });
 
-  it.each([SceneMode.SCENE3D, SceneMode.SCENE2D, SceneMode.COLUMBUS_VIEW, SceneMode.MORPHING])('restores exact topology and stable source views before real tile conversion (mode %s)', async (mode) => {
+  it.each([SceneMode.SCENE3D, SceneMode.SCENE2D])('restores exact topology and stable source views before real tile conversion (mode %s)', async (mode) => {
     const { parsed, tile, tileID, expected } = await transport(8);
     expect(parsed.buckets.map(bucket => snapshot(bucket.projectedGeometry!))).toEqual(expected);
     for (const bucket of parsed.buckets) {

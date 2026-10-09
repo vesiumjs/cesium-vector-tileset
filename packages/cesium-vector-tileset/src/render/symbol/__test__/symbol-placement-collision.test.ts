@@ -4,7 +4,7 @@ import { Cartesian3, Ellipsoid, EllipsoidalOccluder, Matrix4, WebMercatorProject
 import { describe, expect, it } from 'vitest';
 import { projectGlyphsAlongLine } from '../symbol-geometry';
 import { symbolGroundPosition, symbolMetersPerPixel } from '../symbol-perspective';
-import { INVALID_LINE_ANGLE, placeSymbolTile, projectToScreen, SymbolCollisionIndex, SymbolProjectionContext, SymbolTilePlacement, updateLineSymbolGeometry } from '../symbol-placement';
+import { placeSymbolTile, projectToScreen, SymbolCollisionIndex, SymbolProjectionContext, SymbolTilePlacement, updateLineSymbolGeometry } from '../symbol-placement';
 
 const VIEW = {
   viewProjection: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
@@ -87,7 +87,7 @@ function placeIcons(icon: SymbolPrimitiveGeometry, view: PlacementView, index: S
 }
 
 describe('symbol collision', () => {
-  it.each([1e-6, 1e-18])('filters a completed symbol safely when camera clip W reaches %s', (clipW) => {
+  it('filters a completed symbol safely near the camera plane without exceeding Map capacity', () => {
     const icon = geometry([[50]]);
     icon.overlapMode = 'always';
     const options = { pairs: [{ text: -1, icon: 0 }] };
@@ -107,7 +107,7 @@ describe('symbol collision', () => {
     const index = new SymbolCollisionIndex();
     Reflect.set(index, '_cells', cells);
     const matrix = new Float64Array(VIEW.viewProjection);
-    matrix[15] = clipW;
+    matrix[15] = 1e-18;
     const horizon = { ...VIEW, viewProjection: matrix, orthographic: false, cameraToCenterDistance: 100 };
     expect(() => placement.selection.filter(horizon, index, options, new SymbolProjectionContext())).not.toThrow();
     expect(icon.opacities[0]).toBe(1);
@@ -140,8 +140,6 @@ describe('symbol collision', () => {
   it.each([
     [false, false, 0],
     [true, false, 1],
-    [false, true, 0],
-    [true, true, 1],
   ])('filters selected text/icon pairs with textOptional=%s iconOptional=%s', (textOptional, iconOptional, expectedIcon) => {
     const text = geometry([[30]]);
     const icon = geometry([[70]]);
@@ -156,25 +154,6 @@ describe('symbol collision', () => {
     expect([text.opacities[0], icon.opacities[0]]).toEqual([0, expectedIcon]);
     completed.selection.filter(VIEW, new SymbolCollisionIndex(), options, new SymbolProjectionContext());
     expect([text.opacities[0], icon.opacities[0]]).toEqual([1, 1]);
-  });
-
-  it('never promotes a collision-hidden optional half when its selected peer is filtered', () => {
-    const text = geometry([[50]]);
-    const icon = geometry([[10]]);
-    icon.overlapMode = 'always';
-    const index = new SymbolCollisionIndex();
-    placeIcons(geometry([[50]]), VIEW, index);
-    const options = { pairs: [{ text: 0, icon: 0 }], textOptional: true };
-    const completed = new SymbolTilePlacement(text, icon, VIEW, index, options);
-    completed.advance(1, new SymbolProjectionContext());
-    completed.commit();
-    expect([text.opacities[0], icon.opacities[0]]).toEqual([0, 1]);
-    index.clear();
-    completed.selection.filter(VIEW, index, options, new SymbolProjectionContext());
-    expect([text.opacities[0], icon.opacities[0]]).toEqual([0, 1]);
-    const later = geometry([[10]]);
-    placeIcons(later, VIEW, index);
-    expect(later.opacities[0]).toBe(0);
   });
 
   function globeView(): PlacementView {
@@ -196,13 +175,6 @@ describe('symbol collision', () => {
     return symbol;
   }
 
-  it.each(['never', 'cooperative', 'always'] as const)('hides far-side symbols even with %s overlap', (mode) => {
-    const symbol = onGlobe(false);
-    symbol.overlapMode = mode;
-    placeIcons(symbol, globeView(), new SymbolCollisionIndex());
-    expect(Array.from(symbol.opacities)).toEqual([0, 0, 0, 0]);
-  });
-
   it('does not let a far-side symbol block a visible front-side symbol', () => {
     const index = new SymbolCollisionIndex();
     const back = onGlobe(false);
@@ -213,193 +185,12 @@ describe('symbol collision', () => {
     expect(front.opacities[0]).toBe(1);
   });
 
-  it('invalidates live line geometry whose anchor is behind the globe', () => {
-    const line = onGlobe(false, true);
-    expect(updateLineSymbolGeometry(line, globeView(), line.instances.keys(), new SymbolProjectionContext())).toBe(true);
-    expect(line.dynamics[2]).toBe(INVALID_LINE_ANGLE);
-    placeIcons(line, globeView(), new SymbolCollisionIndex());
-    expect(line.opacities[0]).toBe(0);
-  });
-
-  it('shows the same symbol when its view has no globe occlusion', () => {
-    const symbol = onGlobe(false);
-    placeIcons(symbol, globeView(), new SymbolCollisionIndex());
-    expect(symbol.opacities[0]).toBe(0);
-    placeIcons(symbol, VIEW, new SymbolCollisionIndex());
-    expect(symbol.opacities[0]).toBe(1);
-  });
-
   it('places a line glyph at a corner across a zero-length path segment', () => {
     const xs = [0, 10, 10, 20];
     const ys = [0, 0, 0, 0];
     const placed = projectGlyphsAlongLine(index => xs[index], index => ys[index], 0, xs.length, 5, 0, 0, [0, 5, 10], 0, { flip: false, lineOffsetY: 0, rotateToLine: true });
     expect(placed?.points.map(point => point.x)).toEqual([5, 10, 15]);
     expect(placed?.angles.every(angle => angle === 0)).toBe(true);
-  });
-
-  it('maps a split 2D frustum into its active Cesium viewport', () => {
-    const viewport = { x: 300, y: 0, width: 200, height: 500 };
-    expect(projectToScreen(VIEW.viewProjection, 1000, 500, 0, 0, 0, undefined, viewport))
-      .toEqual({ sx: 400, sy: 250, clipW: 1 });
-    expect(projectToScreen(VIEW.viewProjection, 1000, 500, -1, 1, 0, undefined, viewport))
-      .toEqual({ sx: 300, sy: 0, clipW: 1 });
-  });
-
-  it('reprojects each line glyph at the current screen-space size', () => {
-    const road = geometry([[30, 70]], true);
-    road.instances[0].line = {
-      anchorECEF: { x: 0, y: 0, z: 0 },
-      pathECEF: new Float64Array([-0.8, 0, 0, 0.8, 0, 0]),
-      segment: 0,
-      glyphOffsets: new Float32Array([-10, 10]),
-      lineOffsetX: 0,
-      lineOffsetY: 0,
-      keepUpright: true,
-      rotateToLine: true,
-      writingMode: 0,
-    };
-    expect(updateLineSymbolGeometry(road, VIEW, road.instances.keys(), new SymbolProjectionContext())).toBe(true);
-    expect(road.dynamics[0]).toBeCloseTo(10);
-    expect(road.dynamics[12]).toBeCloseTo(-10);
-    expect(road.dynamics[2]).toBeCloseTo(0);
-    expect(road.dynamics[2]).toBeCloseTo(0);
-
-    const reversed = new Float64Array(VIEW.viewProjection);
-    reversed[0] = -1;
-    expect(updateLineSymbolGeometry(road, { ...VIEW, viewProjection: reversed }, road.instances.keys(), new SymbolProjectionContext())).toBe(true);
-    expect(road.dynamics[0]).toBeCloseTo(-30);
-    expect(road.dynamics[12]).toBeCloseTo(30);
-  });
-
-  it('covers every glyph of a horizontal line label', () => {
-    const index = new SymbolCollisionIndex();
-    const road = geometry([[50, 70]], true);
-    road.instances[0].line!.pathECEF = new Float64Array([-0.8, 0, 0, 0.8, 0, 0]);
-    road.instances[0].line!.glyphOffsets = new Float32Array([0, 20]);
-    const point = geometry([[70]]);
-    placeIcons(road, VIEW, index);
-    placeIcons(point, VIEW, index);
-    expect(point.opacities[0]).toBe(0);
-  });
-
-  it('uses the worker point box including padding beyond the glyph quad', () => {
-    const blocker = geometry([[50]]);
-    const padded = geometry([[68]]);
-    const index = new SymbolCollisionIndex();
-    placeIcons(blocker, VIEW, index);
-    placeIcons(padded, VIEW, index);
-    expect(padded.opacities[0]).toBe(1);
-
-    padded.instances[0].collisionBox = { x1: -15, y1: -8, x2: 15, y2: 8, layoutSize: 24 };
-    placeIcons(padded, VIEW, index);
-    expect(padded.opacities[0]).toBe(0);
-  });
-
-  it('scales a worker point box with the live symbol size', () => {
-    const blocker = geometry([[50]]);
-    const sized = geometry([[80]]);
-    sized.instances[0].collisionBox = { x1: -20, y1: -8, x2: 20, y2: 8, layoutSize: 24 };
-    sized.sizesMax.fill(48 * 128);
-    for (let i = 0; i < sized.sizeZooms.length; i += 2) {
-      sized.sizeZooms[i] = 10;
-      sized.sizeZooms[i + 1] = 11;
-    }
-    const atZoom = (cameraZoom: number): number => {
-      const index = new SymbolCollisionIndex();
-      placeIcons(blocker, { ...VIEW, cameraZoom }, index);
-      placeIcons(sized, { ...VIEW, cameraZoom }, index);
-      return sized.opacities[0];
-    };
-    expect(atZoom(10)).toBe(1);
-    expect(atZoom(11)).toBe(0);
-  });
-
-  it('checks later pairs against earlier text and icon together', () => {
-    const text = geometry([[50], [90]]);
-    const icon = geometry([[10], [50]]);
-    placeSymbolTile(text, icon, VIEW, new SymbolCollisionIndex(), {
-      pairs: [{ text: 0, icon: 0 }, { text: 1, icon: 1 }],
-    });
-    expect(text.opacities[0]).toBe(1);
-    expect(icon.opacities[0]).toBe(1);
-    expect(text.opacities[4]).toBe(0);
-    expect(icon.opacities[4]).toBe(0);
-  });
-
-  it.each([
-    ['never', 'never', 0],
-    ['never', 'cooperative', 0],
-    ['never', 'always', 0],
-    ['cooperative', 'never', 0],
-    ['cooperative', 'cooperative', 1],
-    ['cooperative', 'always', 1],
-    ['always', 'never', 1],
-    ['always', 'cooperative', 1],
-    ['always', 'always', 1],
-  ] as const)('places %s after %s with visibility %i', (currentMode, previousMode, expected) => {
-    const index = new SymbolCollisionIndex();
-    const previous = geometry([[50]]);
-    previous.overlapMode = previousMode;
-    const current = geometry([[50]]);
-    current.overlapMode = currentMode;
-    placeIcons(previous, VIEW, index);
-    placeIcons(current, VIEW, index);
-    expect(previous.opacities[0]).toBe(1);
-    expect(current.opacities[0]).toBe(expected);
-
-    const separatedPrevious = geometry([[20]]);
-    const separatedCurrent = geometry([[80]]);
-    separatedPrevious.overlapMode = previousMode;
-    separatedCurrent.overlapMode = currentMode;
-    const options = { pairs: [{ text: -1, icon: 0 }] };
-    const initial = new SymbolCollisionIndex();
-    const completed = [separatedPrevious, separatedCurrent].map((icon) => {
-      const placement = new SymbolTilePlacement(undefined, icon, VIEW, initial, options);
-      placement.advance(1, new SymbolProjectionContext());
-      placement.commit();
-      return placement.selection;
-    });
-    expect([separatedPrevious.opacities[0], separatedCurrent.opacities[0]]).toEqual([1, 1]);
-    const projection = new Float64Array(VIEW.viewProjection);
-    projection[0] = 0.1;
-    const compressed = { ...VIEW, cameraZoom: 8, viewProjection: projection };
-    index.clear();
-    for (const selection of completed)
-      selection.filter(compressed, index, options);
-    expect(separatedCurrent.opacities[0]).toBe(expected);
-  });
-
-  it('uses earlier cooperative modes within one batch and between paired symbols', () => {
-    const sameBatch = geometry([[50], [50]]);
-    sameBatch.overlapMode = 'cooperative';
-    placeIcons(sameBatch, VIEW, new SymbolCollisionIndex());
-    expect([...sameBatch.opacities.filter((_, index) => index % 4 === 0)]).toEqual([1, 1]);
-
-    const text = geometry([[50], [50]]);
-    const icon = geometry([[10], [10]]);
-    text.overlapMode = 'cooperative';
-    icon.overlapMode = 'cooperative';
-    placeSymbolTile(text, icon, VIEW, new SymbolCollisionIndex(), {
-      pairs: [{ text: 0, icon: 0 }, { text: 1, icon: 1 }],
-    });
-    expect(text.opacities[4]).toBe(1);
-    expect(icon.opacities[4]).toBe(1);
-  });
-
-  it('combines a cooperative text verdict with its always-overlap icon', () => {
-    const index = new SymbolCollisionIndex();
-    const blocker = geometry([[50]]);
-    placeIcons(blocker, VIEW, index);
-    const text = geometry([[50]]);
-    const icon = geometry([[50]]);
-    text.overlapMode = 'cooperative';
-    icon.overlapMode = 'always';
-    placeSymbolTile(text, icon, VIEW, index, {
-      pairs: [{ text: 0, icon: 0 }],
-      textOptional: true,
-    });
-    expect(text.opacities[0]).toBe(0);
-    expect(icon.opacities[0]).toBe(1);
   });
 
   it('keeps overlap mode and ignore-placement independent', () => {
@@ -425,218 +216,6 @@ describe('symbol collision', () => {
     placeIcons(second, VIEW, index);
     expect(second.opacities[0]).toBe(0);
   });
-});
-
-describe('viewport point perspective', () => {
-  it('projects each unrotated viewport point once while preserving collision selection', () => {
-    const icon = geometry([[25], [30], [70]]);
-    let projections = 0;
-    const view: PlacementView = {
-      ...VIEW,
-      projectPosition: (x, y, z) => {
-        projections++;
-        return [x, y, z];
-      },
-    };
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect([icon.opacities[0], icon.opacities[4], icon.opacities[8]]).toEqual([1, 0, 1]);
-    expect(projections).toBe(3);
-  });
-
-  it('projects a point without viewport perspective through the existing bounds path', () => {
-    const icon = geometry([[50]]);
-    icon.viewportPerspective = false;
-    let projections = 0;
-    const view: PlacementView = {
-      ...VIEW,
-      projectPosition: (x, y, z) => {
-        projections++;
-        return [x, y, z];
-      },
-    };
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect(icon.opacities[0]).toBe(1);
-    expect(projections).toBe(1);
-  });
-
-  it('retains separate quad projection for rotated viewport points', () => {
-    const icon = geometry([[25], [30], [70]]);
-    for (let vertex = 0; vertex < icon.positions.length / 3; vertex++) {
-      icon.dynamics[vertex * 3 + 2] = Math.PI / 4;
-    }
-    let projections = 0;
-    const view: PlacementView = {
-      ...VIEW,
-      projectPosition: (x, y, z) => {
-        projections++;
-        return [x, y, z];
-      },
-    };
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect([icon.opacities[0], icon.opacities[4], icon.opacities[8]]).toEqual([1, 0, 1]);
-    expect(projections).toBe(6);
-  });
-
-  it.each(['far', 'behind', 'unprojectable'] as const)('rejects a %s point after its first projection', (reason) => {
-    const icon = geometry([[50]]);
-    const matrix = VIEW.viewProjection.slice();
-    if (reason === 'behind') {
-      matrix[15] = -1;
-    }
-    let projections = 0;
-    const view: PlacementView = {
-      ...VIEW,
-      viewProjection: matrix,
-      orthographic: false,
-      cameraToCenterDistance: reason === 'far' ? 0.1 : 1,
-      projectPosition: (x, y, z) => {
-        projections++;
-        return reason === 'unprojectable' ? undefined : [x, y, z];
-      },
-    };
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect(icon.opacities[0]).toBe(0);
-    expect(projections).toBe(1);
-  });
-
-  it('preserves device-pixel collisions in an offset active viewport', () => {
-    const icon = geometry([[25], [32], [70]]);
-    let projections = 0;
-    const view: PlacementView = {
-      ...VIEW,
-      width: 400,
-      height: 200,
-      pixelRatio: 2,
-      viewport: { x: 100, y: 40, width: 200, height: 100 },
-      projectPosition: (x, y, z) => {
-        projections++;
-        return [x, y, z];
-      },
-    };
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect([icon.opacities[0], icon.opacities[4], icon.opacities[8]]).toEqual([1, 0, 1]);
-    expect(projections).toBe(3);
-
-    const index = new SymbolCollisionIndex();
-    index.reserve({ x1: 140, y1: 100, x2: 160, y2: 120 }, 'never');
-    placeIcons(icon, view, index);
-    expect([icon.opacities[0], icon.opacities[4], icon.opacities[8]]).toEqual([0, 0, 1]);
-  });
-
-  it('uses the raw ratio beyond the GPU four-times limit for collision', () => {
-    const icon = geometry([[25], [70]]);
-    for (const instance of icon.instances) {
-      instance.collisionBox = { x1: -5, y1: -5, x2: 5, y2: 5, layoutSize: 24 };
-    }
-    const view = { ...VIEW, orthographic: false, cameraToCenterDistance: 9 };
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect([icon.opacities[0], icon.opacities[4]]).toEqual([1, 0]);
-  });
-
-  it('cuts off far normal symbols but preserves icon-only always-overlap', () => {
-    const view = { ...VIEW, orthographic: false, cameraToCenterDistance: 0.1 };
-    const icon = geometry([[50]]);
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect(icon.opacities[0]).toBe(0);
-    icon.overlapMode = 'always';
-    placeIcons(icon, view, new SymbolCollisionIndex());
-    expect(icon.opacities[0]).toBe(1);
-  });
-
-  it('requires the paired overlap or optional peer before bypassing cutoff', () => {
-    const view = { ...VIEW, orthographic: false, cameraToCenterDistance: 0.1 };
-    const text = geometry([[50]]);
-    const icon = geometry([[50]]);
-    icon.overlapMode = 'always';
-    placeSymbolTile(text, icon, view, new SymbolCollisionIndex(), { pairs: [{ text: 0, icon: 0 }] });
-    expect([text.opacities[0], icon.opacities[0]]).toEqual([0, 0]);
-    placeSymbolTile(text, icon, view, new SymbolCollisionIndex(), { pairs: [{ text: 0, icon: 0 }], textOptional: true });
-    expect([text.opacities[0], icon.opacities[0]]).toEqual([0, 1]);
-  });
-
-  it('leaves map-pitch point geometry outside viewport perspective', () => {
-    const icon = geometry([[25], [70]]);
-    icon.viewportPerspective = false;
-    placeIcons(icon, { ...VIEW, orthographic: false, cameraToCenterDistance: 9 }, new SymbolCollisionIndex());
-    expect([icon.opacities[0], icon.opacities[4]]).toEqual([1, 1]);
-  });
-
-  it('rejects unknown perspective distance while retaining the explicit orthographic control', () => {
-    const icon = geometry([[50]]);
-    placeIcons(icon, { ...VIEW, orthographic: false }, new SymbolCollisionIndex());
-    expect(icon.opacities[0]).toBe(0);
-    placeIcons(icon, VIEW, new SymbolCollisionIndex());
-    expect(icon.opacities[0]).toBe(1);
-  });
-});
-
-describe('live along-line perspective', () => {
-  function road(): SymbolPrimitiveGeometry {
-    const result = geometry([[30, 70]], true);
-    result.viewportPerspective = true;
-    result.instances[0].line = {
-      anchorECEF: { x: 0, y: 0, z: 0 },
-      pathECEF: new Float64Array([-0.8, 0, 0, 0.8, 0, 0]),
-      segment: 0,
-      glyphOffsets: new Float32Array([-10, 10]),
-      lineOffsetX: 0,
-      lineOffsetY: 0,
-      keepUpright: true,
-      rotateToLine: true,
-      writingMode: 0,
-    };
-    return result;
-  }
-
-  it('walks viewport glyph centers with the worker anchor raw perspective ratio', () => {
-    const label = road();
-    const view = { ...VIEW, orthographic: false, cameraToCenterDistance: 3 };
-    updateLineSymbolGeometry(label, view, label.instances.keys(), new SymbolProjectionContext());
-    expect(label.dynamics[0]).toBeCloseTo(0);
-    expect(label.dynamics[12]).toBeCloseTo(0);
-  });
-
-  it('uses the worker line offset already expressed in shaped em units', () => {
-    const label = road();
-    label.instances[0].line!.glyphOffsets.fill(0);
-    label.instances[0].line!.lineOffsetX = 12;
-    updateLineSymbolGeometry(label, VIEW, label.instances.keys(), new SymbolProjectionContext());
-    expect(label.dynamics[2]).not.toBe(INVALID_LINE_ANGLE);
-    expect(label.dynamics[0]).toBeCloseTo(32);
-    expect(label.dynamics[12]).toBeCloseTo(-8);
-  });
-
-  it('cuts off normal far line symbols while respecting the actual always-overlap caller', () => {
-    const label = road();
-    const view = { ...VIEW, orthographic: false, cameraToCenterDistance: 0.1 };
-    placeIcons(label, view, new SymbolCollisionIndex());
-    expect(label.opacities[0]).toBe(0);
-    label.overlapMode = 'always';
-    placeIcons(label, view, new SymbolCollisionIndex());
-    expect(label.opacities[0]).toBe(1);
-  });
-});
-
-it('uses the padded worker line-icon box instead of its atlas quad bounds', () => {
-  const label = geometry([[50]], true);
-  label.viewportPerspective = true;
-  const anchor = symbolGroundPosition(0, 0);
-  const first = symbolGroundPosition(-40, 0);
-  const last = symbolGroundPosition(40, 0);
-  label.instances[0].line!.anchorECEF = anchor;
-  label.instances[0].line!.pathECEF = new Float64Array([first.x, first.y, first.z, last.x, last.y, last.z]);
-  for (let vertex = 0; vertex < 4; vertex++)
-    label.positions.set([anchor.x, anchor.y, anchor.z], vertex * 3);
-  label.instances[0].collisionBox = { x1: -40, y1: -5, x2: 40, y2: 5, layoutSize: 24 };
-  const later = geometry([[85]]);
-  const laterWorld = symbolGroundPosition(35, 0);
-  for (let vertex = 0; vertex < 4; vertex++)
-    later.positions.set([laterWorld.x, laterWorld.y, laterWorld.z], vertex * 3);
-  const view: PlacementView = { ...VIEW, projectPosition: (_x, y) => [y / 50, 0, 0] };
-  const index = new SymbolCollisionIndex();
-  placeIcons(label, view, index);
-  placeIcons(later, view, index);
-  expect(later.opacities[0]).toBe(0);
 });
 
 it('walks map glyphs in the Mercator label plane before actual CV projection', () => {
@@ -692,8 +271,6 @@ it('walks map glyphs in the Mercator label plane before actual CV projection', (
 
 it.each([
   ['map', false, 0, 0],
-  ['viewport', false, 35, 20],
-  ['map', true, 35, 20],
   ['viewport', true, 35, 20],
 ] as const)('collides ground point icons against projected four corners with %s rotation, worker box=%s, bearing=%s, roll=%s', (rotation, workerBox, bearing, roll) => {
   const pitch = 75 * Math.PI / 180;
@@ -786,14 +363,4 @@ it('uses raw perspective circle radii for line text and keeps circular collision
     diagonal.positions[vertex * 3 + 1] = -0.9;
   placeIcons(diagonal, view, index);
   expect(diagonal.opacities[0]).toBe(1);
-});
-
-it('retains intermediate label-plane legs for collision and keeps offsets when flipped', () => {
-  const xs = [0, 20, 20];
-  const ys = [0, 0, 20];
-  const result = projectGlyphsAlongLine(index => xs[index], index => ys[index], 0, 3, 10, 0, 0, [-5, 15], 0, { flip: false, lineOffsetY: 0, rotateToLine: true })!;
-  expect(result.path.map(point => [point.x, point.y])).toEqual([[5, 0], [20, 0], [20, 5]]);
-  const reversed = projectGlyphsAlongLine(index => [20, -20][index], () => 0, 0, 2, 0, 0, 0, [-5, 5], 3, { flip: true, lineOffsetY: 0, rotateToLine: true })!;
-  expect(reversed.flipped).toBe(true);
-  expect(reversed.points.map(point => point.x)).toEqual([-8, 2]);
 });

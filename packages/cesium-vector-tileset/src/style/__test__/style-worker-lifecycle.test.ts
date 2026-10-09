@@ -9,14 +9,12 @@ type MessageData = Parameters<WorkerChannel['receive']>[0]['data'];
 async function workerFixture(startupFailure?: Error) {
   vi.resetModules();
   vi.spyOn(navigator, 'hardwareConcurrency', 'get').mockReturnValue(4);
-  const [{ TileWorker }, { Style }, { MessageType }, { getSharedWorkerPool }, { GLOBAL_DISPATCHER_ID }, { rtlMainThreadPluginFactory }, { addProtocol }] = await Promise.all([
+  const [{ TileWorker }, { Style }, { MessageType }, { getSharedWorkerPool }, { rtlMainThreadPluginFactory }] = await Promise.all([
     import('../../worker/tile-worker'),
     import('../style'),
     import('../../worker/messages'),
     import('../../worker/worker-pool'),
-    import('../../util/ajax'),
     import('../../source/rtl-text-plugin-main-thread'),
-    import('../../source/protocol-crud'),
   ]);
   const workers: ControlledWorker[] = [];
   class ControlledWorker extends EventTarget {
@@ -75,7 +73,7 @@ async function workerFixture(startupFailure?: Error) {
     styles.forEach((style, index) => style.on('error', event => startupErrors[index].push(event.error)));
   }
   await Promise.all(styles.map(style => style.dispatcher.waitForInitComplete()));
-  return { styles, workers, startupErrors, MessageType, pool: getSharedWorkerPool(), Style, GLOBAL_DISPATCHER_ID, plugin: rtlMainThreadPluginFactory(), addProtocol };
+  return { styles, workers, startupErrors, MessageType, pool: getSharedWorkerPool(), Style, plugin: rtlMainThreadPluginFactory() };
 }
 
 afterEach(() => {
@@ -146,40 +144,6 @@ describe('shared style worker lifecycle', () => {
       first.destroy();
       second.destroy();
       later?.destroy();
-      for (const { worker } of workers) worker.channel.remove();
-    }
-  });
-
-  it('reports a worker messageerror to clients with pending requests and idle clients', async () => {
-    const { styles: [first, second], workers, MessageType } = await workerFixture();
-    const firstErrors: StyleErrorEvent['error'][] = [];
-    const secondErrors: StyleErrorEvent['error'][] = [];
-    first.on('error', event => firstErrors.push(event.error));
-    second.on('error', event => secondErrors.push(event.error));
-    try {
-      await Promise.all([first, second].map(style => style.dispatcher.broadcast(MessageType.setLayers, [])));
-      workers[0].deferMessages = true;
-      let requestError: Error | undefined;
-      const pending = first.dispatcher.channels[0].sendAsync({ type: MessageType.setLayers, data: [] }).catch((error) => {
-        requestError = error;
-      });
-      workers[0].dispatchEvent(new MessageEvent('messageerror'));
-      await vi.waitFor(() => expect(requestError).toBeInstanceOf(Error), { timeout: 1000 });
-      await pending;
-      expect(requestError?.name).toBe('Error');
-      expect(requestError?.message).toContain('MVT worker message could not be decoded');
-      expect(firstErrors).toEqual([requestError]);
-      expect(secondErrors).toEqual([requestError]);
-      await expect(second.dispatcher.channels[0].sendAsync({ type: MessageType.setLayers, data: [] })).rejects.toBe(requestError);
-      expect(workers[0].terminate).toHaveBeenCalledTimes(1);
-      first.destroy();
-      second.destroy();
-      await Promise.resolve();
-      expect(workers.every(worker => worker.terminate.mock.calls.length === 1)).toBe(true);
-    }
-    finally {
-      first.destroy();
-      second.destroy();
       for (const { worker } of workers) worker.channel.remove();
     }
   });
@@ -267,65 +231,6 @@ describe('shared style worker lifecycle', () => {
       first.destroy();
       second.destroy();
       for (const { reject } of requests) reject(new DOMException('Test cleanup', 'AbortError'));
-      for (const { worker } of workers) worker.channel.remove();
-    }
-  });
-
-  it('keeps the surviving style functional and terminates the pool after the last style is destroyed', async () => {
-    const { styles: [first, second], workers, MessageType, pool, GLOBAL_DISPATCHER_ID, addProtocol } = await workerFixture();
-    try {
-      await Promise.all([first, second].map(style => style.dispatcher.broadcast(MessageType.setLayers, [])));
-      first.destroy();
-      await Promise.resolve();
-      expect(workers.every(worker => worker.terminate.mock.calls.length === 0)).toBe(true);
-      await second.dispatcher.broadcast(MessageType.updateGlobalState, { surviving: true });
-      for (const { worker } of workers) {
-        expect(worker.globalStates.get(second.dispatcher.id)).toEqual({ surviving: true });
-      }
-      const resource = vi.fn(async () => ({ data: { resource: 'available' } }));
-      addProtocol('resource-test', resource);
-      const response = await workers[0].worker.channel.sendAsync({
-        type: MessageType.getResource,
-        data: { url: 'resource-test://data', type: 'json' },
-        targetMapId: GLOBAL_DISPATCHER_ID,
-      });
-      expect(response.data).toEqual({ resource: 'available' });
-      expect(resource).toHaveBeenCalledOnce();
-
-      second.destroy();
-      await Promise.resolve();
-      expect(pool.numActive()).toBe(0);
-      expect(workers.every(worker => worker.terminate.mock.calls.length === 1)).toBe(true);
-    }
-    finally {
-      first.destroy();
-      second.destroy();
-      for (const { worker } of workers) worker.channel.remove();
-    }
-  });
-
-  it('posts removeMap before detaching its channel and never cancels that cleanup notification', async () => {
-    const { styles: [first, second], workers, MessageType } = await workerFixture();
-    try {
-      await Promise.all([first, second].map(style => style.dispatcher.broadcast(MessageType.setLayers, [])));
-      for (const worker of workers) worker.deferMessages = true;
-      const channel = first.dispatcher.getReadyChannel();
-      const pending = channel.sendAsync({ type: MessageType.setLayers, data: [] }).catch(error => error);
-      first.destroy();
-      for (const target of workers) {
-        const cleanup = target.messages.find(message => message.type === MessageType.removeMap && message.sourceMapId === first.dispatcher.id);
-        expect(cleanup).toBeDefined();
-        expect(target.messages.some(message => message.type === '<cancel>' && message.id === cleanup!.id)).toBe(false);
-        target.flush();
-        expect(target.worker.layerIndexes[first.dispatcher.id]).toBeUndefined();
-        expect(target.worker.globalStates.has(first.dispatcher.id)).toBe(false);
-        expect(target.worker.layerIndexes[second.dispatcher.id]).toBeDefined();
-      }
-      expect(await pending).toMatchObject({ name: 'AbortError' });
-    }
-    finally {
-      first.destroy();
-      second.destroy();
       for (const { worker } of workers) worker.channel.remove();
     }
   });

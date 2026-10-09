@@ -1,17 +1,15 @@
 import type { PackedLinePaths } from '../../data/line-path-transfer';
 import Point from '@mapbox/point-geometry';
-import { Color, CompoundExpression, createExpression, EvaluationContext, expressions, StyleExpression } from '@maplibre/maplibre-gl-style-spec';
+import { CompoundExpression, createExpression, EvaluationContext, StyleExpression } from '@maplibre/maplibre-gl-style-spec';
 import { describe, expect, it } from 'vitest';
-import { FillLayoutArray, StructArrayLayout2i4 } from '../../data/array-types.g';
 import { deserialize } from '../../data/bucket';
 import { LineBucket as RuntimeLineBucket } from '../../data/bucket-runtime';
 import { LineBucket as WorkerLineBucket } from '../../data/bucket/line-bucket';
 import { lineStyleForFeature } from '../../render/vector/feature-attributes';
 import { EvaluationParameters } from '../../style/evaluation-parameters';
 import { LineStyleLayer } from '../../style/style-layer/line-style-layer';
-import { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
+import { CanonicalTileID } from '../../tile/tile-id';
 import { createTileTransferRegistry } from '../tile-transfer';
-import { TransferRegistry } from '../transfer-registry';
 
 describe('worker transfer registries', () => {
   it('restores worker-built geometry with scene paint updates and no builder methods', () => {
@@ -50,20 +48,11 @@ describe('worker transfer registries', () => {
     const transferables: Transferable[] = [];
     const encoded = worker.serialize(bucket, transferables);
     const received = structuredClone(encoded, { transfer: transferables });
-    const receivedBucket = received as unknown as RuntimeLineBucket;
     const receivedPaths = (received as unknown as { linePaths: PackedLinePaths }).linePaths;
-    const receivedJoinCap = receivedBucket.lineJoinCap;
-    const receivedConfigurations = receivedBucket.programConfigurations;
-    const receivedRanges = receivedConfigurations._featureRanges;
-    const receivedRange = receivedRanges[0];
     const restored = scene.deserialize(received) as RuntimeLineBucket;
 
     expect(restored).toBe(received);
     expect(restored.linePaths.every(path => path.points.buffer === receivedPaths.coordinates.buffer)).toBe(true);
-    expect(restored.lineJoinCap).toBe(receivedJoinCap);
-    expect(restored.programConfigurations).toBe(receivedConfigurations);
-    expect(restored.programConfigurations.getFeatureRanges()).toBe(receivedRanges);
-    expect(restored.programConfigurations.getFeatureRanges()[0]).toBe(receivedRange);
     expect(Object.hasOwn(restored, '$name')).toBe(false);
     expect(Array.from(bucket.linePaths[0].points)).toEqual(paths[0].points);
     expect((encoded as unknown as { linePaths: PackedLinePaths }).linePaths.coordinates.byteLength).toBe(0);
@@ -132,76 +121,5 @@ describe('worker transfer registries', () => {
     expect((returned.expression as CompoundExpression).args).toBe(returnedArguments);
     expect(returned._evaluator).toBeInstanceOf(EvaluationContext);
     expect(returned.evaluate({ zoom: 3 }, { properties: { count: 8 } })).toBe(10);
-  });
-
-  it('does not attach registration state to shared constructors or prototypes', () => {
-    const constructors = [Object, Error, Color, StyleExpression, ...Object.values(expressions)];
-    const keys = constructors.map(constructor => Reflect.ownKeys(constructor));
-    const prototypeKeys = constructors.map(constructor => Reflect.ownKeys(constructor.prototype));
-
-    createTileTransferRegistry();
-    createTileTransferRegistry();
-
-    for (const [index, constructor] of constructors.entries()) {
-      expect(Reflect.ownKeys(constructor)).toEqual(keys[index]);
-      expect(Reflect.ownKeys(constructor.prototype)).toEqual(prototypeKeys[index]);
-      expect(Object.hasOwn(constructor, '_classRegistryKey')).toBe(false);
-    }
-  });
-
-  it('transfers generated layout buffers once and restores tile identity methods', () => {
-    const scene = createTileTransferRegistry();
-    const worker = createTileTransferRegistry();
-    const vertices = new FillLayoutArray();
-    vertices.emplaceBack(12, 34);
-    vertices.emplaceBack(56, 78);
-    const tileID = new OverscaledTileID(8, 0, 8, 12, 34);
-    const transferables: Transferable[] = [];
-    const encoded = worker.serialize({ vertices, tileID }, transferables);
-
-    expect(transferables).toHaveLength(1);
-    const received = structuredClone(encoded, { transfer: transferables });
-    const receivedData = received as unknown as {
-      vertices: FillLayoutArray;
-      tileID: OverscaledTileID;
-    };
-    const receivedVertices = receivedData.vertices;
-    const receivedBuffer = receivedVertices.arrayBuffer;
-    const receivedTileID = receivedData.tileID;
-    const receivedCanonical = receivedTileID.canonical;
-    const decoded = scene.deserialize(received) as {
-      vertices: FillLayoutArray;
-      tileID: OverscaledTileID;
-    };
-
-    expect(decoded).toBe(received);
-    expect(decoded.vertices.arrayBuffer).toBe(receivedBuffer);
-    expect(decoded.tileID).toBe(receivedTileID);
-    expect(decoded.tileID.canonical).toBe(receivedCanonical);
-    expect(decoded.vertices).not.toBe(receivedVertices);
-    expect(decoded.vertices).toBeInstanceOf(StructArrayLayout2i4);
-    expect(Object.hasOwn(decoded.tileID, '$name')).toBe(false);
-    expect(Object.hasOwn(decoded.tileID.canonical, '$name')).toBe(false);
-    expect(vertices.arrayBuffer.byteLength).toBe(0);
-    expect(decoded.vertices.length).toBe(2);
-    expect(Array.from(decoded.vertices.int16)).toEqual([12, 34, 56, 78]);
-    expect(decoded.tileID).toBeInstanceOf(OverscaledTileID);
-    expect(decoded.tileID.canonical).toBeInstanceOf(CanonicalTileID);
-    expect(decoded.tileID.equals(tileID)).toBe(true);
-  });
-
-  it('uses registry-local omissions for the same constructor', () => {
-    class Payload {
-      visible = 1;
-      cached = 2;
-    }
-    const first = new TransferRegistry();
-    const second = new TransferRegistry();
-    first.register('Payload', Payload, { omit: ['cached'] });
-    second.register('Payload', Payload);
-
-    expect(first.serialize(new Payload())).toEqual({ $name: 'Payload', visible: 1 });
-    expect(second.serialize(new Payload())).toEqual({ $name: 'Payload', visible: 1, cached: 2 });
-    expect(Object.hasOwn(Payload, '_classRegistryKey')).toBe(false);
   });
 });

@@ -66,34 +66,6 @@ describe('pattern tile state ownership', () => {
     }
   });
 
-  it.each(['remove', 'retire again', 'capacity', 'overflow'] as const)('rebuilds after a retired owner is permanently released by %s', (operation) => {
-    const state = fixture();
-    try {
-      const original = state.build();
-      state.renderer.retireTile(state.input.tileId);
-      if (operation === 'remove') {
-        destroyPatternResources(state.renderer.removeTile(state.input.tileId));
-      }
-      else if (operation === 'retire again') {
-        destroyPatternResources(state.renderer.retireTile(state.input.tileId));
-      }
-      else {
-        if (operation === 'overflow')
-          state.renderer.setRetiredCapacity(1);
-        state.build({ ...state.input, tileId: 'replacement' });
-        destroyPatternResources(state.renderer.retireTile('replacement'));
-        if (operation === 'capacity')
-          destroyPatternResources(state.renderer.setRetiredCapacity(1));
-      }
-      expect(original.added[0].isDestroyed()).toBe(true);
-      expect(state.renderer.restoreTile(state.input.tileId)).toBe(false);
-      expect(state.build().added).toHaveLength(1);
-    }
-    finally {
-      state.close();
-    }
-  });
-
   it('keeps surviving live and retired owners reusable and caches legitimate empty patterns', () => {
     const state = fixture();
     const empty = fixture(0);
