@@ -36,6 +36,7 @@ function isArrayBuffer(value: unknown): value is ArrayBuffer {
 /** Class codecs belong to an channel, without modifying shared constructors. */
 export class TransferRegistry {
   private readonly registrations = new Map<string, Registration>();
+
   private readonly constructors = new WeakMap<object, Registration>();
 
   register<T>(name: string, constructor: new (...args: any[]) => T, options: RegisterOptions<T> = {}): void {
@@ -58,6 +59,9 @@ export class TransferRegistry {
     return this.constructors.has(constructor);
   }
 
+  /**
+   * @internal
+   */
   private registrationFor(input: object): Registration | undefined {
     // Generated aliases inherit a layout codec; preserve its wire identity.
     let constructor: object | null = input.constructor;
@@ -71,6 +75,9 @@ export class TransferRegistry {
     return undefined;
   }
 
+  /**
+   * @internal
+   */
   private isBuiltin(input: unknown): boolean {
     if (input === null || input === undefined || typeof input !== 'object') {
       return typeof input !== 'function' && typeof input !== 'symbol' && typeof input !== 'bigint';

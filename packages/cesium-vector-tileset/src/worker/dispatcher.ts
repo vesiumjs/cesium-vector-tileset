@@ -17,8 +17,11 @@ export class WorkerDispatcher {
   channelsReady: Promise<WorkerChannel[]>;
   channelIndex: number;
   id: string | number;
+
   private removed: boolean;
+
   private readonly onWorkerError?: (error: Error) => void;
+
   private readonly failureSubscriptions: Subscription[] = [];
 
   constructor(workerPool: WorkerPool, mapId: string | number, onWorkerError?: (error: Error) => void) {
@@ -34,6 +37,9 @@ export class WorkerDispatcher {
     }
   }
 
+  /**
+   * @internal
+   */
   private async initializeChannels(mapId: string | number): Promise<WorkerChannel[]> {
     const workers = await this.workerPool.acquire(mapId);
     if (this.removed)

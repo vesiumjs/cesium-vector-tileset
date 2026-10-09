@@ -63,12 +63,17 @@ export class WorkerChannel implements WorkerMessageSender {
   tasks: { [x: string]: WireMessage };
   taskQueue: string[];
   abortControllers: { [x: number | string]: AbortController };
+
   private taskChannel?: MessageChannel;
+
   private taskScheduled = false;
   messageHandlers: Partial<Record<MessageType, MessageHandler<MessageType>>>;
   subscription: Subscription;
+
   private removed = false;
+
   private failure?: Error;
+
   private readonly transferRegistry = createTileTransferRegistry();
 
   /**
@@ -270,6 +275,9 @@ export class WorkerChannel implements WorkerMessageSender {
     void this.handleMessage(id, data).catch(() => {});
   }
 
+  /**
+   * @internal
+   */
   private scheduleNextMessage(): void {
     if (this.removed || this.taskScheduled)
       return;
@@ -305,6 +313,9 @@ export class WorkerChannel implements WorkerMessageSender {
     void this.handleMessage(id, task).catch(() => {});
   }
 
+  /**
+   * @internal
+   */
   private async handleMessage(id: string, task: WireMessage): Promise<void> {
     if (task.type === '<response>') {
       // The `sendResponse` function in the counterpart channel has been called, and we are now
@@ -352,6 +363,9 @@ export class WorkerChannel implements WorkerMessageSender {
     }
   }
 
+  /**
+   * @internal
+   */
   private sendResponse(id: string, err?: Error, data?: RequestResponseMessageMap[MessageType][1] | null): void {
     if (this.removed) {
       delete this.abortControllers[id];

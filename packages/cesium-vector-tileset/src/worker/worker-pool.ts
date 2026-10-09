@@ -1,9 +1,9 @@
 import type { Subscription } from '../util/evented';
 import type { WorkerEndpoint } from './worker-channel';
 import { browser } from '../util/browser';
+import { config } from '../util/config';
 import { ensureError } from '../util/errors';
 import { subscribe } from '../util/evented';
-import { createWorker } from './create-worker';
 
 interface WorkerState {
   failure?: Error;
@@ -20,6 +20,7 @@ export class WorkerPool {
   active: Record<string, boolean>;
 
   workersPromise?: Promise<WorkerEndpoint[]>;
+
   private readonly workerStates = new Map<WorkerEndpoint, WorkerState>();
 
   constructor() {
@@ -31,7 +32,9 @@ export class WorkerPool {
     if (!this.workersPromise) {
       const workers: WorkerEndpoint[] = [];
       while (workers.length < WorkerPool.workerCount) {
-        const worker = createWorker();
+        const worker = config.WORKER_URL
+          ? new Worker(config.WORKER_URL, { type: 'module' })
+          : new Worker(new URL('./tile.worker.ts', import.meta.url), { type: 'module' });
         const state: WorkerState = { listeners: new Set(), subscriptions: [] };
         this.workerStates.set(worker, state);
         const fail = (error: Error): void => {

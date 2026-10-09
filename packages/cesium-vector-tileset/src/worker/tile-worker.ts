@@ -94,6 +94,7 @@ export class TileWorker {
 
   referrer: string;
   globalStates: Map<string | number, Record<string, any>>;
+
   private readonly _prepareTile: (tile: WorkerTileWithData, tileID: OverscaledTileID) => void;
 
   constructor(
@@ -210,6 +211,9 @@ export class TileWorker {
     });
   }
 
+  /**
+   * @internal
+   */
   private _getGlobalState(mapId: string | number): Record<string, any> {
     let state = this.globalStates.get(mapId);
     if (!state) {
@@ -219,6 +223,9 @@ export class TileWorker {
     return state;
   }
 
+  /**
+   * @internal
+   */
   private async _setImages(mapId: string | number, images: string[]): Promise<void> {
     this.availableImages[mapId] = images;
     for (const workerSource in this.workerSources[mapId]) {
@@ -229,10 +236,16 @@ export class TileWorker {
     }
   }
 
+  /**
+   * @internal
+   */
   private async _syncRTLPluginState(_mapId: string | number, incomingState: PluginState): Promise<PluginState> {
     return await rtlWorkerPlugin.syncState(incomingState, loadScript);
   }
 
+  /**
+   * @internal
+   */
   private _getAvailableImages(mapId: string | number) {
     let availableImages = this.availableImages[mapId];
 
@@ -241,6 +254,9 @@ export class TileWorker {
     return availableImages;
   }
 
+  /**
+   * @internal
+   */
   private async _loadSourceTile(
     mapId: string | number,
     params: WorkerTileParameters,
@@ -255,6 +271,9 @@ export class TileWorker {
     return result;
   }
 
+  /**
+   * @internal
+   */
   private _getLayerIndex(mapId: string | number) {
     let layerIndexes = this.layerIndexes[mapId];
     layerIndexes ||= this.layerIndexes[mapId] = new StyleLayerIndex();
@@ -267,6 +286,7 @@ export class TileWorker {
    * @param sourceType - the source type - 'vector' for example
    * @param sourceName - the source name - 'osm' for example
    * @returns a new instance or a cached one
+   * @internal
    */
   private _getWorkerSource(mapId: string | number, sourceType: string, sourceName: string): WorkerSource {
     this.workerSources[mapId] ||= {};
