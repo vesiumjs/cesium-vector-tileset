@@ -1,8 +1,31 @@
 # 性能与验收基线
 
-更新于 2026-10-05。Cesium 1.146.0 / engine 26.4.0、MapLibre GL JS 6.11.2、TypeScript 6.0.x。保持 Primitive 扩展库定位、unplugin-cesium、Native FPS、Globe 与 OIT。主线程和 Worker 共用多入口构建。本文保留当前结论和可核对原始证据，历史诊断不再逐批重复罗列。
+历史基线更新于 2026-10-05，下面保留对应版本的数据；本轮 2026-10-07 的几何调度、传输及完整动态对照见[动态渲染验证](./dynamic-rendering-acceptance.md)。历史环境为 Cesium 1.146.0 / engine 26.4.0、MapLibre GL JS 6.11.2、TypeScript 6.0.x。保持 Primitive 扩展库定位、unplugin-cesium、Native FPS、Globe 与 OIT。主线程和 Worker 共用多入口构建。
 
 主体重构、全球来源、压力预设与维护测试已经落地，但不能宣称整体性能追平 MapLibre。几何任务直接复用 Cesium TaskProcessor；普通建筑各模式统一走 Native 管线，颜色/透明度/渐变通过实例属性、光照通过 uniforms 更新，高度/基底变化才重建几何。初始零透明度的建筑仍需首次显示时构建一次。此前四次模式切换共 112 帧，道路与建筑均无空帧；其它轨道的九条来源/paint 交接也已通过。最近正式 ABBA 仍落后于 MapLibre，高负载城市存在长帧，双轨增加实际资源成本。已通过的交接、预设链或额外的全部 isolate 峰值研究不再重复列为收尾任务。
+
+## 2026-10-07 动态调度验收
+
+本次使用 Cesium 1.146.0 / engine 26.4.0、MapLibre GL JS 6.12.0。上面的历史 ABBA 负载与本次真实城市运动用例不同，不能直接比较数值。
+
+重构将符号的当前显示代次、未来代次及拟显示所有者放入独立碰撞范围，复用同一冻结视图和完整结果契约。移除固定 128 对/帧上限，按每帧 2 ms 时钟分配计算；符号交接独立于表面退役。当前显示的旧代次不会被未来标签挡住，父子瓦片交接也不再叠加同一半透明符号。可见性变化保留已构建资源，只补齐缺失轨道；库内部处理按需渲染的挂载、show、异步更新和移除唤醒。
+
+连续运动还发现并修复了两项原有验收未覆盖的问题：低级瓦片只有表面却错误遮住高级符号，以及同时暂留的父子瓦片相互遮挡而清空显示集合。符号覆盖现在只由具有当前可见图层及可绘制资源的所有者建立，已遮挡的子代不能反遮祖先。真实贴地测试另外暴露了 Native 持久登记顺序与样式顺序相反的问题；只在集合或顺序改变时重新排序，稳定帧不反复移除集合。
+
+维护入口为 `e2e/camera-dynamics.spec.ts`。每瓦片 100 / 900 个图标，源响应延迟 80 ms，连续 32 步拉远、32 步拉近、36 步旋转和倾斜，逐个 postRender 读取像素。两组分别记录 199 / 206 帧，均有 72 个旋转帧：低于 minzoom 后的残留帧为 0，旋转期间符号整片消失帧为 0。900 密度首次就绪为 47 帧，未排布瓦片为 0；此帧数受软件 GPU、读像素和网络调度影响，不代表 FPS 或硬件吞吐。额外用例核对显示阈值及整圈转向不替换存活瓦片集合、贴地显隐能恢复并停止渲染、半透明世界锚点只有一份符号，以及删除最后一个符号层后的资源和像素清理。
+
+硬件真实伦敦 OpenFreeMap 数据以相同样式并排运行 MapLibre，连续缩放、平移和倾斜旋转后恢复俯视，无库渲染错误，并最终停止按需渲染。实际 renderer 为 Intel RKL / Mesa Vulkan。首次 213 帧仍有夹具的逐帧画面回读；后续采样发现该测试开销很大，因此城市性能入口通过 `readback=0` 关闭像素探针，同时保留录像。密集符号正确性入口继续逐帧读像素。
+
+关闭回读且未启用 CPU profiler 的独立一轮记录 **208 帧**，同步 tileset update P95 为 **22.1 ms**、最大 **74.0 ms**，符号 update P95 为 **1.2 ms**、最大 **9.6 ms**。构建 P95 为 17.8 ms、最大 63.0 ms，仍有超出预算的单项工作。另一次独立 CPU 采样确认主要调用栈包括瓦片几何构建、Worker 交付/反序列化与 Native 绘制；未发现仍由固定符号数量上限或覆盖仲裁造成的瓶颈。同步 update 不包含全部 Worker 交付或 Scene/GPU 时间，各阶段可能嵌套，不能相加为整帧或拿来比较双方 FPS。不同回读、profiling 和异步加载状态的轮次不作吞吐改善推断；当前不宣称整体追平 MapLibre。
+
+原始证据：[密集运动逐帧数据](../../node_modules/.cache/playwright/symbol-orbit-fixed/camera-dynamics-continuous-f8656-hout-caller-render-requests/camera-dynamics.json)、[真实城市数据](../../node_modules/.cache/playwright/city-no-readback-final/camera-dynamics-public-cit-27202-ous-zoom-pan-and-orbit-live/public-camera-dynamics.json)、[完整城市运动录像](../../node_modules/.cache/playwright/city-no-readback-final/camera-dynamics-public-cit-27202-ous-zoom-pan-and-orbit-live/video.webm)、[独立 CPU 采样](../../node_modules/.cache/playwright/city-profile-no-readback-final/camera-dynamics-public-cit-27202-ous-zoom-pan-and-orbit-live/city-motion.cpuprofile)。ESLint → TypeScript → 26 文件 / 231 单测及库/demo 构建通过；20 个不同的端到端/发布消费者用例通过。临时诊断记录保留在 ignored cache，维护测试已移除 owner 状态探针。
+
+复现：
+
+```bash
+pnpm exec playwright test e2e/camera-dynamics.spec.ts
+E2E_GPU=hardware E2E_LIVE=1 pnpm exec playwright test e2e/camera-dynamics.spec.ts
+```
 
 ## 复现与计量
 
@@ -32,7 +55,7 @@ CPU 测量按 Cesium / MapLibre / MapLibre / Cesium 顺序，每轮使用独立 
 
 ## 最近同条件性能
 
-最近正式计时属于 TaskProcessor 复用之前的统一道路版，独占硬件 ABBA **1 通过、0 失败/跳过/重试后通过，约 140 秒**。同一 Intel Vulkan 硬件、固定二维负载、完整空间探针与各级请求核验通过。见[正式测量与边界](../../node_modules/.cache/playwright/test-results/line-modes-performance-summary.json)。当前仅替换重复传输协议，未重跑性能或声称计时改善。
+本节历史正式计时属于 TaskProcessor 复用之前的统一道路版，独占硬件 ABBA **1 通过、0 失败/跳过/重试后通过，约 140 秒**。同一 Intel Vulkan 硬件、固定二维负载、完整空间探针与各级请求核验通过。见[历史测量与边界](../../node_modules/.cache/playwright/test-results/line-modes-performance-summary.json)。2026-10-07 已重跑完整独立 ABBA，结果与测量边界见[本轮动态渲染验证](./dynamic-rendering-acceptance.md)，不将历史数据当作当前结果。
 
 | 主线程同步 CPU 指标，ms | Native 两轮 | MapLibre 两轮 |
 | --- | ---: | ---: |

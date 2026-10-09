@@ -11,17 +11,19 @@ pnpm install
 pnpm dev
 ```
 
-打开 Vite 输出的本地地址。演示默认使用 OpenFreeMap Liberty 样式和上海视角。可以通过控件切换样式、相机和场景模式，也可以输入自己的样式 JSON URL。
+打开 Vite 输出的本地地址。演示默认使用 OpenFreeMap 建筑白模样式和上海视角。可以通过控件选择统一的视角预设、地图样式和场景模式，也可以输入自己的样式 JSON URL。相机手势可继续调整视角，实时读数显示实际经纬度与 heading/pitch/roll。
 
 通过 URL 参数分享视角：
 
 ```text
-/?source=liberty&view=shanghai&mode=3d&angle=oblique
-/?scenario=manhattan&height=60
-/?source=bright&view=world&mode=2d
+/?preset=shanghai&source=buildings&mode=3d
+/?preset=manhattan&source=buildings&mode=3d
+/?preset=barcelona&source=liberty&mode=2d
 ```
 
-`source` 选择样式预设；`style` 指定自定义样式 URL；`mode` 支持 `3d`、`2d` 和 `cv`；`angle` 支持 `top`、`oblique` 和 `horizon`。可用样式、城市和场景，以及 `widgetOptions`、`sceneOptions`、`tilesetOptions`，统一定义在 [src/demo-config.ts](../src/demo-config.ts)。Vue 负责切换这些配置，渲染循环和尺寸变化由 CesiumWidget 管理。
+`preset` 选择视角预设，`source` 选择地图样式，`style` 指定自定义样式 URL，`mode` 支持 `3d`、`2d` 和 `cv`，`resolutionRatio` 设置渲染分辨率比例。相机高度与 heading/pitch/roll 来自预设及实际相机操作，URL 分享的是所选预设配置。
+
+可用视角和样式定义在 [preset-catalog.ts](../src/demo/preset-catalog.ts)。[app.vue](../src/app.vue) 直接展示 Widget 创建、`fromUrl` 加载以及 `scene.primitives.add/remove`；选择状态、相机切换和卸载清理也在此入口。URL 解析与相机参数转换是纯配置函数，渲染循环和尺寸变化由 CesiumWidget 管理。
 
 预设从外部服务请求数据。自定义样式引用的数据源、sprite 和字形必须可访问，并为应用所在域配置 CORS。请展示数据提供方要求的署名，在演示之外使用预设前核对其服务条款。
 
@@ -48,6 +50,14 @@ pnpm dev
 | `pnpm publish:ci`        | 委托库包校验标签、构建、打包并发布，供 npm 发布工作流调用                                   |
 
 运行浏览器测试前，通过 `pnpm test:e2e:install` 安装 Chromium。Playwright 报告与失败产物位于 `node_modules/.cache/playwright/`。构建命令只负责生成产物，类型检查由 `pnpm lint` 或 `pnpm lint:tsc` 执行。
+
+完整预设的真实数据动态回归可单独运行：
+
+```bash
+E2E_GPU=hardware E2E_LIVE=1 pnpm exec playwright test e2e/demo-presets.spec.ts
+```
+
+该回归连续执行缩放、绕目标旋转、倾斜与返回，并保存实际相机、渲染统计和五阶段画面。[预设筛选与实景校验记录](./research/demo-preset-validation.md)说明保留理由、被删除视图和已验证范围。
 
 修改代码后，依次运行 `pnpm lint:eslint`、`pnpm lint:tsc` 和相关测试。单元测试放在被测试代码同级的 `__test__/` 目录，浏览器测试位于 `e2e/`。
 

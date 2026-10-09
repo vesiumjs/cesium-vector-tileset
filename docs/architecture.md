@@ -1,8 +1,8 @@
 # Primitive MVT 适配结构
 
-公开入口是 `CesiumVectorTileset`，负责样式与渲染资源生命周期；瓦片解析、样式求值、几何构建和绘制各自集中在以下目录，不向用户暴露内部调度对象。
+公开入口是 `CesiumVectorTileset`，负责样式与渲染资源生命周期；瓦片解析、样式求值、几何构建和绘制各自集中在以下目录，不向用户暴露内部调度对象。配置合同集中在 `tileset-options.ts`，图片输入与统计结果使用 `tileset-types.ts` 中的命名类型。URL 工厂调用 `style/load-style.ts` 处理请求转换、取消与响应结构检查，Style 继续负责完整样式语义验证；公开类保留初始化与帧内协调顺序。
 
-发布包只有一个公开 ESM 入口及其类型声明。主线程和 Worker 由同一次多入口构建产生，共同代码与基础库放入同目录的私有 `shared-*.mjs`，Cesium 保持外部 peer；Worker 只通过相对路径加载该模块。共享文件减少重复发布字节，各线程仍分别拥有运行期对象。Node 22.13+ 的 `import` 与 `require()` 加载同一公开入口，构造器和 Worker 池不会因模块格式分裂。主线程拾取和 feature-state 使用 Worker 生成的 FeatureSnapshot，不再保存原始瓦片字节并重复解码。MLT 依赖在构建时纳入发布产物，避免其扩展名缺失的内部导入交给消费者运行时解析。
+发布包只有一个公开 ESM 入口及其类型声明。tsdown 分别处理主线程入口和 Worker 多入口构建：主线程将 Cesium 保持为外部 peer；瓦片 `worker.mjs` 和几何 `geometry-worker.mjs` 打包其 CPU 处理所需的依赖，使用默认代码拆分共享模块，不依赖文档的 import map。各线程分别拥有运行期对象，Worker 入口和其余发布模块保持相对位置。Node 22.13+ 的 `import` 与 `require()` 加载同一公开入口，构造器和 Worker 池不会因模块格式分裂。主线程拾取和 feature-state 使用 Worker 生成的 FeatureSnapshot，不再保存原始瓦片字节并重复解码。MLT 依赖在构建时纳入发布产物，避免其扩展名缺失的内部导入交给消费者运行时解析。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -28,6 +28,14 @@
 
 bucket-geometry 集中拥有面/线/点的投影、缓存和 Worker 分派，不再另设只转调这些函数的投影模块。普通面直接产出位置和索引，不生成无人消费的图案坐标，也不在传输前重建一份删字段的对象图。图案显式请求 tile XY；已有普通面时复用它的位置和索引。细分器已经生成去重后的顶点与索引，投影直接写最终 typed arrays，不再创建动态坐标数组、第二份坐标字典和索引重排。
 
+投影几何和原始线坐标使用按 bucket 打包的 owner 与 typed metadata 传输，wire 对象及 view 数量不随要素数增加。主线程先恢复 owner list，消费要素时才创建稳定的共享子视图。填充轮廓在 Worker 预计算，平面原环与球面舍入细分环分别拥有真实模式消费者；不能以“额外采样共线”为由混用。轮廓高度偏移与道路共用 shader 位移，保留源坐标及包围球扩展。
+
+paint binder 只传输要素属性与求值参数，不重复传输表达式 AST。瓦片发布前绑定场景当前编译图层。来源的解析代次在结构性样式修改时立即失效，load/reload 共享一个可取消请求租约，旧响应不能先卸载当前内容再绑定新结构；Worker 图层确认和当前 paint 结构一致后才能消费最新结果。默认过渡中数据驱动值变为常量时，旧 paint 保留期间不会提前发布常量 bucket。取消信号沿 WorkerChannel、load/reload、parse 和依赖请求传递，旧租约清理只影响其实际 owner；共享素材缓存的生命周期独立于单个瓦片。
+
+线条编译的同步与分帧调用使用同一生成器，长路径按 32 点推进，短路径由源与 chunk 边界计费；未完成几何不进入缓存。填充径向位移和 Buffer polygon 装配也可在一个要素或一个图层内部暂停，只有完整阶段才交给发布队列，取消时销毁已分配但未发布的集合。相机覆盖和样式准备计入同一物理帧的 tile 工作预算，多个 Cesium viewport 复用 deadline；该预算不等于整个 Scene 的耗时上限。
+
+GeometryPrimitive 的冷准备只由 SceneCollections 的预算上传阶段推进。主线程按预算复制并传输独立几何输入，几何 Worker 执行 Native combine、坐标记录编码、属性压缩与位置纹理打包；回复只保存结果，后续预算推进 Native VA、shader 与上传。普通 collection traversal 只绘制可用的 owner。paint 与首次准备共同获得执行许可，paint 耗尽 deadline 后仍推进一个有界准备单位，避免连续相机变化造成停滞。实际 WebGL 资源创建和单次 Native Buffer add/update 仍是不可中断调用；新代次只有在完整上传及 Native afterRender ready 后才接管旧 owner。缓存瓦片恢复时，尚未 ready 的集合重新加入首次准备队列；已上传集合保留原 owner 并直接绘制。
+
 初始加载和公开样式替换共用全样式验证：先用 MapLibre 校验，再用其 `derefLayers` 解析继承类型，拒绝没有 Primitive 渲染消费者的 `line-gradient`，在创建或修改任何来源、图层之前通过上游 `ValidationError` 报错。初始 readiness 拒绝，已加载样式保持完整。生成器排除该属性；不再构造 ColorRampProperty、注册其 Worker 传输类或维护无人读取的梯度版本状态。
 
 `WorkerChannel` 自己持有 MessageChannel，每个消息轮次启动一个队列项，让取消消息有机会到达；异步处理可以并行等待，后续响应能解除前面请求的等待。移除通道时关闭两个端口并取消请求。共享池的惰性入口直接位于 `worker-pool.ts`，不另设只有一个 getter 的文件。
@@ -38,13 +46,15 @@ WorkerChannel 接收端消费浏览器已经克隆的消息对象树：数组与
 
 Buffer 面的透明度变化直接更新原生 `blendOption`。Buffer 圆点始终使用 Native `TRANSLUCENT` 混合：原生 shader 把抗锯齿覆盖率写入 alpha，即使填充和描边都是不透明色，边缘仍需要混合。圆点 paint 只更新原集合的材质与可见性，不再维护不透明分类。Native renderer 根据自己的 command.pass 判断混合状态变化；样式顺序规划使用缓存的 Native DrawCommand.shallowClone，保持原命令的 pass/renderState 所有权。源命令 dirty 时刷新该缓存，稳定帧复用同一个规划命令及派生拾取命令。圆点的可见性同时考虑填充和有效描边宽度；最终零透明度的颜色清为零 RGBA，避免 Native 描边插值带入透明颜色的旧 RGB。
 
-每个 tileset 持有一个 DrawCommands。第一遍过滤交接遮罩并准备 Native 命令，第二遍原位裁剪符号并收集排序项；不再通过反复 splice 移动后续命令。排序记录以实际输入 command 为弱引用 key，每帧刷新图层与瓦片排名；临时数组复用后在 finally 清空，不持有退役 owner。可见性直接保存图层 ID 与布尔值，不使用分隔符编码；状态未变时保持快照身份，避免无效重发布。光照值未变时复用已有值对象。
+命令规划和 line family 共用 `ReplayDrawCommand` 的 Native 字段结构，分别保留自己的更新策略：规划副本比较源字段并保护最终提交状态，family 副本保留自己持有的 uniforms、owner 与 batch table。每个 tileset 持有一个 DrawCommands。第一遍过滤交接遮罩并准备 Native 命令，第二遍原位裁剪符号并收集排序项；不再通过反复 splice 移动后续命令。排序记录以实际输入 command 为弱引用 key，每帧刷新图层与瓦片排名；临时数组复用后在 finally 清空，不持有退役 owner。可见性直接保存图层 ID 与布尔值，不使用分隔符编码；状态未变时保持快照身份，避免无效重发布。光照值未变时复用已有值对象。
 
-Native BufferPoint / PointPrimitive 的填充与描边原本分别插值 RGB 和 alpha，两个透明度不同时会产生颜色交叉项。命令规划在 Cesium 1.146 的原 fragment shader 上派生颜色插值：先混合预乘贡献，再除以合成 alpha，以继续使用 Native 的 straight-alpha blend。保留原几何、抗锯齿覆盖、discard、gamma、pick 与 log-depth；原命令和原 shader 不被替换。衍生 shader 通过 Native ShaderCache 挂到原 shader，随其最终释放递归销毁。固定版本的 shader 语句变化会明确失败，需要更新适配及像素回归。SDR 的逐通道覆盖语义有真实 framebuffer 验证；HDR 保留 Native gamma / tonemapping，其颜色比例不使用 SDR 的线性断言。
+Native BufferPoint / PointPrimitive 的填充与描边原本分别插值 RGB 和 alpha，两个透明度不同时会产生颜色交叉项。命令规划在 Cesium 1.146 的原 fragment shader 上派生颜色插值：先混合预乘贡献，再除以合成 alpha，以继续使用 Native 的 straight-alpha blend。保留原几何、抗锯齿覆盖、discard、gamma、pick 与 log-depth；原命令和原 shader 不被替换。衍生 shader 通过 Native ShaderCache 挂到原 shader，随其最终释放递归销毁。依赖的 shader 语句变化会明确失败，需要更新适配及像素回归。SDR 的逐通道覆盖语义有真实 framebuffer 验证；HDR 保留 Native gamma / tonemapping，其颜色比例不使用 SDR 的线性断言。
 
 标准 PointPrimitive 的颜色更新直接赋给 Native setter，让它自行 clone 并标脏。先 clone 到 getter 返回的 Color 会让 setter 误判为相同颜色，CPU 已变而 GPU 不更新。Native 二维点集合在 paint 后可自动改变 buffer usage 并替换 VAF；生命周期验证检查旧 VAF 释放，而非要求它跨更新保持同一对象。BufferPoint 的原 VA 则继续复用。
 
 ## 所有权与更新
+
+符号相机输入由 `render/symbol/symbol-frame.ts` 从同一冻结 CameraFrameSnapshot 构造，集中处理地球遮挡、ECEF→实际 Scene 投影、2D 世界 wrap 和 scratch 复用。公开类只安排 renderer 更新、排布预算与后续帧唤醒，不再内联这些坐标规则。
 
 预算同步直接遍历各 renderer 的 live/held/fading/retired 所有者，通过 `visitMemoryEntries` 报告给预算已有的 tracked map；主线程不再创建 renderer entry 数组、第二份命名空间 entry 数组或 retained/evicted 镜像 Set。Scene tile 清理查询同一 tracked map；完整报告的 seen Set、pinned recency 和 retired oldest-first 顺序仍是预算合同。
 
@@ -61,6 +71,13 @@ Pattern staging 不自动销毁 Primitive，取消构建负责销毁已封装但
 首次更新队列区分待准备子项和已可绘制子项。Native ready 在 afterRender 才变为 true；当前调用实际提交过命令的物理 Primitive 已能绘制，因此即使队列尚未完成，也在每个视口提交它的当前命令，不再次执行其首次准备。仍异步 pending 的子项继续受预算限制，整集合原子更新过的视口不重复重放；隐藏替换和隐藏父集合只准备资源，保留原 show 状态并丢弃提前产生的命令。交接与上传字节采集仍等待正式 ready。
 
 符号图像与 sampler 在 Native 命令提交前刷新，避免命令继续引用已释放的旧图集。符号排布完成后单独结算可见性交接，不再执行第二次首次更新；最终父子覆盖仲裁和命令排序仍在全部内容更新之后执行。
+
+符号碰撞由 `SymbolPlacementScope` 统一保存不可变输入、冻结视图、修订和完整结果。当前显示代次、未来替代瓦片与局部交接后的所有者分别有独立 occupancy；三个范围共享每帧 2 ms 时钟，不再限制每帧只能处理固定数量的符号。当前显示范围优先推进；相机变化不丢弃正在计算的代次，完成后再追赶最新视图。空显示范围直接取消过时工作，稳定空帧不重复激活。
+
+`SymbolTileRenderer` 按瓦片内容代次保存当前显示 entry；同一瓦片 ID 的新版内容不会提前代替仍在绘制的旧版碰撞输入。`TileResidency` 独立维护符号显示所有者和地表退役：替代地表准备完成即可交接，符号等待 GPU 上传及整个拟显示范围的碰撞结果后原子切换。覆盖同一区域的旧标签直接退役，平移离开的标签仍可淡出。隐藏图层退出碰撞和命令提交，但保留已构建几何；恢复显示只补齐缺失内容。贴地填充向 VectorProvider 同步实时可见性及样式层顺序；只有集合或顺序变化时重新登记。
+
+按需渲染由 Cesium 的 `prePassesUpdate` 发现挂载和 `show` 变化，异步来源、发布、排布及过渡请求后续帧；移除时唤醒最后一帧并解除原场景监听。稳定状态不再请求绘制。`fromUrl()` 返回前完成初始化，`destroy()` 返回 `undefined` 并使后续公开操作遵守 Cesium 的已销毁对象约束。
+
 
 同一绘制表示中的道路 paint 原位更新 Primitive 的 uniform 或实例属性，恢复退休几何时先应用当前 paint；单纯修订号变化不重建道路。常量与数据驱动表达式之间的切换需要新的 Worker 属性绑定，使用 MapLibre 已有的 layer update 信号进入代次交接，不能用新表达式更新旧 bucket。
 
@@ -112,13 +129,15 @@ Worker 的五类 bucket 构建器继承共用 runtime，由 `worker-tile.ts` 按
 
 共享 MVT Worker 池统一监听 error/messageerror，锁存首个失败并只终止一次。每个 WorkerDispatcher 订阅所属 Worker 的失败，WorkerChannel 用同一个普通 Error 拒绝所有待处理与后续请求，Style 通过已有 ErrorEvent 报告；后来加入的客户端收到已记录的失败。正常销毁继续使用 AbortError，健康 Worker 继续工作；失败 Worker 不重试或重选。Vite 启动前扫描 Worker 入口，避免运行中重新优化依赖使已启动的 Worker 收到旧模块 URL 的 504。
 
-演示使用原生 CesiumWidget 管理 canvas、credits、渲染循环、resize 和浏览器事件。`src/demo-config.ts` 集中定义 Widget 与 Scene 参数、tileset 参数、地图来源、城市和压力场景，并将 URL 选择解析为地图与相机配置。`app.vue` 只保存选择、切换配置和调用 Cesium 原生方法。地图层在新样式初始化完成后替换旧实例；静态 credits 随当前地图增删。FPS 始终开启。
+演示在 `src/app.vue` 直接展示 CesiumWidget 创建、`CesiumVectorTileset.fromUrl` 与 `scene.primitives.add/remove`。当前实例、加载取消、错误、credits 和卸载清理由该入口持有；移除也取消尚未完成的加载。`preset-catalog.ts` 保存统一的相机姿态与样式目录，`demo-selection.ts` 只解析与序列化配置 URL，`scene-config.ts` 保存原生选项与坐标转换。CesiumWidget 管理 canvas、渲染循环、resize 和浏览器事件，FPS 始终开启。
+
+`config-panel.vue` 选择预设、地图样式和场景模式，支持自定义样式地址及添加、移除；视角可通过 Cesium 相机手势继续调整。`camera-readout.vue` 在真实 postRender 后读取当前相机经纬度与 heading/pitch/roll，不把预设值当作当前状态，也不为读数请求渲染。2D 的 camera.positionCartographic.height 按 Native 语义显示为正交视野宽度；切换模式的中间状态不显示旧坐标。
 
 demo 保持 `unplugin-cesium` 的原有集成，由插件管理 `CESIUM_BASE_URL` 与 Workers、ThirdParty、Assets、Widgets 静态目录。样式只引入 shared.css 和 CesiumWidget.css，保留原生 FPS、canvas/touch 与 credits 样式。必要引擎资源保持完整，包括 Globe 地形 Worker、拾取 Worker、天空与默认署名图片；生产浏览器回归检查资源响应、FPS 数字及样式和署名图片加载。
 
 道路使用统一的 Native Primitive 布局。唯一源 ECEF、canonical 展开经度、源顶点索引和闭环信息由 geometry 的 WeakMap 持有；保留完整 incoming/outgoing 角色，供三维近裁面裁剪使用。开放端点分别在 ECEF 和实际 Scene projection 中先镜像 DOUBLE 点，再写最终 FLOAT 邻点；不创建普通 join 索引或二维 alias/remap 数组。
 
-`geometry-primitive.ts` 将实例矩阵通过 Native GeometryPipeline 折入独立的世界坐标输入，保留调用方 geometry 和 matrix。道路的 Native combine 保持 encode-only，防止日期线插值生成分数 record ID 或角色；面保留 Native 日期线分割与 scene3DOnly 合同。投影实例包围球在主线程保留 DOUBLE 中心，并按实际 FLOAT 编码的最大误差扩展半径，避免 Worker 的 FLOAT 球传输损失；Native BoundingSphere.fromBoundingSpheres 形成组合 CV 球，随后由 Primitive 管理轴交换、WC/2D/CV/morph 命令、深度分区、拾取和销毁。batchId 保存为未归一化 UNSIGNED_SHORT，实例数上限为 65,536；道路仍按 512 实例及顶点预算拆块。适配固定到 Cesium 1.146.0 / engine 26.4.0。
+`geometry-primitive.ts` 将实例矩阵通过 Native GeometryPipeline 折入独立的世界坐标输入，保留调用方 geometry 和 matrix。道路的 Native combine 保持 encode-only，防止日期线插值生成分数 record ID 或角色；面保留 Native 日期线分割与 scene3DOnly 合同。投影实例包围球在主线程保留 DOUBLE 中心，并按实际 FLOAT 编码的最大误差扩展半径，避免 Worker 的 FLOAT 球传输损失；Native BoundingSphere.fromBoundingSpheres 形成组合 CV 球，随后由 Primitive 管理轴交换、WC/2D/CV/morph 命令、深度分区、拾取和销毁。batchId 保存为未归一化 UNSIGNED_SHORT，实例数上限为 65,536；道路仍按 512 实例及顶点预算拆块。已验证基线为 Cesium 1.146.0 / engine 26.4.0；包声明的 Cesium peer 范围为 `^1.146.0`，后续引擎变化仍需对应回归。
 
 `render/geometry/surface-position.ts` 在 Native 日期线分割、重排与索引拆分完成后，按整个 Primitive 的最终位置计算各通道共同前缀。high/65536 精确表示 signed 16-bit code；low 直接读取 FLOAT 的 Uint32 位模式，不量化坐标。共同前缀、变动位宽和位偏移属于该 owner 的 uniforms，只有变动位上传为未归一化 UBYTE 属性。所有 Geometry 使用相同字段和属性布局，shader 只随 planar/morph 与 byte lane 数变化，不嵌入瓦片坐标。每个 owner 克隆 Appearance 和 uniforms，保留原 Material，解码后继续使用原 RTE 计算。MORPHING 保留两组位置并用原生 czm_columbusViewMorph 插值，结束后进入 3D Buffer collection。high 不保留零的符号，与原 SHORT 合同一致；low 的位模式逐位保留。
 
@@ -148,11 +167,11 @@ ProgramConfiguration仅保存有实际消费者的source/composite表达式与CP
 
 道路始终构建单位宽 strip，实际宽度和 miter limit 在 Native instance table/uniform 更新。emit 直接生成最终 UBYTE flags，fan 参数先按原合同 Math.fround。所有模式保留独立 incoming/outgoing 角色，保证同一已上传几何在三维近裁面仍可绘制；短段、折返、closed dash 首点与端帽/fan 保留原角色。最终属性在 Native combine 返回后压缩。输入为 ECEF 与明确源拓扑，实例矩阵由 Native 转换独立世界坐标；表面保留球裁剪，道路按扩张语义关闭。
 
-道路、标准平面面、实体建筑与 3D 填充轮廓共用按 Cesium context 管理的原生 TaskProcessor，分别运行原装 createGeometry 和 combineGeometry。库仅限制两条完整在途链；容量检查发生在投影和输入准备之前，等待时保留输入并由首次更新队列重试。create 输入按连续 Geometry 顺序分片，每片最多 512 个实例、512 KiB 属性/索引逻辑数据；单个超限 Geometry 完整保留且独占一片。回复后才发送下一片，最后一次 combine 消费按原序追加的全部 Native 结果；片间不释放槽位，取消不续发剩余片。该字节门限不等于完整 structured-clone backing 或 wire 大小，也不是所有原子步骤的耗时保证。
+道路、标准平面面、实体建筑与 3D 填充轮廓共用按 Cesium context 管理的 TaskProcessor 和几何准备队列。主线程按最多 512 个实例及 512 KiB 逻辑数据组织复制单位，生成独立 packed owner；队列按实际 transfer 字节合并同一微任务内的小请求，最多保留两批，超限的单请求完整保留且独占一批。容量检查先于原始输入复制，等待时保留已有输入并由首次更新队列重试。几何 Worker 与主线程共用 `primitive-pipeline.ts` 的实际 pack/unpack/combine 合同。Worker 在 unpack 前检查 packedInstances 的 Float64 类型、整数实例数与实际包长度，并核对解包后的实例数；不以 Scene 与 Worker 的 Cesium 版本字符串是否相等判定兼容性。每个请求的 combine 与布局编码在几何 Worker 内完成；批内错误逐请求返回，取消结果不会重新发布。复制单位与批次门限都不是单次原子调用或整个 Scene 耗时的硬上限。
 
-公开 buildModuleUrl 定位 peer 资产；TaskProcessor 负责消息、任务 ID、传输能力探针和 Native 错误还原。CDN 几何任务使用库拥有的局部 Blob import，避免 Native shim 的 URL 生命周期泄漏。主线程只打包实例 metadata 并冻结公开 modelMatrix；原装 create Worker 读取克隆的 raw Geometry、执行 Native Float64 打包，仅其独立结果缓冲再转移给 combine。共享源数组不 detach，Native 逐实例 pack/unpack 继续隔离可变 attributes 与 indices；没有新增自制 Worker 产物。道路仅重排与编码，表面仍可日期线分割。结果先压缩属性，再进入 Native VA 上传与 afterRender ready。
+几何 Worker 入口由相对模块 URL 定位，Cesium 的其他静态资产仍由宿主部署。TaskProcessor 负责消息、任务 ID、传输能力探针和 Native 错误还原。CDN 几何任务使用库拥有的局部 Blob import，避免 Native shim 的 URL 生命周期泄漏。主线程冻结公开 modelMatrix，打包实例 metadata，并传输独立的几何 owner；共享源数组不 detach。Worker 通过 Native PrimitivePipeline 合并并按布局编码，保留原有几何隔离。道路仅重排与编码，表面仍可日期线分割；结果进入 Native VA 上传与 afterRender ready。
 
-实体建筑与普通3D轮廓使用 `native` 几何布局，保留原属性类型、实例属性、batchId、indices、bounds 和 Appearance，不进入道路/平面面的格式转换及16-bit实例限制。成功排队的首次调用只完成实例metadata与首片调度，下一次 Native update 创建 batch table，合并后继续 Native VA、shader、绘制、拾取及 ready。队列未准备完成时保留旧可见内容。
+实体建筑与普通3D轮廓使用 `native` 几何布局，保留原属性类型、实例属性、batchId、indices、bounds 和 Appearance，不进入道路/平面面的格式转换及16-bit实例限制。成功排队的首次调用只完成实例 metadata 与几何请求调度，下一次 Native update 创建 batch table，回复后继续 Native VA、shader、绘制、拾取及 ready。队列未准备完成时保留旧可见内容。
 
 普通建筑始终提取球面拓扑，投影、日期线分割、双坐标属性及 2D/CV/morph 包围球交由 Native PrimitivePipeline 生成；只有宿主实际配置 scene3DOnly 时省略投影轨。已上传建筑与道路一起留在模式交接中，直至替代代次可绘制。平面样式顺序只改变缓存的 Native DrawCommand 副本，3D 继续使用原命令的深度与透明度 pass。初始零透明度跳过几何提取，只记录实际延后上传的图层；非空源保留集合，首次显示时构建一次。以后隐藏/显示保留 Native owner、VA 与拾取 ID。无建筑、空 bucket 和排除图层不创建这个所有者。
 
@@ -164,7 +183,7 @@ ProgramConfiguration仅保存有实际消费者的source/composite表达式与CP
 
 真正改变 dash/layout 或属性表达形式时，重建复用已有逐 feature 构建器与共享工作预算。准备结果同时返回 replacements 与 ready；无预算不启动几何构建。未完成时保持旧 renderer owner，不写入已应用 paint cache；完成后统一最新 paint，再沿用 Native ready 交接。连续 paint 变化不取消几何，几何签名变化重开；回到原布局取消待建结果。退役、移除与冻结断开未提交 CPU 状态。等待会阻止新上传和最终交接，但旧集合已上传的可见部分继续绘制。单个 feature 和输入校验仍不能抢占，预算是合作式推进。
 
-单个 Primitive 销毁保留槽位至真实结果结束并丢弃迟到结果；最后一个持有者结算 pending、销毁 TaskProcessor 和几何 Blob URL。Worker 加载/反序列化失败结算整个 owner，任务级错误只结算对应槽；局部观察 Native processor 的 Worker 错误，补足其浏览器致命失败不会拒绝 Promise 的行为。正常部署须保留完整 Cesium 静态 Workers，包括原生 transferTypedArrayTest；unplugin-cesium 负责发布。支持 GeographicProjection 与 WebMercatorProjection 及其 ellipsoid，拒绝 Native 异步协议无法保存的其它投影。共享输入回归核对源数据未改写与输出一致，成本与限制见 [异步接入记录](./research/native-line-combine.md)。
+`GeometryPrepareWorker` 按 context 引用计数，负责惰性 TaskProcessor、CDN bootstrap、浏览器致命失败锁存和最后引用销毁。`GeometryPrepareQueue` 唯一持有已接收请求的 Promise 结算，不再另设 owner pending 注册表。单个 Primitive 销毁保留批次容量至真实结果结束并丢弃迟到结果；最后一个持有者使队列失败、销毁 TaskProcessor 并释放几何 Blob URL。Worker 加载或反序列化失败结算整个队列，合法批回复中的任务级错误只结算对应请求；局部观察 Native processor 的 Worker 错误，补足其浏览器致命失败不会拒绝 Promise 的行为。正常部署须保留完整 Cesium 静态 Workers，包括原生 transferTypedArrayTest；unplugin-cesium 负责发布。支持 GeographicProjection 与 WebMercatorProjection 及其 ellipsoid，拒绝 Native 异步协议无法保存的其它投影。共享输入回归核对源数据未改写与输出一致，成本与限制见 [异步接入记录](./research/native-line-combine.md)。
 
 圆头采用 MapLibre 的四边形与片元距离裁剪，每端只增加两个顶点，与线宽无关；圆角连接继续保留扇形。实线与虚线共用圆头距离语义，端头四边形和线身只共享边，不叠加半透明颜色。仅圆角连接的细分影响布局缓存键。屏幕扩张后的道路不能由中心线包围球界定，GeometryPrimitive 的道路布局关闭此球的空间裁剪，由 MVT covering 管理瓦片可见性；Native 的球仍用于视锥深度分段，深度测试和 shader 近裁剪仍保留。真实 WebGL 回归检查扩张圆头的拾取与透明四边形角落，避免狭窄拾取视锥漏掉有颜色的道路。
 

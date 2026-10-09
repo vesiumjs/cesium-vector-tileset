@@ -4,7 +4,7 @@
 
 ## 结论
 
-本项目当前验证基线为 Cesium `1.146.0` / engine `26.4.0` / widgets `16.3.0` / core `0.1.0`，库的 peer 限定为这一已验收 Cesium 版本。升级阶段的582项单测及两批90个不同离线用例已经通过；后续重构的当前检查与未完成项见 [验收基线](./performance-baseline.md#当前验证)。平面线条的 Native combine/upload 适配与 VA 预算捕获访问引擎内部契约，后续版本应先通过对应真实 WebGL 回归，再放开版本范围。仅固定 Cesium peer 不会固定 engine：cesium 1.145 的依赖为 `@cesium/engine: ^26.3.0`，允许解析到 26.4；必须同时记录 lockfile 的实际 engine 版本。[1.145 manifest](https://registry.npmjs.org/cesium/1.145.0)
+本项目当前验证基线为 Cesium `1.146.0` / engine `26.4.0` / widgets `16.3.0` / core `0.1.0`，库的 peer 范围为 `^1.146.0`，这一具体版本用于记录已验收基线。升级阶段的582项单测及两批90个不同离线用例已经通过；后续重构的当前检查与未完成项见 [验收基线](./performance-baseline.md#当前验证)。平面线条的 Native combine/upload 适配与 VA 预算捕获访问引擎内部契约，后续版本仍需对应真实 WebGL 回归来确认这些契约。仅记录 Cesium 版本不会固定 engine：cesium 1.145 的依赖为 `@cesium/engine: ^26.3.0`，允许解析到 26.4；必须同时记录 lockfile 的实际 engine 版本。[1.145 manifest](https://registry.npmjs.org/cesium/1.145.0)
 
 2026-09-30 核对时官方 latest 是 1.145，1.146 只在 main 候选记录中；最近复核确认 1.146 已正式发布，包含 engine `26.4.0`、widgets `16.3.0` 和新增 core `0.1.0`。core 拆包及实际 peer/Worker 资产需要运行验证，不能仅凭静态 API 相似就认为升级已验收。[固定 1.146 manifest](https://github.com/CesiumGS/cesium/blob/1.146/package.json#L52)、[engine manifest](https://registry.npmjs.org/@cesium%2fengine/26.4.0)
 
@@ -42,7 +42,7 @@ Native Buffer renderer 以自己命令的 pass 判断混合变化。旧样式规
 
 独立描边回归首先发现：circle opacity 最终为零时，原 RGB 仍参与 Native 内缘插值，透明绿色填充与蓝色描边产生 50 个绿色主导像素。颜色提取在 opacity 乘入后将最终零 alpha 的颜色清为零 RGBA，消除了该错色。后续真实 framebuffer 回归进一步证明：Native 分别插值 RGB 与 alpha，使部分透明内缘产生交叉项；纯绿填充 alpha=64/255、纯蓝描边 alpha=192/255 的单通道误差约 33 byte，交换 alpha 后误差方向相反。不透明恢复时误差归零，不能只检查两通道总亮度。现在在原 Native fragment shader 上派生预乘贡献插值，再归一化以保留 Native straight-alpha 混合，3D/2D/CV 的同模式 opaque 参考复测单通道误差均小于 1 byte。原几何、Native coverage/discard/gamma 和拾取继续使用；没有复制一套完整点 shader。该颜色比例结论限于关闭 HDR 与后处理的 SDR 测量，HDR 继续使用 Native gamma/tonemapping。另由这个回归发现并修正标准 PointPrimitive setter 前先 mutate getter 导致 GPU 颜色不上传的问题。[Native shader](https://raw.githubusercontent.com/CesiumGS/cesium/1.146/packages/engine/Source/Shaders/BufferPointMaterialFS.glsl)、[MapLibre 6.11.2 shader](https://raw.githubusercontent.com/maplibre/maplibre-gl-js/v6.11.2/src/shaders/glsl/circle.fragment.glsl)
 
-Demo 使用原生 CesiumWidget 管理渲染循环、resize 与浏览器输入，配置集中在 `src/demo-config.ts`。真实浏览器覆盖 idle、拖拽/滚轮、飞行完成/取消、非零时长 3D/2D/CV morph、DPR2、零尺寸恢复与 Primitive 渲染异常。FPS 保持开启。Native Buffer 的 destroy 释放渲染上下文、VA 与拾取颜色，但其 isDestroyed 始终返回 false；GPU 回归以实际资源句柄验证释放。[Buffer lifecycle](https://github.com/CesiumGS/cesium/blob/1.146/packages/engine/Source/Scene/BufferPrimitiveCollection.js#L386)
+Demo 使用原生 CesiumWidget 管理渲染循环、resize 与浏览器输入。`src/demo/preset-catalog.ts` 保存统一视角与样式目录，`demo-selection.ts` 与 `scene-config.ts` 是 URL、场景和相机参数的纯配置函数；`app.vue` 直接展示 Widget 创建与 `scene.primitives.add/remove` 生命周期。实时相机读数从 postRender 读取实际位置及 HPR，FPS 保持开启。已有真实浏览器回归覆盖 idle、拖拽/滚轮、飞行完成/取消、非零时长 3D/2D/CV morph、DPR2、零尺寸恢复与 Primitive 渲染异常；这些历史检查不替代当前重构的验收记录。Native Buffer 的 destroy 释放渲染上下文、VA 与拾取颜色，但其 isDestroyed 始终返回 false；GPU 回归以实际资源句柄验证释放。[Buffer lifecycle](https://github.com/CesiumGS/cesium/blob/1.146/packages/engine/Source/Scene/BufferPrimitiveCollection.js#L386)
 
 开发服务器另复现了 Worker 依赖运行中重新优化，使旧 tinyqueue 模块请求 504、WorkerChannel 留下 26/33 个 pending 的问题。Vite 现在预扫描 Worker 入口；共享 MVT Worker 池也统一处理 error/messageerror，让所有客户端请求按原 Error 结算，并向 Style 报告。真实 Worker 模块 504 验证待处理请求清空、后来客户端失败回放、健康 Worker 继续响应和终止一次；没有重试或重新选 Worker。
 
@@ -172,11 +172,11 @@ Maptoolkit 是独有 schema，需单独的小样式定义。实测 TileJSON 字�
 
 ### 已落地的全球 demo 预设与建筑白模
 
-`src/demo-config.ts` 保留原有 source id 与 `cityPresets`，现有 **11 个预设、8 家全球运营方**。新增 `osm`、`basemap-world` 使用完整官方样式；`waymorphic`、`osm-us`、`maptoolkit` 使用 `src/styles/` 下明确维护的简洁 JSON，代码没有自动删除不支持图层的逻辑。每个来源提供 `provider`、`description`、`usage`，供界面显示覆盖与用途限制。Maptoolkit credit 含官方 logo，HTML 明确规定 24px 高度和活动版权链接；界面应始终在地图上显示该 credit。
+`src/demo/preset-catalog.ts` 的 `stylePresets` 提供 **11 个样式、8 家全球运营方**，`demoPresets` 用统一目录保存城区、滨水建筑与日期变更线的完整相机姿态和建议样式。新增 `osm`、`basemap-world` 使用完整官方样式；`waymorphic`、`osm-us`、`maptoolkit` 使用 `src/styles/` 下明确维护的简洁 JSON，代码没有自动删除不支持图层的逻辑。每个来源提供名称、URL、运营方与版权署名；服务范围和用途限制由本文记录。Maptoolkit credit 含官方 logo，HTML 明确规定 24px 高度和活动版权链接；界面应始终在地图上显示该 credit。
 
 新增 `buildings` 预设仍属于 OpenFreeMap，不计作第 9 家。它只声明 OpenFreeMap vector source，无 glyph/sprite/DEM 请求；白色 `fill-extrusion` 直接读取 `building.render_height` / `building.render_min_height`，保留水面、地面和浅灰道路用于定位。2026-09-30 使用当前 `/planet` TileJSON 取得纽约曼哈顿 z14 `4824/6157` 瓦片，HTTP 200、686,362 bytes；用仓库实际安装的 `@mapbox/vector-tile` 与 `pbf` 解码得到 **1,488 个 building features**，样本真实含 `render_height` 和 `render_min_height`，没有凭建筑层名称猜测高度字段。
 
-建筑白模用于 15m / 60m / 250m 等超低高度视角观察瓦片接缝、地表/建筑深度冲突、临近平面与抬头透视；相机位置需要放在实际道路/开放空间，地面相机高度与远处建筑高度不是同一参数。高负载城市、跨日期变更线、全球低缩放等场景由独立场景预设管理。一般来源切换保留相机位置；世界概览切到全球视图，压力场景使用各自的来源和相机预设。
+建筑白模用于 15m / 60m / 250m 等超低高度视角观察瓦片接缝、地表/建筑深度冲突、临近平面与抬头透视；相机位置需要放在实际道路/开放空间，地面相机高度与远处建筑高度不是同一参数。高负载城区、滨水建筑与跨日期变更线均从同一个视角预设入口选择。每项预设包含相机经纬度、高度、heading/pitch/roll 和建议样式；样式切换保留当前相机，视角预设选择应用其完整姿态。高度和角度由预设及实际手势控制，实时读数显示当前相机而非预设值。
 
 真实低空浏览器回归还核对了粗级数据：对应地段的 z13 building 是无高度属性的合并面，z14 才含逐建筑高度。白模样式只显示具有正数 `render_height` 的建筑，避免把合并面当作零高度建筑底板；不以默认楼高替代缺失数据。库中的旧地表覆盖与新的建筑图层也必须按实际图层所有权交接，旧水面不能代表新建筑已经有覆盖。
 
