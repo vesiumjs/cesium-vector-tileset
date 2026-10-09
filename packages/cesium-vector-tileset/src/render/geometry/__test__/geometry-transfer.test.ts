@@ -30,7 +30,7 @@ describe('native geometry transfer ownership', () => {
     const matrix = Matrix4.fromTranslation(new Cartesian3(1, 2, 3));
     const instance = new GeometryInstance({ geometry, id: 'source', modelMatrix: matrix });
     const owner = new GeometryPrimitive({ geometryInstances: instance }, 'native');
-    const worker = { addEventListener() {}, removeEventListener() {}, terminate() {} };
+    const worker = { addEventListener(): void {}, removeEventListener(): void {}, terminate(): void {} };
     const messages: Array<{ cloned: { requests: Array<{ geometries: Array<typeof geometry> }> }; before: number[]; after: number[] }> = [];
     vi.spyOn(Primitive.prototype, 'update').mockImplementation(() => {});
     vi.spyOn(TaskProcessor.prototype, 'scheduleTask').mockImplementation(function (parameters, transfers) {
@@ -87,7 +87,7 @@ describe('native geometry transfer ownership', () => {
       indices: new Uint16Array([0, 1, 2]) as never,
       primitiveType: PrimitiveType.TRIANGLES,
     });
-    const worker = { addEventListener() {}, removeEventListener() {}, terminate() {} };
+    const worker = { addEventListener(): void {}, removeEventListener(): void {}, terminate(): void {} };
     const tasks = vi.spyOn(TaskProcessor.prototype, 'scheduleTask').mockImplementation(function () {
       Object.assign(this, { _worker: worker });
       return new Promise(() => {});

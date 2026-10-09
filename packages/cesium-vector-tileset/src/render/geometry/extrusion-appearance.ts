@@ -4,6 +4,7 @@ import { PerInstanceColorAppearance } from 'cesium';
 /** Select Native's position branches from the actual combined attributes. */
 export class ExtrusionAppearance<Uniforms extends object = object> extends PerInstanceColorAppearance {
   declare uniforms: Uniforms;
+
   private readonly _sourceVertexShader: string;
 
   constructor(options?: ConstructorParameters<typeof PerInstanceColorAppearance>[0]) {

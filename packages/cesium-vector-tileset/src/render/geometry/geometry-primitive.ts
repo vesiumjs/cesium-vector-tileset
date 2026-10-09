@@ -1,10 +1,10 @@
 import type { Appearance, MapProjection, SceneMode } from 'cesium';
-import type { PreparedLinePositionTexture } from '../line/line-position-texture';
 import type { Budget } from '../scene/frame-budget';
 import type { ExtrusionAppearance } from './extrusion-appearance';
 import type { GeometryPacket } from './geometry-packet';
 import type { GeometryLayout, GeometryPrepareRequest, GeometryPrepareResult } from './geometry-preparation';
 import type { LineIndexRange, LineVertexArray } from './line-geometry-upload';
+import type { PreparedLinePositionTexture } from './line-position-packing';
 import type { CombinedGeometry } from './primitive-pipeline';
 import { BoundingSphere, GeographicProjection, Geometry, GeometryInstance, GeometryPipeline, Matrix4, Primitive, WebMercatorProjection } from 'cesium';
 import { LinePositionTexture } from '../line/line-position-texture';
@@ -93,31 +93,57 @@ function createChunk(geometries: Geometry[], start: number, layout: GeometryLayo
  */
 export class GeometryPrimitive extends Primitive {
   private _started = false;
+
   private _preparation?: Generator<void>;
+
   private _waitingForSlot?: GeometryPrepareWorker;
+
   private _waitingBytes = 0;
+
   private _combinedResult?: GeometryPrepareResult;
+
   private _preparedLinePositions?: PreparedLinePositionTexture;
+
   private _geometryOwner?: GeometryPrepareWorker;
+
   private readonly _layout: GeometryLayout;
+
   private _inputInstances?: Map<unknown, GeometryInstance>;
+
   private _inputAttributeCache?: Map<unknown, ReturnType<Primitive['getGeometryInstanceAttributes']>>;
+
   private _linePositions?: LinePositionTexture;
+
   private readonly _lineOffsetMeters: number;
+
   private _lineBoundingSpheres?: WeakMap<BoundingSphere, BoundingSphere>;
+
   private _expandedCommands?: WeakMap<object, DrawCommandReplay>;
+
   private _lineUpload?: LineGeometryUpload;
+
   private _lineUploadSteps?: Generator<void>;
+
   private _lineUploadPending = false;
+
   private _lineUploadAdopted = false;
+
   private _lineUploadFrame?: number;
+
   private _lineUploadTurn?: object;
+
   private _lineResourcesComplete = false;
+
   private _deferLineResources = false;
+
   private _lineDrawCounts: number[] = [];
+
   private _lineResourceEnvironment?: Pick<GeometryFrame, 'context' | 'mode' | 'mapProjection' | 'scene3DOnly'>;
+
   private _lineFailurePending = false;
+
   private readonly _sourceAppearance?: Appearance;
+
   private readonly _appearanceForMode?: GeometryAppearanceForMode;
 
   constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices'>, layout: GeometryLayout, lineOffsetMeters = 0, appearanceForMode?: GeometryAppearanceForMode) {
@@ -159,6 +185,9 @@ export class GeometryPrimitive extends Primitive {
       && (state === primitiveState.COMBINED || this._lineUploadPending);
   }
 
+  /**
+   * @internal
+   */
   private get _linePresentationNeeded(): boolean {
     const native = this as unknown as { _geometries?: Geometry[] };
     return this._lineResourcesComplete || (!!this._lineUpload
@@ -180,6 +209,9 @@ export class GeometryPrimitive extends Primitive {
     return this._advanceLineResources(frameState, budget, true);
   }
 
+  /**
+   * @internal
+   */
   private _advanceLineResources(frameState: GeometryFrame, budget: Budget, detached: boolean): boolean {
     try {
       this._lineUploadPending = true;
@@ -461,6 +493,9 @@ export class GeometryPrimitive extends Primitive {
     }
   }
 
+  /**
+   * @internal
+   */
   private* _uploadLine(frameState: GeometryFrame): Generator<void> {
     const native = this as unknown as GeometryPrimitive & {
       _geometries: CombinedGeometry[];
@@ -493,6 +528,9 @@ export class GeometryPrimitive extends Primitive {
     }
   }
 
+  /**
+   * @internal
+   */
   private _adoptLineUpload(frameState: GeometryFrame): void {
     const upload = this._lineUpload;
     const geometries = (this as unknown as { _geometries?: CombinedGeometry[] })._geometries;
@@ -526,6 +564,9 @@ export class GeometryPrimitive extends Primitive {
     this._lineUploadAdopted = true;
   }
 
+  /**
+   * @internal
+   */
   private* _prepare(frameState: GeometryFrame): Generator<void> {
     const projection = frameState.mapProjection;
     if (!(projection instanceof GeographicProjection) && !(projection instanceof WebMercatorProjection)) {
@@ -630,6 +671,9 @@ export class GeometryPrimitive extends Primitive {
     }
   }
 
+  /**
+   * @internal
+   */
   private* _prepareCombined(frameState: GeometryFrame): Generator<void> {
     const result = this._combinedResult;
     this._combinedResult = undefined;
@@ -698,6 +742,9 @@ export class GeometryPrimitive extends Primitive {
       owner.release();
   }
 
+  /**
+   * @internal
+   */
   private _fail(frameState: GeometryFrame, error: unknown, detached = false): void {
     this._started = true;
     this._preparation = undefined;

@@ -152,7 +152,7 @@ describe('owned geometry preparation', () => {
     const positions = new Float64Array(65538);
     oversized.attributes.position.values = positions;
     const owners = [...geometries, oversized, sourceGeometry()].map((geometry, index) => new GeometryPrimitive({ geometryInstances: new GeometryInstance({ geometry, id: `batch-${index}` }), vertexCacheOptimize: false, compressVertices: false }, 'native'));
-    const worker = { addEventListener() {}, removeEventListener() {}, terminate() {} };
+    const worker = { addEventListener(): void {}, removeEventListener(): void {}, terminate(): void {} };
     const batches: GeometryPrepareBatchRequest[] = [];
     const replies: Array<() => void> = [];
     vi.spyOn(TaskProcessor.prototype, 'scheduleTask').mockImplementation(function (request, transfers) {
@@ -365,7 +365,7 @@ describe('owned geometry preparation', () => {
       createPickOffsets: (owner as unknown as { _createPickOffsets: boolean })._createPickOffsets,
     }, []);
     const reference = structuredClone(pipeline.packCombineGeometryResults(pipeline.combineGeometry(pipeline.unpackCombineGeometryParameters(referenceParameters)), []));
-    const worker = { addEventListener() {}, removeEventListener() {}, terminate() {} };
+    const worker = { addEventListener(): void {}, removeEventListener(): void {}, terminate(): void {} };
     const create = vi.spyOn(pipeline, 'packCreateGeometryResults');
     const schedule = vi.spyOn(TaskProcessor.prototype, 'scheduleTask').mockImplementation(function (request, transfers) {
       Object.assign(this, { _worker: worker });
@@ -396,7 +396,7 @@ describe('owned geometry preparation', () => {
   it('hands line projection to the Worker without doing it during main preparation', async () => {
     const geometry = createLineGeometry(new Float64Array([...Cartesian3.pack(Cartesian3.fromDegrees(179.99, 30), []), ...Cartesian3.pack(Cartesian3.fromDegrees(180.01, 30.01), [])]), { widthPx: 12, join: 'round', cap: 'round', miterLimit: 2, roundLimit: 1.05 }) as Geometry;
     const owner = new GeometryPrimitive({ geometryInstances: new GeometryInstance({ geometry, id: 'line' }), appearance: new Appearance() }, 'line');
-    const worker = { addEventListener() {}, removeEventListener() {}, terminate() {} };
+    const worker = { addEventListener(): void {}, removeEventListener(): void {}, terminate(): void {} };
     vi.spyOn(Primitive.prototype, 'update').mockImplementation(() => {});
     const project = vi.spyOn(WebMercatorProjection.prototype, 'project');
     const schedule = vi.spyOn(TaskProcessor.prototype, 'scheduleTask').mockImplementation(function () {

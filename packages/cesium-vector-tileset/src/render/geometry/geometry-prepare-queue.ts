@@ -22,10 +22,15 @@ const maximumBatches = 2;
 /** Owns transfer admission, microtask batching, and request settlement for one context. */
 export class GeometryPrepareQueue {
   private readonly batches: Batch[] = [];
+
   private readonly buffers = new Set<ArrayBuffer>();
+
   private flushScheduled = false;
+
   private failure: unknown;
+
   private readonly dispatch: Dispatch;
+
   private readonly onFailure?: (error: unknown) => void;
 
   constructor(dispatch: Dispatch, onFailure?: (error: unknown) => void) {
@@ -103,6 +108,9 @@ export class GeometryPrepareQueue {
     this.fail(abortError());
   }
 
+  /**
+   * @internal
+   */
   private flush(): void {
     this.flushScheduled = false;
     if (this.failure !== undefined)
@@ -140,6 +148,9 @@ export class GeometryPrepareQueue {
     }
   }
 
+  /**
+   * @internal
+   */
   private complete(batch: Batch, result: GeometryPrepareBatchResult): void {
     if (this.failure !== undefined)
       return;
@@ -181,6 +192,9 @@ export class GeometryPrepareQueue {
     }
   }
 
+  /**
+   * @internal
+   */
   private release(batch: Batch): void {
     const index = this.batches.indexOf(batch);
     if (index !== -1)

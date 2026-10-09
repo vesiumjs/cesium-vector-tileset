@@ -38,7 +38,9 @@ const uploadBytes = 256 * 1024;
 export class LineGeometryUpload {
   readonly vertexArrays: LineVertexArray[] = [];
   readonly counts: number[];
+
   private readonly _buffers: NativeBuffer[] = [];
+
   private readonly _steps: Generator<void>;
   complete = false;
 
@@ -57,6 +59,9 @@ export class LineGeometryUpload {
     return index < 0 ? 0 : this.counts[index];
   }
 
+  /**
+   * @internal
+   */
   private* _upload(geometries: Geometry[], locations: Record<string, number>, ranges: readonly LineIndexRange[], context: object): Generator<void> {
     for (const [geometryIndex, geometry] of geometries.entries()) {
       const attributes: object[] = [];

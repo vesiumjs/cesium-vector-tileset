@@ -1,9 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { compileLinePositionTexture } from '../line-position-texture';
-
-vi.mock('cesium', async original => ({ ...await original<typeof import('cesium')>(), ContextLimits: { maximumTextureSize: 4096 } }));
-
-afterEach(() => vi.restoreAllMocks());
+import { describe, expect, it } from 'vitest';
+import { compileLinePositionTexture } from '../line-position-packing';
 
 function records(count: number, track: number): Float32Array {
   const words = new Uint32Array(count * 12);
@@ -14,11 +10,11 @@ function records(count: number, track: number): Float32Array {
   return new Float32Array(words.buffer);
 }
 
-describe('line position texture CPU compilation', () => {
+describe('line position packing', () => {
   it('yields within large record scans and preserves every source word in both tracks', () => {
     const spatial = records(1000, 0);
     const planar = records(1000, 17);
-    const compiler = compileLinePositionTexture({ spatial, planar });
+    const compiler = compileLinePositionTexture({ spatial, planar }, 4096);
     let step = compiler.next();
     expect(step.done).toBe(false);
     let yields = 0;
@@ -44,8 +40,8 @@ describe('line position texture CPU compilation', () => {
   });
 
   it('finishes tiny records directly and can discard an unfinished larger compilation', () => {
-    expect(compileLinePositionTexture({ spatial: records(32, 0) }).next().done).toBe(true);
-    const abandoned = compileLinePositionTexture({ spatial: records(1000, 0) });
+    expect(compileLinePositionTexture({ spatial: records(32, 0) }, 4096).next().done).toBe(true);
+    const abandoned = compileLinePositionTexture({ spatial: records(1000, 0) }, 4096);
     expect(abandoned.next().done).toBe(false);
     expect(abandoned.return(undefined).done).toBe(true);
   });

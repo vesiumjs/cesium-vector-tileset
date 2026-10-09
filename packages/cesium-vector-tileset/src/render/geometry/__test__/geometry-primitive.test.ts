@@ -1,4 +1,4 @@
-import type { TilePublishQueue } from '../../scene/tile-publish-queue';
+import type { TilesetRenderer } from '../../scene/tileset-renderer';
 import type { GeometryPrepareBatchRequest } from '../geometry-preparation';
 import * as Cesium from 'cesium';
 import { Appearance, BoundingSphere, buildModuleUrl, Cartesian3, Cartesian4, Event as CesiumEvent, Color, ComponentDatatype, GeographicProjection, Geometry, GeometryInstance, GeometryInstanceAttribute, Matrix4, Primitive, PrimitiveCollection, SceneMode, TaskProcessor } from 'cesium';
@@ -31,25 +31,28 @@ vi.mock('cesium', async (original) => {
   const native = await original<typeof import('cesium')>();
   class GpuBuffer {
     readonly sizeInBytes: number;
+
     private destroyed = false;
     constructor(options: { sizeInBytes: number }) {
       this.sizeInBytes = options.sizeInBytes;
       gpu.buffers.push(this);
     }
 
-    copyFromArrayView(values: ArrayBufferView) {
+    copyFromArrayView(values: ArrayBufferView): void {
       if (gpu.failBufferCopy)
         throw new Error('GPU range copy failed');
       gpu.writes.push(values.byteLength);
     }
 
     isDestroyed() { return this.destroyed; }
-    destroy() { this.destroyed = true; }
+    destroy(): void { this.destroyed = true; }
   }
   class VertexArray {
     readonly numberOfAttributes: number;
     readonly indexBuffer: GpuBuffer;
+
     private readonly attributes: Array<{ vertexBuffer: GpuBuffer }>;
+
     private destroyed = false;
     constructor(options: { attributes: Array<{ vertexBuffer: GpuBuffer }>; indexBuffer: GpuBuffer }) {
       this.attributes = options.attributes;
@@ -59,7 +62,7 @@ vi.mock('cesium', async (original) => {
 
     getAttribute(index: number) { return this.attributes[index]; }
     isDestroyed() { return this.destroyed; }
-    destroy() {
+    destroy(): void {
       this.destroyed = true;
       for (const attribute of this.attributes) attribute.vertexBuffer.destroy();
       this.indexBuffer.destroy();
@@ -74,7 +77,9 @@ vi.mock('cesium', async (original) => {
       readonly width: number;
       readonly height: number;
       readonly sizeInBytes: number;
+
       private readonly values: Uint32Array;
+
       private destroyed = false;
       constructor(options: { width: number; height: number }) {
         this.width = options.width;
@@ -85,7 +90,7 @@ vi.mock('cesium', async (original) => {
         textures.created.push({ source: { arrayBufferView: this.values } });
       }
 
-      copyFrom(options: { source: { arrayBufferView: Uint32Array }; yOffset: number }) {
+      copyFrom(options: { source: { arrayBufferView: Uint32Array }; yOffset: number }): void {
         if (gpu.failTextureCopy)
           throw new Error('GPU texture copy failed');
         gpu.writes.push(options.source.arrayBufferView.byteLength);
@@ -93,7 +98,7 @@ vi.mock('cesium', async (original) => {
       }
 
       isDestroyed() { return this.destroyed; }
-      destroy() { this.destroyed = true; }
+      destroy(): void { this.destroyed = true; }
     },
   };
 });
@@ -244,15 +249,17 @@ describe('budgeted Native line pages', () => {
     await tileset.whenReady();
     const nativeScene = { mode: state.mode, mapProjection: state.mapProjection, requestRenderMode: true, requestRender: vi.fn() };
     const idle = { ...state, newFrame: false, pixelRatio: 1, camera: { _scene: nativeScene } };
-    const internals = tileset as unknown as { _style: { _changed: boolean; getRenderTransitionFlags: () => { any: boolean } }; _vectorRenderer: { pixelRatio: number }; _tilePublishQueue: Pick<TilePublishQueue, 'advanceBuilds'> };
-    internals._style._changed = condition === 'changed style';
-    internals._vectorRenderer.pixelRatio = condition === 'changed pixel ratio' ? 2 : 1;
+    const renderer = (tileset as unknown as { _renderer: TilesetRenderer })._renderer;
+    renderer.style._changed = condition === 'changed style';
+    renderer.vector.pixelRatio = condition === 'changed pixel ratio' ? 2 : 1;
     if (condition === 'persistent transition') {
-      vi.spyOn(internals._style, 'getRenderTransitionFlags').mockReturnValue({ ...internals._style.getRenderTransitionFlags(), any: true });
+      vi.spyOn(renderer.style, 'getRenderTransitionFlags').mockReturnValue({ ...renderer.style.getRenderTransitionFlags(), any: true });
     }
     const cpuPreparation = vi.spyOn(scene, 'advancePreparations');
-    const cpuBuild = vi.spyOn(internals._tilePublishQueue, 'advanceBuilds');
-    Object.assign(tileset, { _sceneCollections: scene, _renderScene: nativeScene, _renderRequested: false, _lastShow: true });
+    const cpuBuild = vi.spyOn(renderer.publishQueue, 'advanceBuilds');
+    Object.assign(renderer, { collections: scene, _lastShow: true });
+    Object.assign(renderer.preparation, { collections: scene });
+    Object.assign(renderer.wake, { scene: nativeScene, requested: false });
     const nativeUpdate = vi.mocked(Primitive.prototype.update);
     nativeUpdate.mockClear();
     state.commandList.length = 0;
@@ -311,6 +318,7 @@ describe('budgeted Native line pages', () => {
     const { owner, root, scene, state } = await pendingLinePage();
     const tileset = new CesiumVectorTileset({ style: { version: 8, sources: {}, layers: [] } });
     await tileset.whenReady();
+    const renderer = (tileset as unknown as { _renderer: TilesetRenderer })._renderer;
     let now = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
     vi.spyOn(gpu.writes, 'push').mockImplementation((...writes) => {
@@ -331,7 +339,7 @@ describe('budgeted Native line pages', () => {
         nativeScene.preUpdate.raiseEvent(nativeScene);
         const work = lease.frame(state.frameNumber);
         scene.pumpFirstUpdates(rendered as never, UNBOUNDED_BUDGET, operation => work.measure(operation), false, work.tileBudget);
-        Object.assign(tileset, { _tileWorkFrame: { frameNumber: state.frameNumber, budget: work.tileBudget, successfulUpdate: true } });
+        renderer.preparation.frameRecord = { frameNumber: state.frameNumber, budget: work.tileBudget, requestGeneration: renderer.wake.generation, successfulUpdate: true };
         now = 100;
         const nativeUpdate = vi.mocked(Primitive.prototype.update);
         nativeUpdate.mockClear();
@@ -348,16 +356,17 @@ describe('budgeted Native line pages', () => {
     rendered = { ...state, newFrame: true, pixelRatio: 1, camera: { _scene: nativeScene } };
     nativeScene._frameState = rendered;
     lease = acquireSceneFrameBudget(nativeScene, tileset);
-    const internals = tileset as unknown as { _style: { _changed: boolean; getRenderTransitionFlags: () => { any: boolean } }; _vectorRenderer: { pixelRatio: number }; _tilePublishQueue: Pick<TilePublishQueue, 'advanceBuilds'> };
-    internals._style._changed = condition === 'changed style';
-    internals._vectorRenderer.pixelRatio = condition === 'changed pixel ratio' ? 2 : 1;
+    renderer.style._changed = condition === 'changed style';
+    renderer.vector.pixelRatio = condition === 'changed pixel ratio' ? 2 : 1;
     if (condition === 'persistent transition') {
-      vi.spyOn(internals._style, 'getRenderTransitionFlags').mockReturnValue({ ...internals._style.getRenderTransitionFlags(), any: true });
+      vi.spyOn(renderer.style, 'getRenderTransitionFlags').mockReturnValue({ ...renderer.style.getRenderTransitionFlags(), any: true });
     }
     const cpuPreparation = vi.spyOn(scene, 'advancePreparations');
-    const cpuBuild = vi.spyOn(internals._tilePublishQueue, 'advanceBuilds');
+    const cpuBuild = vi.spyOn(renderer.publishQueue, 'advanceBuilds');
     scene.idlePreparationsEnabled = true;
-    Object.assign(tileset, { _sceneCollections: scene, _renderScene: nativeScene, _sceneBudget: lease, _budgetScene: nativeScene });
+    renderer.collections = scene;
+    Object.assign(renderer.preparation, { collections: scene, _sceneBudget: lease, _budgetScene: nativeScene });
+    renderer.wake.scene = nativeScene;
     try {
       nativeScene.render();
       if (condition !== 'steady') {
@@ -1373,7 +1382,7 @@ describe('native geometry preparation', () => {
     vi.spyOn(Primitive.prototype, 'update').mockImplementation(() => {});
     const owner = lineOwner(2);
     const originalGeometry = (owner.geometryInstances as GeometryInstance).geometry;
-    Object.assign(owner, { _started: true, _combinedResult: {}, _state: runtime.PrimitiveState.COMBINING, _batchTable: { destroy() {} } });
+    Object.assign(owner, { _started: true, _combinedResult: {}, _state: runtime.PrimitiveState.COMBINING, _batchTable: { destroy(): void {} } });
     const state = frame();
     try {
       updateGeometryWithBudget(state, UNBOUNDED_BUDGET, () => owner.update(state));

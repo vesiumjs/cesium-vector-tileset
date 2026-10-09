@@ -1,6 +1,6 @@
 import type { GeometryPrepareBatchRequest, GeometryPrepareBatchResult } from './geometry-preparation';
 import { TaskProcessor } from 'cesium';
-import geometryWorkerUrl from '../../worker/geometry-worker-entry.ts?worker&url';
+import geometryWorkerUrl from '../../worker/geometry.worker.ts?worker&url';
 import { GeometryPrepareQueue } from './geometry-prepare-queue';
 
 interface WorkerEntry {
@@ -19,17 +19,28 @@ export class GeometryPrepareWorker {
   );
 
   private references = 0;
+
   private failure: unknown;
+
   private entry?: WorkerEntry;
   readonly context: object;
+  /**
+   * @internal
+   */
   private readonly onError = (event: ErrorEvent): void => {
     this.fail(event.error instanceof Error ? event.error : new Error(`Cesium geometry worker failed: ${event.message}`));
   };
 
+  /**
+   * @internal
+   */
   private readonly onMessageError = (): void => {
     this.fail(new Error('Cesium geometry worker could not deserialize a message'));
   };
 
+  /**
+   * @internal
+   */
   private constructor(context: object) {
     this.context = context;
   }
@@ -55,6 +66,9 @@ export class GeometryPrepareWorker {
     this.fail(new Error('Cesium geometry workers were destroyed'));
   }
 
+  /**
+   * @internal
+   */
   private fail(error: unknown): void {
     if (this.failure !== undefined)
       return;
@@ -71,6 +85,9 @@ export class GeometryPrepareWorker {
       URL.revokeObjectURL(entry.bootstrapUrl);
   }
 
+  /**
+   * @internal
+   */
   private dispatch(request: GeometryPrepareBatchRequest, transfers: ArrayBuffer[]): Promise<GeometryPrepareBatchResult> {
     if (this.failure !== undefined)
       throw this.failure;
