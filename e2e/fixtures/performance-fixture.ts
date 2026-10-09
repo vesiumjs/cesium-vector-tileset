@@ -369,23 +369,25 @@ async function createMeasurement() {
     tileset = await Tileset.fromUrl(styleUrl);
     viewer.scene.primitives.add(tileset);
     const work = tileset as unknown as {
-      _tilePublishQueue: object;
-      _tileResidency: object;
-      _sourceRenderSync: object;
-      _styleEvaluation: object;
-      _vectorRenderer: object;
-      _sceneCollections: object;
-      _symbolRenderer: object;
+      _renderer: {
+        publishQueue: object;
+        residency: object;
+        sourceSync: object;
+        evaluation: object;
+        vector: object;
+        collections: object;
+        symbol: object;
+      };
     };
     measure(viewer.scene, 'render', 'scene', true);
     measure(tileset, 'update', 'tileset');
-    measure(work._tilePublishQueue, 'drain', 'publication');
-    measure(work._sourceRenderSync, 'updateSource', 'source');
-    measure(work._styleEvaluation, 'evaluate', 'style');
-    measure(work._vectorRenderer, 'updatePaint', 'paint');
-    measure(work._sceneCollections, 'pumpFirstUpdates', 'firstUploads');
-    measure(work._sceneCollections, 'updateChildren', 'children');
-    measure(work._symbolRenderer, 'update', 'placement');
+    measure(work._renderer.publishQueue, 'drain', 'publication');
+    measure(work._renderer.sourceSync, 'updateSource', 'source');
+    measure(work._renderer.evaluation, 'evaluate', 'style');
+    measure(work._renderer.vector, 'updatePaint', 'paint');
+    measure(work._renderer.collections, 'pumpFirstUpdates', 'firstUploads');
+    measure(work._renderer.collections, 'updateChildren', 'children');
+    measure(work._renderer.symbol, 'update', 'placement');
     setPose = (pose) => {
       const position = projection.project(Cartographic.fromDegrees(pose.longitude, pose.latitude));
       const span = 2 * Math.PI * projection.ellipsoid.maximumRadius * innerWidth / (512 * 2 ** pose.zoom);
@@ -480,8 +482,18 @@ async function createMeasurement() {
     if (tileset) {
       return {
         stats: tileset.stats(),
-        zoom: (tileset as unknown as { _styleEvaluation: { zoom: number } })._styleEvaluation.zoom,
-        buffers: performanceBufferSnapshot((tileset as unknown as { _vectorRenderer: object })._vectorRenderer, bufferSizes, textureUploads),
+        zoom: (tileset as unknown as {
+          _renderer: {
+            evaluation: {
+              zoom: number;
+            };
+          };
+        })._renderer.evaluation.zoom,
+        buffers: performanceBufferSnapshot((tileset as unknown as {
+          _renderer: {
+            vector: object;
+          };
+        })._renderer.vector, bufferSizes, textureUploads),
       };
     }
     const buffers = maplibreBufferSnapshot(map!, bufferSizes);

@@ -89,8 +89,8 @@ async function createAntialias() {
   // globe separation lift is unrelated to line width and otherwise shifts
   // Native's pixel phase relative to MapLibre's zero-elevation source.
   viewer.scene.preRender.addEventListener(() => {
-    for (const id of tileset._vectorRenderer.tileIds) {
-      for (const collection of tileset._vectorRenderer.getTileCollections(id)) {
+    for (const id of tileset._renderer.vector.tileIds) {
+      for (const collection of tileset._renderer.vector.getTileCollections(id)) {
         for (let index = 0; index < ('length' in collection ? Number(collection.length) : 0); index++) {
           const entry = (collection as { get: (index: number) => NativePrimitive & { primitive?: NativePrimitive } }).get(index);
           const paint = linePaintForOwner(entry.primitive ?? entry);
@@ -151,7 +151,7 @@ async function createAntialias() {
       next.layers[1].paint!['line-width'] = width;
       tileset.setStyle(next);
       reference.setPaintProperty('roads', 'line-width', width);
-      reference.jumpTo({ zoom: tileset._styleEvaluation.zoom });
+      reference.jumpTo({ zoom: tileset._renderer.evaluation.zoom });
       reset();
     },
     ready: () => tileset.tilesLoaded && reference.loaded() && !!nativePixels && !!referencePixels && nativeFrames > 2 && referenceFrames > 0,
@@ -172,7 +172,7 @@ async function createAntialias() {
         fps: viewer.scene.debugShowFramesPerSecond,
         msaaSamples: viewer.scene.msaaSamples,
         mode: viewer.scene.mode,
-        camera: { latitude, pitch: reference.getPitch(), nativePitch: Math.acos(-direction.z) * 180 / Math.PI, bearing: reference.getBearing(), nativeBearing: Math.atan2(direction.x, direction.y) * 180 / Math.PI, zoom: reference.getZoom(), nativeZoom: tileset._styleEvaluation.zoom, fov: reference.getVerticalFieldOfView(), nativeFov: frustum.fovy * 180 / Math.PI },
+        camera: { latitude, pitch: reference.getPitch(), nativePitch: Math.acos(-direction.z) * 180 / Math.PI, bearing: reference.getBearing(), nativeBearing: Math.atan2(direction.x, direction.y) * 180 / Math.PI, zoom: reference.getZoom(), nativeZoom: tileset._renderer.evaluation.zoom, fov: reference.getVerticalFieldOfView(), nativeFov: frustum.fovy * 180 / Math.PI },
         gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(reference.getCanvas().getContext('webgl2')!) },
         viewport: { native: [viewer.canvas.width, viewer.canvas.height, viewer.canvas.clientWidth, viewer.canvas.clientHeight], reference: [reference.getCanvas().width, reference.getCanvas().height, reference.getCanvas().clientWidth, reference.getCanvas().clientHeight] },
         lines: lines.map((line) => {

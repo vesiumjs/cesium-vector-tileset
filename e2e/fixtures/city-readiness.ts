@@ -4,9 +4,9 @@ import type { NativePrimitive, TestTileset, TestViewer } from './browser-types';
 
 /** Read ownership and readiness only; never request a frame or touch GPU storage. */
 export function cityReadiness(tileset: TestTileset, viewer: TestViewer) {
-  const symbols = tileset._symbolRenderer;
-  const residency = tileset._tileResidency;
-  const scene = tileset._sceneCollections;
+  const symbols = tileset._renderer.symbol;
+  const residency = tileset._renderer.residency;
+  const scene = tileset._renderer.collections;
   const entryIds = new Map<object, number>();
   const collectionIds = new Map<object, number>();
   const primitiveIds = new Map<object, number>();
@@ -47,7 +47,7 @@ export function cityReadiness(tileset: TestTileset, viewer: TestViewer) {
       primitives: destroyed ? [] : Array.from({ length: value.length }, (_, index) => primitive(value.get(index) as Primitive)),
     };
   };
-  type Entry = TestTileset['_symbolRenderer']['_tiles'] extends Map<string, infer Value> ? Value : never;
+  type Entry = TestTileset['_renderer']['symbol']['_tiles'] extends Map<string, infer Value> ? Value : never;
   const entry = (tileId: string, value: Entry) => ({
     id: id(entryIds, value),
     tileId,
@@ -92,11 +92,11 @@ export function cityReadiness(tileset: TestTileset, viewer: TestViewer) {
     at: performance.now(),
     frame: viewer.scene._frameState.frameNumber,
     tilesLoaded: tileset.tilesLoaded,
-    styleLoaded: tileset._style.loaded(),
+    styleLoaded: tileset._renderer.style.loaded(),
     firstUpdates: scene.pendingFirstUpdateCount,
-    paint: tileset._vectorRenderer.needsPaintUpdate,
-    jobs: [...tileset._tilePublishQueue._jobs].map(([tileId, job]) => ({ tileId, generationId: job.generationId, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.progress } })),
-    patternRefreshes: tileset._tilePublishQueue._patternRefreshes.size,
+    paint: tileset._renderer.vector.needsPaintUpdate,
+    jobs: [...tileset._renderer.publishQueue._jobs].map(([tileId, job]) => ({ tileId, generationId: job.generationId, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.progress } })),
+    patternRefreshes: tileset._renderer.publishQueue._patternRefreshes.size,
     residency: {
       visibleSymbolTiles: [...residency._visibleSymbolTiles],
       hiddenSymbols: [...residency._visibility.hiddenSymbols],

@@ -70,7 +70,7 @@ async function openDynamics(page: Page, renderUrl: string, testInfo: TestInfo, c
     const validation = window.renderValidation;
     if (!validation)
       return { initialized: false };
-    const symbol = validation.tileset._symbolRenderer;
+    const symbol = validation.tileset._renderer.symbol;
     return {
       loaded: validation.tileset.tilesLoaded,
       stats: validation.tileset.stats(),
@@ -80,7 +80,7 @@ async function openDynamics(page: Page, renderUrl: string, testInfo: TestInfo, c
       visible: { index: symbol._visiblePlacement.job?.pass._batchIndex, batches: symbol._visiblePlacement.batches.length, pending: symbol._visiblePlacement.pending },
       handoff: { index: symbol._handoffPlacement.job?.pass._batchIndex, batches: symbol._handoffPlacement.batches.length, pending: symbol._handoffPlacement.pending },
       unplaced: [...symbol._tiles].filter(([, entry]) => !entry.placed).length,
-      firstUpdates: validation.tileset._sceneCollections.pendingFirstUpdateCount,
+      firstUpdates: validation.tileset._renderer.collections.pendingFirstUpdateCount,
       opacity: symbol._pendingOpacityHalves.size,
       dynamic: symbol._pendingDynamicHalves.size,
       zoom: validation.zoom,
@@ -127,7 +127,7 @@ for (const count of [100, 900]) {
           if (pixels[index] > 180 && pixels[index + 1] < 30 && pixels[index + 2] > 180)
             magenta++;
         }
-        frames.push({ phase, zoom: validation.zoom, green, red, magenta, pending: tileset.stats().pendingPublishes, symbols: tileset._symbolRenderer._tiles.size, placed: [...tileset._symbolRenderer._tiles.values()].filter(entry => entry.placed).length, updateMs: validation.measurements.updateMs.at(-1) ?? 0 });
+        frames.push({ phase, zoom: validation.zoom, green, red, magenta, pending: tileset.stats().pendingPublishes, symbols: tileset._renderer.symbol._tiles.size, placed: [...tileset._renderer.symbol._tiles.values()].filter(entry => entry.placed).length, updateMs: validation.measurements.updateMs.at(-1) ?? 0 });
       });
       const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       validation.reset();
@@ -177,8 +177,8 @@ test('a visibility crossing within one source zoom reuses complete geometry', as
     const { viewer, tileset, atlas } = validation;
     const { Cartesian3 } = atlas!.cesium;
     const initialHeight = viewer.camera.positionCartographic.height;
-    const before = new Map(tileset._vectorRenderer.tileIds.map(id => [id, [...tileset._vectorRenderer.getTileCollections(id)]]));
-    const beforeSymbols = new Map(tileset._symbolRenderer.tileIds.map(id => [id, [...tileset._symbolRenderer.getTileCollections(id)]]));
+    const before = new Map(tileset._renderer.vector.tileIds.map(id => [id, [...tileset._renderer.vector.getTileCollections(id)]]));
+    const beforeSymbols = new Map(tileset._renderer.symbol.tileIds.map(id => [id, [...tileset._renderer.symbol.getTileCollections(id)]]));
     const initial = { vectors: [...before.keys()], symbols: [...beforeSymbols.keys()], stats: tileset.stats(), frames: validation.renderedFrames, globe: viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`) };
     validation.reset();
     const snapshots = [];
@@ -189,12 +189,12 @@ test('a visibility crossing within one source zoom reuses complete geometry', as
         if (tileset.tilesLoaded && frame >= 5)
           break;
       }
-      const common = [...before].filter(([id]) => tileset._vectorRenderer.getTileCollections(id).length > 0);
-      snapshots.push({ zoom: validation.zoom, vectors: tileset._vectorRenderer.tileIds, globe: viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`), common: common.length, changed: common.filter(([id, collections]) => {
-        const current = tileset._vectorRenderer.getTileCollections(id);
+      const common = [...before].filter(([id]) => tileset._renderer.vector.getTileCollections(id).length > 0);
+      snapshots.push({ zoom: validation.zoom, vectors: tileset._renderer.vector.tileIds, globe: viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`), common: common.length, changed: common.filter(([id, collections]) => {
+        const current = tileset._renderer.vector.getTileCollections(id);
         return current.length !== collections.length || collections.some((collection, index) => collection !== current[index]);
       }).map(([id]) => id), changedSymbols: [...beforeSymbols].filter(([id, collections]) => {
-        const current = tileset._symbolRenderer.getTileCollections(id);
+        const current = tileset._renderer.symbol.getTileCollections(id);
         return current.length > 0 && (current.length !== collections.length || collections.some((collection, index) => collection !== current[index]));
       }).map(([id]) => id), loaded: tileset.tilesLoaded });
     }
@@ -202,9 +202,9 @@ test('a visibility crossing within one source zoom reuses complete geometry', as
     for (let step = 1; step <= 12; step++) {
       viewer.camera.setView({ destination: Cartesian3.fromDegrees(-0.1276, 51.5072, initialHeight), orientation: { heading: step * Math.PI / 6, pitch: -Math.PI / 2, roll: 0 } });
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const common = [...before].filter(([id]) => tileset._vectorRenderer.getTileCollections(id).length > 0);
+      const common = [...before].filter(([id]) => tileset._renderer.vector.getTileCollections(id).length > 0);
       rotations.push({ common: common.length, changed: common.filter(([id, collections]) => {
-        const current = tileset._vectorRenderer.getTileCollections(id);
+        const current = tileset._renderer.vector.getTileCollections(id);
         return current.length !== collections.length || collections.some((collection, index) => collection !== current[index]);
       }).map(([id]) => id) });
     }
@@ -232,7 +232,7 @@ test('a stopped camera waits for symbol recency without continuous render reques
   const result = await page.evaluate(async () => {
     const validation = window.renderValidation;
     const { viewer, tileset, atlas } = validation;
-    const symbols = tileset._symbolRenderer;
+    const symbols = tileset._renderer.symbol;
     const scopes = [symbols._targetPlacement, symbols._visiblePlacement, symbols._handoffPlacement];
     const recencyMs = 300;
     const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
@@ -265,7 +265,7 @@ test('a stopped camera waits for symbol recency without continuous render reques
         };
       }),
     }));
-    const sourceState = () => Object.entries(tileset._style.tilePyramids).map(([sourceId, pyramid]) => ({
+    const sourceState = () => Object.entries(tileset._renderer.style.tilePyramids).map(([sourceId, pyramid]) => ({
       sourceId,
       loaded: pyramid.loaded(),
       renderable: pyramid.getRenderableIds().sort(),
@@ -297,7 +297,7 @@ test('a stopped camera waits for symbol recency without continuous render reques
       })),
       opacity: symbols._pendingOpacityHalves.size,
       dynamic: symbols._pendingDynamicHalves.size,
-      firstUpdates: tileset._sceneCollections.pendingFirstUpdateCount,
+      firstUpdates: tileset._renderer.collections.pendingFirstUpdateCount,
       publishes: tileset.stats().pendingPublishes,
       source: JSON.stringify(sourceState()),
       camera: Array.from({ length: 16 }, (_, index) => viewer.camera.viewMatrix[index]),
@@ -484,8 +484,8 @@ test('pending tiles finish a default data-driven paint transition and draw witho
       const stop = viewer.scene.postRender.addEventListener(() => {
         const sizes: number[] = [];
         let red = false;
-        for (const id of tileset._vectorRenderer.tileIds) {
-          for (const collection of tileset._vectorRenderer.getTileCollections(id)) {
+        for (const id of tileset._renderer.vector.tileIds) {
+          for (const collection of tileset._renderer.vector.getTileCollections(id)) {
             if (!(collection instanceof BufferPointCollection) || !collection.show)
               continue;
             for (let index = 0; index < collection.primitiveCount; index++) {
@@ -541,7 +541,7 @@ test('terrain draped fills hide and recover at the layer zoom boundary without c
   const initial = await page.evaluate(() => {
     const { tileset, viewer, atlas } = window.renderValidation;
     const provider = (viewer.scene as unknown as { vectorProvider: { _heightReferenceByCollection: Map<object, number> } }).vectorProvider;
-    const collections = [...tileset._vectorRenderer._records].flatMap(([tileId, record]) => [...record.collections].map(([layerId, collection]) => ({ tileId, layerId, collection })));
+    const collections = [...tileset._renderer.vector._records].flatMap(([tileId, record]) => [...record.collections].map(([layerId, collection]) => ({ tileId, layerId, collection })));
     return { zoom: window.renderValidation.zoom, collections: collections.map(({ tileId, layerId, collection }) => {
       const native = collection as import('./fixtures/browser-types').NativeBufferCollection & { primitiveCount: number; heightReference: number };
       let color: number[] | undefined;
@@ -758,7 +758,7 @@ test('public city data settles after continuous zoom, pan and orbit @live', asyn
     let phase = 'out';
     const frames: Array<{ phase: string; time: number; zoom: number; commands: number; pending: number; symbols: number; updateMs: number; placementMs: number }> = [];
     const coverage: unknown[] = [];
-    const captureCoverage = () => coverage.push({ phase, zoom: validation.zoom, globe: viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`), sources: Object.fromEntries(Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => [id, { source: { minzoom: pyramid.getSource().minzoom, maxzoom: pyramid.getSource().maxzoom }, tiles: [...pyramid.getRenderableIds()] }])), vectors: [...tileset._vectorRenderer.tileIds] });
+    const captureCoverage = () => coverage.push({ phase, zoom: validation.zoom, globe: viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`), sources: Object.fromEntries(Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => [id, { source: { minzoom: pyramid.getSource().minzoom, maxzoom: pyramid.getSource().maxzoom }, tiles: [...pyramid.getRenderableIds()] }])), vectors: [...tileset._renderer.vector.tileIds] });
     const remove = viewer.scene.postRender.addEventListener(() => {
       const stats = tileset.stats();
       frames.push({ phase, time: performance.now(), zoom: validation.zoom, commands: stats.submittedCommands, pending: stats.pendingPublishes, symbols: stats.symbol.tiles, updateMs: validation.measurements.updateMs.at(-1) ?? 0, placementMs: validation.measurements.placementMs.at(-1) ?? 0 });

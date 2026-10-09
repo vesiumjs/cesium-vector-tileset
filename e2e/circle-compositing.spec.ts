@@ -85,7 +85,7 @@ for (const mode of ['3d', '2d', 'cv']) {
       scene.postProcessStages.fxaa.enabled = false;
       scene.postProcessStages.bloom.enabled = false;
       scene.postProcessStages.ambientOcclusion.enabled = false;
-      window.circleOwners = tileset._vectorRenderer.tileIds.flatMap(tileId => tileset._vectorRenderer.getTileCollections(tileId)
+      window.circleOwners = tileset._renderer.vector.tileIds.flatMap(tileId => tileset._renderer.vector.getTileCollections(tileId)
         .flatMap(collection => collection instanceof atlas.cesium.PrimitiveCollection
           ? Array.from({ length: collection.length }, (_, index) => collection.get(index))
           : [collection])

@@ -93,9 +93,9 @@ function nativeOwnerSnapshot(viewer: TestViewer, tileset: TestTileset, frame: nu
   }> = [];
   const inspect = (root: object, origin: string) => {
     const visited = new Set<object>();
-    const attached = tileset._sceneCollections._root.contains(root as Parameters<typeof tileset._sceneCollections._root.contains>[0]);
-    const firstUpdate = tileset._sceneCollections._firstUpdates[0].get(root as Parameters<typeof tileset._sceneCollections._firstUpdates[0]['get']>[0])
-      ?? tileset._sceneCollections._firstUpdates[1].get(root as Parameters<typeof tileset._sceneCollections._firstUpdates[1]['get']>[0]);
+    const attached = tileset._renderer.collections._root.contains(root as Parameters<typeof tileset._renderer.collections._root.contains>[0]);
+    const firstUpdate = tileset._renderer.collections._firstUpdates[0].get(root as Parameters<typeof tileset._renderer.collections._firstUpdates[0]['get']>[0])
+      ?? tileset._renderer.collections._firstUpdates[1].get(root as Parameters<typeof tileset._renderer.collections._firstUpdates[1]['get']>[0]);
     const visit = (value: object, ancestorVisible: boolean) => {
       if (visited.has(value))
         return;
@@ -105,7 +105,7 @@ function nativeOwnerSnapshot(viewer: TestViewer, tileset: TestTileset, frame: nu
       const batch = drawBatchForOwner(value);
       if (batch?.layerId === 'water') {
         const id = batch.tileId ?? 'unknown';
-        const sceneTile = tileset._tileResidency._tiles.get(id);
+        const sceneTile = tileset._renderer.residency._tiles.get(id);
         owners.push({
           tileId: id,
           tileID: sceneTile && tileID(sceneTile.tileID),
@@ -130,28 +130,28 @@ function nativeOwnerSnapshot(viewer: TestViewer, tileset: TestTileset, frame: nu
     };
     visit(root, true);
   };
-  for (const [id, record] of tileset._vectorRenderer._records) {
+  for (const [id, record] of tileset._renderer.vector._records) {
     for (const [kind, collection] of record.collections) {
       if (kind.startsWith('polygons') || drawBatchForOwner(collection)?.layerId === 'water')
         inspect(collection, `current:${id}`);
     }
   }
-  for (const [id, record] of tileset._vectorRenderer._retired.entries()) {
+  for (const [id, record] of tileset._renderer.vector._retired.entries()) {
     for (const [kind, collection] of record.collections) {
       if (kind.startsWith('polygons') || drawBatchForOwner(collection)?.layerId === 'water')
         inspect(collection, `retired:${id}`);
     }
   }
-  for (const replacement of tileset._sceneCollections._replacements) {
+  for (const replacement of tileset._renderer.collections._replacements) {
     if (replacement.kind === 'vector') {
       for (const collection of replacement.old) inspect(collection, `replacement-old:${replacement.tileId}`);
       for (const collection of replacement.next) inspect(collection, `replacement-next:${replacement.tileId}`);
     }
   }
-  const sources = Object.entries(tileset._style.tilePyramids).filter(([id]) => id === 'openmaptiles').map(([sourceId, pyramid]) => {
-    const sync = tileset._tileResidency._sources.get(sourceId);
+  const sources = Object.entries(tileset._renderer.style.tilePyramids).filter(([id]) => id === 'openmaptiles').map(([sourceId, pyramid]) => {
+    const sync = tileset._renderer.residency._sources.get(sourceId);
     const covering = pyramid._covering;
-    const globe = tileset._sceneCovering._globeCoverings.get(pyramid);
+    const globe = tileset._renderer.covering._globeCoverings.get(pyramid);
     const active = pyramid._activeTiles.getAllTiles().map(tile => ({
       ...tileID(tile.tileID),
       state: tile.state,
@@ -166,7 +166,7 @@ function nativeOwnerSnapshot(viewer: TestViewer, tileset: TestTileset, frame: nu
       primaryZoom: globe?.primaryZoom,
       primaryRevision: globe?.primaryRevision,
       deferred: globe?.deferred,
-      cameraConfirmed: tileset._sceneCovering._cameraPose === tileset._sceneCovering._observedCamera,
+      cameraConfirmed: tileset._renderer.covering._cameraPose === tileset._renderer.covering._observedCamera,
       ideal: covering?.idealTileIDs.map(tileID),
       renderable: sync?.renderableIds.map(key => ({ key, id: pyramid.getTileByID(key) && tileID(pyramid.getTileByID(key)!.tileID) })),
       held: sync && [...sync.held],
@@ -180,13 +180,13 @@ function nativeOwnerSnapshot(viewer: TestViewer, tileset: TestTileset, frame: nu
     frame,
     poseIndex,
     at: started,
-    styleZoom: tileset._styleEvaluation.zoom,
+    styleZoom: tileset._renderer.evaluation.zoom,
     commandCounts,
     commands,
     owners,
     sources,
-    hiddenSurfaceLayers: [...tileset._tileResidency.hiddenSurfaceLayers].map(([id, layers]) => ({ tileId: id, layers: [...layers] })),
-    jobs: [...tileset._tilePublishQueue._jobs].map(([id, job]) => ({ tileId: id, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.progress } })),
+    hiddenSurfaceLayers: [...tileset._renderer.residency.hiddenSurfaceLayers].map(([id, layers]) => ({ tileId: id, layers: [...layers] })),
+    jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ tileId: id, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.progress } })),
     observerCpuMs: performance.now() - started,
   };
 }

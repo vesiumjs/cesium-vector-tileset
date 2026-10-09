@@ -4,12 +4,14 @@ import type { GeometryPrimitive } from '../../packages/cesium-vector-tileset/src
 import type { DashMaterial } from '../../packages/cesium-vector-tileset/src/render/line/dash-material';
 import type { PatternTileRenderer } from '../../packages/cesium-vector-tileset/src/render/pattern/pattern-renderer';
 import type { RasterTileRenderer } from '../../packages/cesium-vector-tileset/src/render/raster/raster-renderer';
+import type { FramePreparation } from '../../packages/cesium-vector-tileset/src/render/scene/frame-preparation';
 import type { RenderFrameState } from '../../packages/cesium-vector-tileset/src/render/scene/render-frame';
 import type { SceneCollections } from '../../packages/cesium-vector-tileset/src/render/scene/scene-collections';
 import type { SceneTileCovering } from '../../packages/cesium-vector-tileset/src/render/scene/scene-tile-covering';
 import type { SourceRenderSync } from '../../packages/cesium-vector-tileset/src/render/scene/source-render-sync';
 import type { TilePublishQueue } from '../../packages/cesium-vector-tileset/src/render/scene/tile-publish-queue';
 import type { TileResidency } from '../../packages/cesium-vector-tileset/src/render/scene/tile-residency';
+import type { TilesetRenderer } from '../../packages/cesium-vector-tileset/src/render/scene/tileset-renderer';
 import type { SymbolPlacementPass } from '../../packages/cesium-vector-tileset/src/render/symbol/symbol-placement-pass';
 import type { SymbolTileRenderer } from '../../packages/cesium-vector-tileset/src/render/symbol/symbol-renderer';
 import type { BufferCollection, VectorTileRecord, VectorTileRenderer } from '../../packages/cesium-vector-tileset/src/render/vector/vector-tile-renderer';
@@ -115,19 +117,17 @@ type TestPlacementScope = Omit<Public<PlacementScope>, 'job'> & {
   _lastCommitMs: PlacementScope['_lastCommitMs'];
 };
 type RasterEntry = RasterTileRenderer['_tiles'] extends Map<string, Array<infer Entry>> ? Entry : never;
-export type TestTileset = Public<CesiumVectorTileset> & {
-  _lastSubmittedCommands: CesiumVectorTileset['_lastSubmittedCommands'];
-  _style: CesiumVectorTileset['_style'];
-  _styleEvaluation: CesiumVectorTileset['_styleEvaluation'];
-  _sceneCovering: Public<SceneTileCovering> & { _cameraPose: SceneTileCovering['_cameraPose']; _observedCamera: SceneTileCovering['_observedCamera']; _globeCoverings: SceneTileCovering['_globeCoverings'] };
-  _vectorRenderer: Omit<Public<VectorTileRenderer>, 'dashMaterial'> & {
+export type TestTilesetRenderer = Omit<Public<TilesetRenderer>, 'covering' | 'vector' | 'raster' | 'pattern' | 'symbol' | 'publishQueue' | 'collections' | 'sourceSync' | 'residency' | 'preparation'> & {
+  _lastSubmittedCommands: TilesetRenderer['_lastSubmittedCommands'];
+  covering: Public<SceneTileCovering> & { _cameraPose: SceneTileCovering['_cameraPose']; _observedCamera: SceneTileCovering['_observedCamera']; _globeCoverings: SceneTileCovering['_globeCoverings'] };
+  vector: Omit<Public<VectorTileRenderer>, 'dashMaterial'> & {
     _records: Map<string, TestTileRenderRecord>;
     _retired: VectorTileRenderer['_retired'];
     dashMaterial?: Public<DashMaterial> & { _material?: Material & { _textures: Record<string, NativeTexture> } };
   };
-  _rasterRenderer: Public<RasterTileRenderer> & { _tiles: Map<string, Array<Omit<RasterEntry, 'material'> & { material: Material & { _textures: Record<string, NativeTexture> } }>> };
-  _patternRenderer: Public<PatternTileRenderer> & { _tiles: PatternTileRenderer['_tiles'] };
-  _symbolRenderer: Public<SymbolTileRenderer> & {
+  raster: Public<RasterTileRenderer> & { _tiles: Map<string, Array<Omit<RasterEntry, 'material'> & { material: Material & { _textures: Record<string, NativeTexture> } }>> };
+  pattern: Public<PatternTileRenderer> & { _tiles: PatternTileRenderer['_tiles'] };
+  symbol: Public<SymbolTileRenderer> & {
     _tiles: SymbolTileRenderer['_tiles'];
     _visibleEntries: SymbolTileRenderer['_visibleEntries'];
     _held: SymbolTileRenderer['_held'];
@@ -146,15 +146,18 @@ export type TestTileset = Public<CesiumVectorTileset> & {
     _fullReplaceNeeded: SymbolTileRenderer['_fullReplaceNeeded'];
     _pendingImageEntries: SymbolTileRenderer['_pendingImageEntries'];
   };
-  _tilePublishQueue: Public<TilePublishQueue> & { _jobs: TilePublishQueue['_jobs']; _patternRefreshes: TilePublishQueue['_patternRefreshes'] };
-  _sceneCollections: Public<SceneCollections> & { _root: SceneCollections['_root']; _firstUpdates: TestFirstUpdateQueue[]; _replacements: SceneCollections['_replacements'] };
-  _sourceRenderSync: Public<SourceRenderSync>;
-  _tileResidency: Public<TileResidency> & {
+  publishQueue: Public<TilePublishQueue> & { _jobs: TilePublishQueue['_jobs']; _patternRefreshes: TilePublishQueue['_patternRefreshes'] };
+  collections: Public<SceneCollections> & { _root: SceneCollections['_root']; _firstUpdates: TestFirstUpdateQueue[]; _replacements: SceneCollections['_replacements'] };
+  sourceSync: Public<SourceRenderSync>;
+  residency: Public<TileResidency> & {
     _sources: TileResidency['_sources'];
     _tiles: TileResidency['_tiles'];
     _visibleSymbolTiles: TileResidency['_visibleSymbolTiles'];
     _visibility: TileResidency['_visibility'];
     _pendingSymbolRetirements: TileResidency['_pendingSymbolRetirements'];
   };
-  _tileWorkFrame: CesiumVectorTileset['_tileWorkFrame'];
+  preparation: Public<FramePreparation>;
+};
+export type TestTileset = Public<CesiumVectorTileset> & {
+  _renderer: TestTilesetRenderer;
 };

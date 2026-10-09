@@ -12,7 +12,7 @@ type CircleOwner = BufferPointCollection & {
 /** Hold a real source owner while independently exercising Native command culling. */
 export function installCircleVisibility(viewer: TestViewer, tileset: TestTileset) {
   const scene = viewer.scene;
-  const originalCovering = tileset._sceneCovering.covering;
+  const originalCovering = tileset._renderer.covering.covering;
   const originalDraw = scene.context.draw;
   const originalNear = viewer.camera.frustum.near;
   const originalView = {
@@ -37,7 +37,7 @@ export function installCircleVisibility(viewer: TestViewer, tileset: TestTileset
   let restoreSourceLoad: (() => void) | undefined;
   let insideView: typeof originalView | undefined;
 
-  const activeOwners = () => [...tileset._vectorRenderer._records.values()]
+  const activeOwners = () => [...tileset._renderer.vector._records.values()]
     .flatMap(record => [...record.collections.values()])
     .filter((collection): collection is CircleOwner => collection instanceof BufferPointCollection
       && drawBatchForOwner(collection)?.layerId === 'visibility-circle');
@@ -52,7 +52,7 @@ export function installCircleVisibility(viewer: TestViewer, tileset: TestTileset
       driven = dataDriven;
       // Only source selection is fixed. Worker decoding, builder publication,
       // live paint, Native uploads and culling still use their production paths.
-      tileset._sceneCovering.covering = function (...args) {
+      tileset._renderer.covering.covering = function (...args) {
         const covering = originalCovering.apply(this, args);
         return covering && { ...covering, idealTileIDs: [tile] };
       };
@@ -97,7 +97,7 @@ export function installCircleVisibility(viewer: TestViewer, tileset: TestTileset
       pickIds ??= owner._pickIds.get(scene.context);
       bounds ??= BoundingSphere.clone(owner.boundingVolume);
       if (!restoreSourceLoad) {
-        const source = tileset._style.getSource('circles')!;
+        const source = tileset._renderer.style.getSource('circles')!;
         const originalLoad = source.loadTile;
         source.loadTile = function (tile) {
           loadsAfterUpload++;
@@ -132,7 +132,7 @@ export function installCircleVisibility(viewer: TestViewer, tileset: TestTileset
     },
     paint(radius: number, stroke = 0) {
       if (driven)
-        tileset._style.setFeatureState({ source: 'circles', id: 73 }, { radius });
+        tileset._renderer.style.setFeatureState({ source: 'circles', id: 73 }, { radius });
       const style = structuredClone(tileset.styleSpec);
       const layer = style.layers.find(layer => layer.id === 'visibility-circle');
       if (layer?.type !== 'circle')
@@ -243,7 +243,7 @@ export function installCircleVisibility(viewer: TestViewer, tileset: TestTileset
     },
     dispose() {
       restoreSourceLoad?.();
-      tileset._sceneCovering.covering = originalCovering;
+      tileset._renderer.covering.covering = originalCovering;
       scene.context.draw = originalDraw;
       viewer.camera.frustum.near = originalNear;
       viewer.camera.setView(originalView);

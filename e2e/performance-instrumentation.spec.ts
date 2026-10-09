@@ -34,7 +34,7 @@ for (const [name, parameters, diagnostics] of [
         sources: measurements.sourceMs.length,
         frames: measurements.frames.length,
         ownUpdate: Object.hasOwn(tileset, 'update'),
-        ownEvaluate: Object.hasOwn(tileset._styleEvaluation, 'evaluate'),
+        ownEvaluate: Object.hasOwn(tileset._renderer.evaluation, 'evaluate'),
         motionFrames: window.cityMotion?.snapshot().frames.length,
         renderErrors,
       };

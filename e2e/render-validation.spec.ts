@@ -217,8 +217,8 @@ for (const scenario of cases) {
             const validation = window.renderValidation;
             const stats = validation?.tileset.stats();
             return validation?.renderErrors.length || (stats && stats.bucket.tiles > 0 && stats.pendingPublishes === 0
-              && validation.tileset._sceneCollections.pendingFirstUpdateCount === 0
-              && !validation.tileset._symbolRenderer.hasPendingWork
+              && validation.tileset._renderer.collections.pendingFirstUpdateCount === 0
+              && !validation.tileset._renderer.symbol.hasPendingWork
               && validation.viewer.scene.globe.tilesLoaded);
           }, undefined, { timeout: 60000 });
           assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), [], `${scenario.name}: Cesium render stopped`);
@@ -232,14 +232,14 @@ for (const scenario of cases) {
         if (scenario.lines) {
           const uploads = await page.evaluate(() => {
             const tileset = window.renderValidation.tileset;
-            const bucket = tileset._vectorRenderer;
+            const bucket = tileset._renderer.vector;
             const primitives = [
               ...bucket.tileIds.flatMap(tileId => bucket.getTileCollections(tileId)
                 .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => {
                   const entry = (collection as PrimitiveCollection).get(index);
                   return entry.primitive ?? entry;
                 }))),
-              ...[...tileset._patternRenderer._tiles.values()].flatMap(entries => entries.map(entry => entry.primitive)),
+              ...[...tileset._renderer.pattern._tiles.values()].flatMap(entries => entries.map(entry => entry.primitive)),
             ];
             return [...new Set(primitives)].filter(primitive => primitive.ready && primitive.positionTexture).flatMap((primitive) => {
               const names = new Map(Object.entries(primitive._attributeLocations).map(([name, location]) => [location, name]));
@@ -382,9 +382,9 @@ for (const scenario of cases) {
           symbolPixels.push(await checkSymbols(page, path.join(output, `${scenario.name}-final.png`)));
         const symbolState = await page.evaluate(() => {
           const tileset = window.renderValidation.tileset;
-          const symbol = tileset._symbolRenderer;
+          const symbol = tileset._renderer.symbol;
           return {
-            held: [...tileset._tileResidency._sources].flatMap(([source, sync]) => [...sync.held].map(tileId => ({ source, tileId }))),
+            held: [...tileset._renderer.residency._sources].flatMap(([source, sync]) => [...sync.held].map(tileId => ({ source, tileId }))),
             tiles: [...symbol._tiles].map(([tileId, entry]) => ({
               tileId,
               placed: entry.placed,
@@ -441,45 +441,45 @@ for (const scenario of cases) {
           if (!validation)
             return { initialized: false };
           const { tileset, viewer } = validation;
-          const symbol = tileset._symbolRenderer;
+          const symbol = tileset._renderer.symbol;
           return {
             zoom: validation.zoom,
             renderErrors: validation.renderErrors,
             stats: tileset.stats(),
             coverage: validation.coverage,
             globeTiles: viewer.scene.globe._surface._tilesToRender.length,
-            firstUpdates: tileset._sceneCollections.pendingFirstUpdateCount,
-            sourceTiles: Object.entries(tileset._style.tilePyramids).map(([source, pyramid]) => ({
+            firstUpdates: tileset._renderer.collections.pendingFirstUpdateCount,
+            sourceTiles: Object.entries(tileset._renderer.style.tilePyramids).map(([source, pyramid]) => ({
               source,
               tiles: pyramid.getRenderableIds().map((key) => {
                 const tile = pyramid.getTileByID(key);
                 return { key, canonical: tile?.tileID.canonical, buckets: Object.entries(tile?.buckets ?? {}).map(([id, bucket]) => ({ id, type: bucket.layers[0]?.type, instances: (bucket as typeof bucket & { symbolInstances?: { length: number } }).symbolInstances?.length })) };
               }),
             })),
-            residentTiles: [...tileset._tileResidency._tiles].map(([id, tile]) => ({ id, live: tile.live, progress: tile.publication, canonical: tile.tileID.canonical })),
+            residentTiles: [...tileset._renderer.residency._tiles].map(([id, tile]) => ({ id, live: tile.live, progress: tile.publication, canonical: tile.tileID.canonical })),
             symbolTiles: [...symbol._tiles].map(([id, entry]) => ({ id, layers: entry.layerIds, placed: entry.placed, excluded: symbol._excludedPlacementTiles.has(id), visibleVertices: entry.batches.reduce((count, batch) => count + [batch.text, batch.icon].reduce((sum, half) => sum + (half?.opacities.filter(value => value > 0).length ?? 0), 0), 0) })),
             retiredSymbols: [...symbol._retired.entries()].map(([id, entry]) => ({ id, layers: entry.layerIds })),
             referenceSymbols: validation.reference?.queryRenderedFeatures().filter(feature => feature.layer.type === 'symbol').map(feature => ({ id: feature.layer.id, name: feature.properties.name })).slice(0, 30),
             dash: {
               canvas: { width: viewer.canvas.width, height: viewer.canvas.height, clientWidth: viewer.canvas.clientWidth, clientHeight: viewer.canvas.clientHeight, devicePixelRatio: window.devicePixelRatio, recommendedResolution: viewer.useBrowserRecommendedResolution },
               framePixelRatio: viewer.scene._frameState.pixelRatio,
-              rendererPixelRatio: tileset._patternRenderer.pixelRatio,
-              crossfade: tileset._style.getLayer('dash')?.getCrossfadeParameters(),
-              materials: tileset._vectorRenderer.dashMaterial?._material
+              rendererPixelRatio: tileset._renderer.pattern.pixelRatio,
+              crossfade: tileset._renderer.style.getLayer('dash')?.getCrossfadeParameters(),
+              materials: tileset._renderer.vector.dashMaterial?._material
                 ? [{
-                    uniforms: Object.fromEntries(['u_mix', 'u_fromScale', 'u_toScale', 'u_dpr', 'u_worldPixels', 'u_atlasSize'].map(name => [name, tileset._vectorRenderer.dashMaterial._material.uniforms[name]])),
+                    uniforms: Object.fromEntries(['u_mix', 'u_fromScale', 'u_toScale', 'u_dpr', 'u_worldPixels', 'u_atlasSize'].map(name => [name, tileset._renderer.vector.dashMaterial._material.uniforms[name]])),
                   }]
                 : [],
-              atlasCenter: tileset._vectorRenderer.dashMaterial && Array.from(tileset._vectorRenderer.dashMaterial.atlas.data.subarray(7 * 256 + 220, 7 * 256 + 230)),
+              atlasCenter: tileset._renderer.vector.dashMaterial && Array.from(tileset._renderer.vector.dashMaterial.atlas.data.subarray(7 * 256 + 220, 7 * 256 + 230)),
             },
-            firstUpdateDetails: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, upload]) => ({
+            firstUpdateDetails: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, upload]) => ({
               size: (collection as PrimitiveCollection).length,
               index: upload.index,
               show: collection.show,
               kind: (collection as PrimitiveCollection).length ? window.renderValidation.drawBatch((collection as PrimitiveCollection).get(0))?.kind : undefined,
             }))),
-            held: [...tileset._tileResidency._sources].flatMap(([source, sync]) => [...sync.held].map(tileId => ({ source, tileId }))),
-            jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+            held: [...tileset._renderer.residency._sources].flatMap(([source, sync]) => [...sync.held].map(tileId => ({ source, tileId }))),
+            jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
             measurements: validation.measurements,
             placement: {
               pending: symbol.hasPendingWork,

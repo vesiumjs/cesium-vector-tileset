@@ -158,7 +158,7 @@ async function installLowZoomTileset(page: Page, styleUrl: string) {
         // Resolve the actual command's tile record. Its TileID proves that the
         // primitive used z0/z1 bounds, not merely a low-zoom URL overzoomed by
         // the default fixture tileset at this very low camera height.
-        const tileID = validation.tileset._vectorRenderer._records.get(batch.tileId)?.tileID as OverscaledTileID;
+        const tileID = validation.tileset._renderer.vector._records.get(batch.tileId)?.tileID as OverscaledTileID;
         draws.push({
           tileId: batch.tileId,
           kind: batch.kind,
@@ -170,7 +170,7 @@ async function installLowZoomTileset(page: Page, styleUrl: string) {
       return draw.call(this, command, ...args);
     };
     window.stopGlobalLinePixels = scene.postRender.addEventListener(() => {
-      const records = [...validation.tileset._vectorRenderer._records];
+      const records = [...validation.tileset._renderer.vector._records];
       // Empty views must still yield a completed framebuffer. A correct
       // Greenwich frame need not contain any road draw command.
       const ready = records.length > 0 && records.every(([, record]) => record.complete

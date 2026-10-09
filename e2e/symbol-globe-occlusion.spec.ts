@@ -74,7 +74,7 @@ test('globe hides symbols on the far side while keeping front symbols visible', 
   await expect.poll(async () => (await sample()).front).toBeGreaterThan(100);
   const result = await sample();
   expect(result.back, `far-side symbol pixels: ${JSON.stringify(result)}`).toBe(0);
-  await expect.poll(() => page.evaluate(() => [...window.renderValidation.tileset._symbolRenderer._tiles.values()]
+  await expect.poll(() => page.evaluate(() => [...window.renderValidation.tileset._renderer.symbol._tiles.values()]
     .flatMap(entry => entry.batches.flatMap(batch => Array.from(batch.icon!.opacities))))).toEqual([1, 1, 1, 1, 0, 0, 0, 0]);
 
   // Bring the red symbol onto the front, then rotate it behind the horizon.

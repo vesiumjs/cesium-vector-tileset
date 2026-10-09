@@ -7,7 +7,7 @@ import { writeFile } from 'node:fs/promises';
 import { expect } from 'playwright/test';
 import { fromGeojsonVt, test } from './fixtures';
 
-type ParcelRecord = Parameters<TestTileset['_vectorRenderer']['_records']['set']>[1];
+type ParcelRecord = Parameters<TestTileset['_renderer']['vector']['_records']['set']>[1];
 interface ParcelCombineInput { instances: number; geometryBytes: number; instanceBytes: number; serializedBytes: number }
 interface ParcelNativeSnapshot { tileId: string; features: number; instances: number; state: number; combining: boolean; ready: boolean; arrays: number }
 interface ParcelFrame {
@@ -271,10 +271,10 @@ for (const mode of ['2d', 'cv']) {
         const validation = window.renderValidation;
         return {
           loaded: validation?.tileset.tilesLoaded ?? false,
-          zoom: validation?.tileset._styleEvaluation.zoom,
+          zoom: validation?.tileset._renderer.evaluation.zoom,
           stats: validation?.tileset.stats(),
           records: validation
-            ? [...validation.tileset._vectorRenderer._records.values()].map(record => ({
+            ? [...validation.tileset._renderer.vector._records.values()].map(record => ({
                 features: record.standard?.polygons.length,
                 ready: record.standard?.polygons.every(entry => entry.primitive.ready && entry.primitive._va.length > 0),
               }))
@@ -291,8 +291,8 @@ for (const mode of ['2d', 'cv']) {
             identity.set(resource, nextIdentity++);
           return identity.get(resource);
         };
-        const nativePrimitives = () => [...new Set([...tileset._vectorRenderer._records.values()].flatMap(record => record.standard?.polygons.map(entry => entry.primitive) ?? []))];
-        window.parcelOriginalRecords = [...tileset._vectorRenderer._records.entries()];
+        const nativePrimitives = () => [...new Set([...tileset._renderer.vector._records.values()].flatMap(record => record.standard?.polygons.map(entry => entry.primitive) ?? []))];
+        window.parcelOriginalRecords = [...tileset._renderer.vector._records.entries()];
         window.parcelOriginal = nativePrimitives().map(primitive => ({
           primitive,
           arrays: [...primitive._va],
@@ -328,7 +328,7 @@ for (const mode of ['2d', 'cv']) {
         });
         window.parcelSnapshot = (source = 'city') => {
           const { canvas, scene } = viewer;
-          let selected = [...tileset._vectorRenderer._records.entries()].filter(([tileId]) => tileId.startsWith(`${source}/`));
+          let selected = [...tileset._renderer.vector._records.entries()].filter(([tileId]) => tileId.startsWith(`${source}/`));
           // A source handoff can keep the predecessor scene collections alive
           // after removing their live record. Retain their real entries for the
           // old-source pixel/pick checks during that ownership transfer.
@@ -420,7 +420,7 @@ for (const mode of ['2d', 'cv']) {
       const setStates = async (states, source = 'city') => page.evaluate(({ states, source }) => {
         const { tileset, viewer } = window.renderValidation;
         for (const { featureIndex, state } of states)
-          tileset._style.setFeatureState({ source, sourceLayer: 'parcels', id: featureIndex + 1 }, state);
+          tileset._renderer.style.setFeatureState({ source, sourceLayer: 'parcels', id: featureIndex + 1 }, state);
         viewer.scene.requestRender();
       }, { states, source });
       const initial = await capture('initial-data-paint', rgb(initialColors));
@@ -449,11 +449,11 @@ for (const mode of ['2d', 'cv']) {
         viewer.scene.requestRender();
       }, center);
       const originalTile = initial.records[0].tileId;
-      await expect.poll(() => page.evaluate(tileId => !!window.renderValidation.tileset._vectorRenderer._retired.get(tileId), originalTile), { timeout: 30_000 }).toBe(true);
+      await expect.poll(() => page.evaluate(tileId => !!window.renderValidation.tileset._renderer.vector._retired.get(tileId), originalTile), { timeout: 30_000 }).toBe(true);
       await setStates(colorStates(restoredColors));
       const retired = await page.evaluate(tileId => ({
         tileId,
-        cached: !!window.renderValidation.tileset._vectorRenderer._retired.get(tileId),
+        cached: !!window.renderValidation.tileset._renderer.vector._retired.get(tileId),
         stable: window.parcelStable(),
       }), originalTile);
       report.retired = retired;
@@ -463,7 +463,7 @@ for (const mode of ['2d', 'cv']) {
         viewer.camera.setView({ destination: atlas.cesium.Rectangle.fromDegrees(center[0] - 0.02625, center[1] - 0.011025, center[0] + 0.02625, center[1] + 0.011025) });
         viewer.scene.requestRender();
       }, center);
-      await expect.poll(() => page.evaluate(tileId => window.renderValidation.tileset._vectorRenderer._records.has(tileId), originalTile), { timeout: 30_000 }).toBe(true);
+      await expect.poll(() => page.evaluate(tileId => window.renderValidation.tileset._renderer.vector._records.has(tileId), originalTile), { timeout: 30_000 }).toBe(true);
       await capture('restored-current-feature-state-paint', rgb(restoredColors));
 
       const successor = {
@@ -485,7 +485,7 @@ for (const mode of ['2d', 'cv']) {
           budgetSkipped: 0,
           newVisible: false,
         };
-        const renderer = tileset._vectorRenderer;
+        const renderer = tileset._renderer.vector;
         const update = renderer.updatePaint;
         renderer.updatePaint = function (frame) {
           if (control.exhaustPaint)
@@ -498,7 +498,7 @@ for (const mode of ['2d', 'cv']) {
           control.holding = false;
           control.held.splice(0).forEach(deliver => deliver());
         };
-        control.native = () => [...tileset._vectorRenderer._records.entries()]
+        control.native = () => [...tileset._renderer.vector._records.entries()]
           .filter(([tileId]) => tileId.startsWith('successor/'))
           .flatMap(([tileId, record]) => [...new Set(record.standard?.polygons.map(entry => entry.primitive) ?? [])].map(primitive => ({
             tileId,
@@ -536,7 +536,7 @@ for (const mode of ['2d', 'cv']) {
         control.phase = 'native-hold-current-paint';
         control.exhaustPaint = true;
         for (const { featureIndex, state } of states)
-          tileset._style.setFeatureState({ source: 'successor', sourceLayer: 'parcels', id: featureIndex + 1 }, state);
+          tileset._renderer.style.setFeatureState({ source: 'successor', sourceLayer: 'parcels', id: featureIndex + 1 }, state);
         viewer.scene.requestRender();
         const frames = control.frames.length;
         // Keep the actual combine result held for multiple real draws while
@@ -564,10 +564,10 @@ for (const mode of ['2d', 'cv']) {
       await capture('completed-source-handoff', rgb(repaintColors), 'successor');
       const final = await page.evaluate(() => {
         const { viewer, tileset, renderErrors } = window.renderValidation;
-        const primitives = [...new Set([...tileset._vectorRenderer._records.values()].flatMap(record => record.standard.polygons.map(entry => entry.primitive)))];
+        const primitives = [...new Set([...tileset._renderer.vector._records.values()].flatMap(record => record.standard.polygons.map(entry => entry.primitive)))];
         const result = {
           originalDestroyed: window.parcelOriginal.every(({ primitive }) => primitive.isDestroyed()),
-          hiddenStyleTiles: tileset._tileResidency.hiddenStyleTiles.size,
+          hiddenStyleTiles: tileset._renderer.residency.hiddenStyleTiles.size,
           fps: viewer.scene.debugShowFramesPerSecond,
           renderErrors: [...renderErrors],
           inputs: window.parcelCombineInputs,

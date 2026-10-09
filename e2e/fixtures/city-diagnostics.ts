@@ -16,13 +16,22 @@ export function cityDiagnostics(viewer: TestViewer, tileset: TestTileset, zoom: 
     collections: Array<{ show: boolean }>;
   }
   const internals = tileset as unknown as {
-    _symbolRenderer: { _tiles: Map<string, Entry>; _visibleEntries: Map<string, Entry> };
-    _tileResidency: { _tiles: Map<string, { featureIndex?: FeatureIndex }> };
+    _renderer: {
+      symbol: {
+        _tiles: Map<string, Entry>;
+        _visibleEntries: Map<string, Entry>;
+      };
+      residency: {
+        _tiles: Map<string, {
+          featureIndex?: FeatureIndex;
+        }>;
+      };
+    };
   };
   const matrix = symbolViewProjection(viewer.camera.viewMatrix, viewer.camera.frustum.projectionMatrix);
   const rows = [];
-  for (const [tileId, entry] of internals._symbolRenderer._visibleEntries) {
-    const featureIndex = internals._tileResidency._tiles.get(tileId)?.featureIndex;
+  for (const [tileId, entry] of internals._renderer.symbol._visibleEntries) {
+    const featureIndex = internals._renderer.residency._tiles.get(tileId)?.featureIndex;
     if (!featureIndex)
       continue;
     for (let batchIndex = 0; batchIndex < entry.batches.length; batchIndex++) {
@@ -55,7 +64,7 @@ export function cityDiagnostics(viewer: TestViewer, tileset: TestTileset, zoom: 
           ? { x1: projected.sx + box.x1 * scale, y1: projected.sy + box.y1 * scale, x2: projected.sx + box.x2 * scale, y2: projected.sy + box.y2 * scale }
           : undefined;
         const uploaded = !text.opacityDirty && entry.halves.some(half => half.opacity?.geometry === text && half.opacity.target?.primitive.ready);
-        rows.push({ tileId, layerId, featureIndex: raw.featureIndex, id: feature.id, properties: feature.properties, anchor: projected, screenBox, size, opacity: text.opacities[vertex], uploaded, shown: entry.collections.some(collection => collection.show), current: internals._symbolRenderer._tiles.get(tileId) === entry, vertexCount: instance.vertexCount });
+        rows.push({ tileId, layerId, featureIndex: raw.featureIndex, id: feature.id, properties: feature.properties, anchor: projected, screenBox, size, opacity: text.opacities[vertex], uploaded, shown: entry.collections.some(collection => collection.show), current: internals._renderer.symbol._tiles.get(tileId) === entry, vertexCount: instance.vertexCount });
       }
     }
   }

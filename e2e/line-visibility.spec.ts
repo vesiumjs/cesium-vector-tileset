@@ -53,7 +53,7 @@ for (const { pixelRatio, scale, across, expectCulling } of [{ pixelRatio: 1, sca
         const registry = await import(`${renderUrl}/packages/cesium-vector-tileset/src/render/scene/draw-batch.ts`);
         const scene = viewer.scene as any;
         scene.debugShowFramesPerSecond = false;
-        const renderer = (tileset as any)._vectorRenderer;
+        const renderer = (tileset as any)._renderer.vector;
         const owners = () => {
           const found = new Set<any>();
           const visit = (entry: any) => {

@@ -126,7 +126,7 @@ export async function observeCityUploads(context: BrowserContext) {
           return true;
         };
         const counts = { owners: 0, fresh: 0, preparation: 0, waitingSlot: 0, waitingSlotRunnable: 0, noBatch: 0, combined: 0, result: 0, ready: 0, wholeReady: 0, renderFresh: 0, renderNoBatch: 0, renderCombined: 0, renderFailed: 0, renderOther: 0 };
-        for (const queue of tileset._sceneCollections._firstUpdates) {
+        for (const queue of tileset._renderer.collections._firstUpdates) {
           for (const collection of queue.keys()) {
             if (collection.isDestroyed())
               continue;
@@ -168,7 +168,7 @@ export async function observeCityUploads(context: BrowserContext) {
         return counts;
       };
       const captureFrame = () => {
-        const lease = tileset._sceneBudget;
+        const lease = tileset._renderer.preparation._sceneBudget;
         if (!lease || lease === observedLease)
           return;
         observedLease = lease;
@@ -214,10 +214,10 @@ export async function observeCityUploads(context: BrowserContext) {
           }
         };
       };
-      wrapStage(tileset._sceneCollections, 'pumpFirstUpdates', 'upload', 1, () => tileset._sceneCollections.pendingFirstUpdateCount);
-      wrapStage(tileset._sceneCollections, 'advancePreparations', 'idleUpload', 1, () => tileset._sceneCollections.pendingFirstUpdateCount);
-      wrapStage(tileset._tilePublishQueue, 'drain', 'build', 0, () => tileset._tilePublishQueue.size);
-      wrapStage(tileset._tilePublishQueue, 'advanceBuilds', 'idleBuild', 0, () => tileset._tilePublishQueue.size);
+      wrapStage(tileset._renderer.collections, 'pumpFirstUpdates', 'upload', 1, () => tileset._renderer.collections.pendingFirstUpdateCount);
+      wrapStage(tileset._renderer.collections, 'advancePreparations', 'idleUpload', 1, () => tileset._renderer.collections.pendingFirstUpdateCount);
+      wrapStage(tileset._renderer.publishQueue, 'drain', 'build', 0, () => tileset._renderer.publishQueue.size);
+      wrapStage(tileset._renderer.publishQueue, 'advanceBuilds', 'idleBuild', 0, () => tileset._renderer.publishQueue.size);
       const originalPrePasses = tileset.prePassesUpdate;
       tileset.prePassesUpdate = function (frame: any) {
         observe(() => {
@@ -226,7 +226,7 @@ export async function observeCityUploads(context: BrowserContext) {
             sample.frame = frame.frameNumber;
             sample.idle = frame.newFrame === false;
             sample.reasonsBefore = queueReasons();
-            sample.ownRenderRequestedBefore = tileset._renderRequested;
+            sample.ownRenderRequestedBefore = tileset._renderer.wake.requested;
           }
         });
         try {
@@ -236,7 +236,7 @@ export async function observeCityUploads(context: BrowserContext) {
           observe(() => {
             captureFrame();
             if (sample)
-              sample.ownRenderRequestedAfterPrePasses = tileset._renderRequested;
+              sample.ownRenderRequestedAfterPrePasses = tileset._renderer.wake.requested;
           });
         }
       };
@@ -255,7 +255,7 @@ export async function observeCityUploads(context: BrowserContext) {
             if (current) {
               current.cpu += duration;
               current.updateCalls++;
-              current.ownRenderRequestedAfterUpdate = tileset._renderRequested;
+              current.ownRenderRequestedAfterUpdate = tileset._renderer.wake.requested;
             }
           });
         }
@@ -291,13 +291,13 @@ export async function observeCityUploads(context: BrowserContext) {
               continuationMs: work?.continuationMs,
               selectedParticipant: work?.participant === tileset,
               stageSequence: work?.stage,
-              commands: tileset._lastSubmittedCommands,
-              zoom: tileset._symbolRenderer.cameraZoom,
-              firstUpdates: tileset._sceneCollections.pendingFirstUpdateCount,
-              publishes: tileset._tilePublishQueue.size,
-              paint: tileset._vectorRenderer.needsPaintUpdate,
-              placement: tileset._symbolRenderer.hasRunnableWork,
-              ownRenderRequestedAfter: tileset._renderRequested,
+              commands: tileset._renderer._lastSubmittedCommands,
+              zoom: tileset._renderer.symbol.cameraZoom,
+              firstUpdates: tileset._renderer.collections.pendingFirstUpdateCount,
+              publishes: tileset._renderer.publishQueue.size,
+              paint: tileset._renderer.vector.needsPaintUpdate,
+              placement: tileset._renderer.symbol.hasRunnableWork,
+              ownRenderRequestedAfter: tileset._renderer.wake.requested,
               sceneRenderRequestedAfter: scene._renderRequested,
               reasonsAfter: queueReasons(),
             });

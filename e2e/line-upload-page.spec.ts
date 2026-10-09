@@ -76,7 +76,7 @@ for (const mode of ['3d', 'cv', '2d']) {
       window.linePage.remove = viewer.scene.postRender.addEventListener(() => {
         if (tileset.isDestroyed())
           return;
-        const owners = tileset._vectorRenderer.tileIds.flatMap(tileId => tileset._vectorRenderer.getTileCollections(tileId)
+        const owners = tileset._renderer.vector.tileIds.flatMap(tileId => tileset._renderer.vector.getTileCollections(tileId)
           .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index) as NativePrimitive))
           .filter(owner => drawBatch(owner)?.layerId === 'roads'));
         window.linePage.owners = owners;

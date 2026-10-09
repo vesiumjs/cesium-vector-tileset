@@ -45,10 +45,6 @@ export interface LineStripBakeOptions {
   dashTo?: DashAtlasRow;
 }
 
-function effectiveLineMiterLimit(options: LineStripBakeOptions): number {
-  return options.join === 'bevel' ? 1.05 : options.miterLimit;
-}
-
 export interface ReferenceLineBake {
   positions: Float64Array;
   /** Source-backed planar bakes map expanded vertices to real source points. */
@@ -83,7 +79,7 @@ export function bakeReferenceLine(
   // hard-codes 1.05 for bevel joins (line_bucket.addLine). The construction
   // parameter preserves the raw FLOAT bake; the production geometry packs
   // fan/cap roles into one byte and keeps this limit in the instance table.
-  const effectiveMiterLimit = effectiveLineMiterLimit(options);
+  const effectiveMiterLimit = options.join === 'bevel' ? 1.05 : options.miterLimit;
   // Sanitize the centerline first: drop consecutive duplicates (zero-length
   // legs) and refuse non-finite coordinates. A corrupt point poisons every
   // downstream computation, so the strip is dropped whole — reconnecting

@@ -101,11 +101,11 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
     await page.evaluate(() => {
       const { tileset, viewer } = window.renderValidation;
       viewer.scene.debugShowFramesPerSecond = true;
-      const bucket = tileset._vectorRenderer;
+      const bucket = tileset._renderer.vector;
       window.lineFamilyCurrentResources = () => [...new Set([...bucket.tileIds.flatMap(tileId => bucket.getTileCollections(tileId)
         .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index) as LineFamilyResource)
           .filter(entry => (entry.primitive && entry._layers?.length === 2)
-            || (entry._va?.length && ['line', 'dash'].includes(entry[Symbol.for('cesium-vector-tileset.draw-batch')]?.kind ?? ''))))), ...[...tileset._patternRenderer._tiles.values()].flatMap(entries => entries.map(entry => entry.primitive as LineFamilyResource))])];
+            || (entry._va?.length && ['line', 'dash'].includes(entry[Symbol.for('cesium-vector-tileset.draw-batch')]?.kind ?? ''))))), ...[...tileset._renderer.pattern._tiles.values()].flatMap(entries => entries.map(entry => entry.primitive as LineFamilyResource))])];
       window.lineFamilyResources = window.lineFamilyCurrentResources();
       window.lineFamilyPrimitiveOwners = entries => [...new Set(entries.map(entry => (entry.primitive ?? entry) as NativePrimitive))];
       const owners = window.lineFamilyPrimitiveOwners(window.lineFamilyResources);
@@ -402,7 +402,7 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
       const samples = await page.evaluate(async () => {
         const { tileset, viewer } = window.renderValidation;
-        const renderer = tileset._vectorRenderer;
+        const renderer = tileset._renderer.vector;
         const updatePaint = renderer.updatePaint;
         const initialHeight = viewer.camera.positionCartographic.height;
         const initialZoom = window.renderValidation.zoom;
@@ -480,10 +480,10 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       successorRoads.paint!['line-color'] = '#ff00ff';
       const heldResult = await page.evaluate(async ({ heldSuccessor, cutoff }) => {
         const { tileset, viewer } = window.renderValidation;
-        const renderer = tileset._vectorRenderer;
-        const queue = tileset._tilePublishQueue;
+        const renderer = tileset._renderer.vector;
+        const queue = tileset._renderer.publishQueue;
         const drain = queue.drain;
-        const sceneCollections = tileset._sceneCollections;
+        const sceneCollections = tileset._renderer.collections;
         const pump = sceneCollections.pumpFirstUpdates;
         const initialHeight = viewer.camera.positionCartographic.height;
         const original = new Map(renderer._records);
@@ -574,11 +574,11 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
             if (publishedGeneration)
               break;
           }
-          if (!publishedGeneration || ![...tileset._sceneCollections._replacements].some(replacement => replacement.kind === 'vector' && (replacement.awaitingDetail || replacement.waiting.size > 0) && replacement.old.size > 0)) {
+          if (!publishedGeneration || ![...tileset._renderer.collections._replacements].some(replacement => replacement.kind === 'vector' && (replacement.awaitingDetail || replacement.waiting.size > 0) && replacement.old.size > 0)) {
             throw new Error(`real publication did not leave a drawable held generation: ${JSON.stringify({
               publishedGeneration,
               deletedRecords,
-              replacements: [...tileset._sceneCollections._replacements].map(replacement => ({ tileId: replacement.tileId, kind: replacement.kind, detail: replacement.awaitingDetail, old: replacement.old.size, next: replacement.next.size, waiting: replacement.waiting.size })),
+              replacements: [...tileset._renderer.collections._replacements].map(replacement => ({ tileId: replacement.tileId, kind: replacement.kind, detail: replacement.awaitingDetail, old: replacement.old.size, next: replacement.next.size, waiting: replacement.waiting.size })),
               records: [...renderer._records].map(([tileId, record]) => ({ tileId, complete: record.complete, frozen: record.paint.frozen })),
             })}`);
           }
@@ -602,8 +602,8 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       // verify buildings as well as roads throughout the mode handoff.
       await page.evaluate(() => {
         const { tileset, viewer } = window.renderValidation;
-        tileset._style.setPaintProperty('casing', 'line-width', 14);
-        tileset._style.setPaintProperty('roads', 'line-width', 6);
+        tileset._renderer.style.setPaintProperty('casing', 'line-width', 14);
+        tileset._renderer.style.setPaintProperty('roads', 'line-width', 6);
         viewer.scene.requestRender();
       });
       await expect.poll(() => page.evaluate(() => window.lineFamilyBuilding()?.layerId)).toBe('buildings');
@@ -632,7 +632,7 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
           const oldOwners = window.lineFamilyPrimitiveOwners(oldResources);
           const oldArrays = oldOwners.flatMap(owner => owner._va);
           const oldTextures = oldOwners.map(owner => owner.positionTexture).filter((texture): texture is NativeTexture => !!texture);
-          const buildings = () => [...tileset._vectorRenderer._records.values()].flatMap((record) => {
+          const buildings = () => [...tileset._renderer.vector._records.values()].flatMap((record) => {
             const collection = record.collections.get('extrusions') as PrimitiveCollection | undefined;
             return collection ? Array.from({ length: collection.length }, (_, index) => collection.get(index) as NativePrimitive) : [];
           });
@@ -654,7 +654,7 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
                 });
                 viewer.scene.requestRender();
               });
-              const records = [...tileset._vectorRenderer._records.values()];
+              const records = [...tileset._renderer.vector._records.values()];
               if (records.length > 0 && records.every(record => record.mode === expectedMode)
                 && tileset.tilesLoaded && oldResources.every(resource => resource.isDestroyed())) {
                 const current = window.lineFamilyCurrentResources();

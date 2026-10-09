@@ -364,7 +364,7 @@ async function createLinePerspective() {
         });
       });
       const viewProjection = Matrix4.multiply((viewer.camera.frustum as PerspectiveFrustum).projectionMatrix, viewer.camera.viewMatrix, new Matrix4());
-      const nativeEntries = new Set([...tileset._symbolRenderer._tiles.values(), ...tileset._symbolRenderer._visibleEntries.values(), ...tileset._symbolRenderer._held.values()]);
+      const nativeEntries = new Set([...tileset._renderer.symbol._tiles.values(), ...tileset._renderer.symbol._visibleEntries.values(), ...tileset._renderer.symbol._held.values()]);
       const nativeAnchors = [...nativeEntries].filter(entry => drawnTiles.has(entry.input.tileId)).flatMap((entry) => {
         const tile = 'canonical' in entry.input.tileID ? entry.input.tileID.canonical : entry.input.tileID;
         return entry.batches.flatMap(batch => batch.icon
@@ -379,12 +379,12 @@ async function createLinePerspective() {
               const center = SceneTransforms.worldToWindowCoordinates(viewer.scene, world)!;
               const dynamic = Array.from(geometry.dynamics.subarray(base, base + 3));
               const w = viewProjection[3] * projected.z + viewProjection[7] * projected.x + viewProjection[11] * projected.y + viewProjection[15];
-              const distance = tileset._sceneCovering.cameraFrame?.cameraToCenterDistance;
+              const distance = tileset._renderer.covering.cameraFrame?.cameraToCenterDistance;
               if (!distance)
                 throw new Error('Actual Native symbol camera distance must exist');
               const ratio = Math.max(0, Math.min(4, 0.5 + 0.5 * (geometry.mapPitch ? w / distance : distance / w)));
               const size = Math.floor(geometry.sizes[instance.vertexStart] / 4) / 128 * (geometry.sizePerspective ? ratio : 1);
-              const metresPerPixel = circumference / (512 * 2 ** tileset._styleEvaluation.zoom);
+              const metresPerPixel = circumference / (512 * 2 ** tileset._renderer.evaluation.zoom);
               const corners = Array.from({ length: 4 }, (_, corner) => {
                 const vertex = instance.vertexStart + corner;
                 const x = geometry.offsets[vertex * 2] * Math.max(size, geometry.minfontscales[vertex * 2]) + geometry.pxoffsets[vertex * 2];
@@ -429,7 +429,7 @@ async function createLinePerspective() {
         referenceDraws,
         draws,
         drawnTiles: [...drawnTiles],
-        camera: { nativeDistance: tileset._sceneCovering.cameraFrame?.cameraToCenterDistance, nativeZoom: tileset._styleEvaluation.zoom, referenceDistance: transform.cameraToCenterDistance / transform.worldSize * circumference, nativePosition, referencePosition, pitch: reference.getPitch(), nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, bearing: reference.getBearing(), roll: reference.getRoll(), nativeHeading: viewer.camera.heading, nativeRoll: viewer.camera.roll, elevation: reference.getCenterElevation(), zoom: reference.getZoom() },
+        camera: { nativeDistance: tileset._renderer.covering.cameraFrame?.cameraToCenterDistance, nativeZoom: tileset._renderer.evaluation.zoom, referenceDistance: transform.cameraToCenterDistance / transform.worldSize * circumference, nativePosition, referencePosition, pitch: reference.getPitch(), nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, bearing: reference.getBearing(), roll: reference.getRoll(), nativeHeading: viewer.camera.heading, nativeRoll: viewer.camera.roll, elevation: reference.getCenterElevation(), zoom: reference.getZoom() },
         gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(reference.getCanvas().getContext('webgl2')!) },
         viewport: { native: [viewer.canvas.width, viewer.canvas.height, viewer.canvas.clientWidth, viewer.canvas.clientHeight], reference: [reference.getCanvas().width, reference.getCanvas().height, reference.getCanvas().clientWidth, reference.getCanvas().clientHeight] },
         points: pointRows,

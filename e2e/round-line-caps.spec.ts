@@ -77,10 +77,10 @@ for (const { mode, dpr } of [{ mode: '3d', dpr: 1 }, { mode: '2d', dpr: 1 }, { m
           const { viewer, tileset } = window.renderValidation;
           viewer.scene.debugShowFramesPerSecond = true;
           window.roundCapPrimitives = () => [...new Set([
-            ...tileset._vectorRenderer.tileIds.flatMap(id => tileset._vectorRenderer.getTileCollections(id)
+            ...tileset._renderer.vector.tileIds.flatMap(id => tileset._renderer.vector.getTileCollections(id)
               .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index) as NativePrimitive & { primitive?: NativePrimitive }))
               .map(entry => entry.primitive ?? entry)),
-            ...[...tileset._patternRenderer._tiles.values()].flatMap(entries => entries.map(entry => entry.primitive)),
+            ...[...tileset._renderer.pattern._tiles.values()].flatMap(entries => entries.map(entry => entry.primitive)),
           ])].filter((primitive): primitive is NativePrimitive => (primitive as NativePrimitive)._attributeLocations?.a_lineFlags !== undefined && !!(primitive as NativePrimitive)._va?.length);
           window.roundCapOwners = new Map(window.roundCapPrimitives().map(primitive => [primitive, { arrays: [...primitive._va], texture: primitive.positionTexture }]));
           window.roundCapResourcesStable = () => {

@@ -213,23 +213,41 @@ export async function observeCityTaskWakes(context: BrowserContext) {
         postRender: { addEventListener: (listener: () => void) => () => void };
       };
       const tileset = validation.tileset as unknown as {
-        _renderRequested: boolean;
-        _renderRequestGeneration: number;
-        _requestRender: () => unknown;
-        _continueSymbolPlacement: () => unknown;
-        _tickSymbolFades: () => unknown;
-        _tilePublishQueue: Record<string, unknown> & { size: number };
-        _sceneCollections: Record<string, unknown> & { pendingFirstUpdateCount: number };
-        _symbolRenderer: { hasPendingWork: boolean; hasRunnableWork: boolean; _pendingOpacityHalves: Set<unknown>; _pendingDynamicHalves: Set<unknown>; _targetPlacement: Record<string, unknown>; _visiblePlacement: Record<string, unknown>; _handoffPlacement: Record<string, unknown> };
+        _renderer: {
+          wake: {
+            requested: boolean;
+            generation: number;
+            request: () => unknown;
+            continuePlacement: () => unknown;
+          };
+          placement: {
+            tickFades: () => unknown;
+          };
+          publishQueue: Record<string, unknown> & {
+            size: number;
+          };
+          collections: Record<string, unknown> & {
+            pendingFirstUpdateCount: number;
+          };
+          symbol: {
+            hasPendingWork: boolean;
+            hasRunnableWork: boolean;
+            _pendingOpacityHalves: Set<unknown>;
+            _pendingDynamicHalves: Set<unknown>;
+            _targetPlacement: Record<string, unknown>;
+            _visiblePlacement: Record<string, unknown>;
+            _handoffPlacement: Record<string, unknown>;
+          };
+        };
       };
-      const symbols = tileset._symbolRenderer;
+      const symbols = tileset._renderer.symbol;
       const scopes = [symbols._targetPlacement, symbols._visiblePlacement, symbols._handoffPlacement];
       finish = () => {
         if (!activeTick)
           return;
         measure(() => {
           activeTick!.sceneRequestedAfter = scene._renderRequested;
-          activeTick!.rootRequestedAfter = tileset._renderRequested;
+          activeTick!.rootRequestedAfter = tileset._renderer.wake.requested;
           observation.ticks.push(activeTick!);
           activeTick = undefined;
         });
@@ -243,9 +261,9 @@ export async function observeCityTaskWakes(context: BrowserContext) {
             frameBefore: numeric(scene._frameState.frameNumber),
             realRender: false,
             sceneRequestedBefore: scene._renderRequested,
-            rootRequestedBefore: tileset._renderRequested,
-            firstUpdates: tileset._sceneCollections.pendingFirstUpdateCount,
-            publishJobs: tileset._tilePublishQueue.size,
+            rootRequestedBefore: tileset._renderer.wake.requested,
+            firstUpdates: tileset._renderer.collections.pendingFirstUpdateCount,
+            publishJobs: tileset._renderer.publishQueue.size,
             placementPending: symbols.hasPendingWork,
             placementRunnable: symbols.hasRunnableWork,
             placementJobs: scopes.filter(scope => !!scope.job).length,
@@ -305,7 +323,7 @@ export async function observeCityTaskWakes(context: BrowserContext) {
         const row = measure(() => {
           if (activeMessage)
             activeMessage.completed = true;
-          const value: TaskWakeObservation['events'][number] = { id: observation.events.length, at: performance.now(), tick: activeTick?.tick, classification: activeMessage?.task.classification ?? 'unknownNative', task: activeMessage?.task, failed: args[0] !== undefined, appendedCallbacks: 0, afterRenderBefore: scene._frameState.afterRender.length, sceneRequestedBefore: scene._renderRequested, rootRequestedBefore: tileset._renderRequested };
+          const value: TaskWakeObservation['events'][number] = { id: observation.events.length, at: performance.now(), tick: activeTick?.tick, classification: activeMessage?.task.classification ?? 'unknownNative', task: activeMessage?.task, failed: args[0] !== undefined, appendedCallbacks: 0, afterRenderBefore: scene._frameState.afterRender.length, sceneRequestedBefore: scene._renderRequested, rootRequestedBefore: tileset._renderer.wake.requested };
           observation.events.push(value);
           return value;
         });
@@ -318,7 +336,7 @@ export async function observeCityTaskWakes(context: BrowserContext) {
             const queue = scene._frameState.afterRender;
             row.afterRenderAfter = queue.length;
             row.sceneRequestedAfter = scene._renderRequested;
-            row.rootRequestedAfter = tileset._renderRequested;
+            row.rootRequestedAfter = tileset._renderer.wake.requested;
             for (let index = first; index < queue.length; index++) {
               const original = queue[index];
               const value: TaskWakeObservation['callbacks'][number] = { id: observation.callbacks.length, event: row.id, enqueued: performance.now(), sceneRequestCalls: 0 };
@@ -330,7 +348,7 @@ export async function observeCityTaskWakes(context: BrowserContext) {
                   value.executed = performance.now();
                   value.tick = activeTick?.tick;
                   value.sceneBefore = scene._renderRequested;
-                  value.rootGenerationBefore = tileset._renderRequestGeneration;
+                  value.rootGenerationBefore = tileset._renderer.wake.generation;
                   activeCallback = value;
                 });
                 try {
@@ -343,7 +361,7 @@ export async function observeCityTaskWakes(context: BrowserContext) {
                 finally {
                   measure(() => {
                     value.sceneAfter = scene._renderRequested;
-                    value.rootGenerationAfter = tileset._renderRequestGeneration;
+                    value.rootGenerationAfter = tileset._renderer.wake.generation;
                     activeTick?.taskCallbacks.push(value.id);
                     if (!value.sceneBefore && value.sceneAfter)
                       pendingEdges.push(value.id);
@@ -394,41 +412,41 @@ export async function observeCityTaskWakes(context: BrowserContext) {
             object[name] = original;
         });
       };
-      const root = tileset as unknown as Record<string, unknown>;
-      const request = tileset._requestRender;
+      const wake = tileset._renderer.wake;
+      const request = wake.request;
       const wrappedRequest = function (this: unknown, ...args: unknown[]) {
         measure(() => increment(activeTick?.rootReasons ?? pendingReasons, reason ?? 'unclassifiedRoot'));
-        return Reflect.apply(request, this, args);
+        return Reflect.apply(request, wake, args);
       };
-      tileset._requestRender = wrappedRequest;
+      wake.request = wrappedRequest;
       restore.push(() => {
-        if (tileset._requestRender === wrappedRequest)
-          tileset._requestRender = request;
+        if (wake.request === wrappedRequest)
+          wake.request = request;
       });
-      hook(root, '_continueSymbolPlacement', 'placementContinuation');
-      hook(root, '_tickSymbolFades', 'symbolFades');
-      hook(tileset._tilePublishQueue, '_requestBuildContinuation', 'buildContinuation');
-      hook(tileset._sceneCollections, '_requestFirstUpdateContinuation', 'uploadContinuation');
-      hook(tileset._tilePublishQueue, '_buildVector', 'vectorCpu');
-      hook(tileset._tilePublishQueue, '_stepSymbol', 'symbolBuild');
-      hook(tileset._tilePublishQueue, '_stepPattern', 'patternBuild');
-      hook(tileset._tilePublishQueue._options as Record<string, unknown>, 'publish', 'publication', (args) => {
+      hook(wake, 'continuePlacement', 'placementContinuation');
+      hook(tileset._renderer.placement, 'tickFades', 'symbolFades');
+      hook(tileset._renderer.publishQueue, '_requestBuildContinuation', 'buildContinuation');
+      hook(tileset._renderer.collections, '_requestFirstUpdateContinuation', 'uploadContinuation');
+      hook(tileset._renderer.publishQueue, '_buildVector', 'vectorCpu');
+      hook(tileset._renderer.publishQueue, '_stepSymbol', 'symbolBuild');
+      hook(tileset._renderer.publishQueue, '_stepPattern', 'patternBuild');
+      hook(tileset._renderer.publishQueue._options as Record<string, unknown>, 'publish', 'publication', (args) => {
         const result = args[0] as { stage?: string } | undefined;
         if (activeTick && typeof result?.stage === 'string')
           increment(activeTick.publications, result.stage);
       });
-      hook(tileset._tilePublishQueue, 'inspectBuilds', 'buildInspection', (_, result) => {
+      hook(tileset._renderer.publishQueue, 'inspectBuilds', 'buildInspection', (_, result) => {
         if (activeTick) {
           const inspection = result as { runnable: boolean; renderNeeded: boolean };
           activeTick.buildInspection = { runnable: inspection.runnable, renderNeeded: inspection.renderNeeded };
         }
       });
-      hook(tileset._sceneCollections, '_hasRenderFirstUpdates', 'renderFirstUpdates', (_, result) => {
+      hook(tileset._renderer.collections, '_hasRenderFirstUpdates', 'renderFirstUpdates', (_, result) => {
         if (activeTick && typeof result === 'boolean')
           activeTick.renderFirstUpdates = result;
       });
-      hook(tileset._sceneCollections, 'advancePreparations', 'idleGeometryPreparation');
-      hook(tileset._tilePublishQueue, 'advanceBuilds', 'idleVectorBuild');
+      hook(tileset._renderer.collections, 'advancePreparations', 'idleGeometryPreparation');
+      hook(tileset._renderer.publishQueue, 'advanceBuilds', 'idleVectorBuild');
       for (const [index, scope] of scopes.entries())
         hook(scope, 'advance', `placementScope${index}`);
       const primitive = native.Primitive.prototype;

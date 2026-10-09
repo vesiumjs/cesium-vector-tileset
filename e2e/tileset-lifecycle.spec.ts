@@ -125,17 +125,17 @@ test('zoom replacement keeps framebuffer coverage', async ({ page, renderUrl }, 
         sample.diagnostic = {
           previousGlobe,
           currentGlobe: rectangles(validation.viewer.scene.globe),
-          sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({
+          sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({
             id,
             ideal: pyramid._covering?.idealTileIDs.map(tile => tile.toString()),
             renderable: pyramid.getRenderableIds(),
           })),
-          live: [...tileset._vectorRenderer.collections].map(([id, collection]) => ({ id, ...collections(collection) })),
-          retired: tileset._vectorRenderer.retiredCollections.map(collections),
-          held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
-          hiddenSurfaceLayers: [...tileset._tileResidency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
-          firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ ...collections(collection), index: update.index }))),
+          live: [...tileset._renderer.vector.collections].map(([id, collection]) => ({ id, ...collections(collection) })),
+          retired: tileset._renderer.vector.retiredCollections.map(collections),
+          held: [...tileset._renderer.residency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
+          hiddenSurfaceLayers: [...tileset._renderer.residency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
+          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+          firstUpdates: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ ...collections(collection), index: update.index }))),
         };
       }
       samples.push(sample);
@@ -475,10 +475,10 @@ test('transparent parent and child tile replacement keeps each pixel at a single
         const tileset = validation.tileset;
         frame.diagnostic = {
           stats: tileset.stats(),
-          sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
-          live: [...tileset._vectorRenderer.collections].map(([id, collection]) => ({ id, show: collection.show })),
-          held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+          sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
+          live: [...tileset._renderer.vector.collections].map(([id, collection]) => ({ id, show: collection.show })),
+          held: [...tileset._renderer.residency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
+          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
         };
       }
       frames.push(frame);

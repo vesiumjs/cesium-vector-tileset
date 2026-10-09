@@ -254,7 +254,7 @@ async function createLinePath() {
     pendingDraws = [];
     referenceFrames++;
   });
-  const entries = () => new Set([...tileset._symbolRenderer._tiles.values(), ...tileset._symbolRenderer._visibleEntries.values(), ...tileset._symbolRenderer._held.values()]);
+  const entries = () => new Set([...tileset._renderer.symbol._tiles.values(), ...tileset._renderer.symbol._visibleEntries.values(), ...tileset._renderer.symbol._held.values()]);
   const setView = (pitch: number, heading: number) => {
     pose = { pitch, heading };
     changedAt = performance.now();
@@ -301,8 +301,8 @@ async function createLinePath() {
     return { area, columns, rows, bounds: maxX >= 0 ? { minX, maxX, minY, maxY } : undefined };
   };
   const readyState = () => {
-    const pyramid = tileset._style.tilePyramids.lines;
-    const nativeLayer = tileset._style.getLayer('text');
+    const pyramid = tileset._renderer.style.tilePyramids.lines;
+    const nativeLayer = tileset._renderer.style.getLayer('text');
     const nativeTiles = pyramid?.getIds().map((id) => {
       const tile = pyramid.getTileByID(id)!;
       const bucket = nativeLayer && tile.getBucket(nativeLayer);
@@ -312,7 +312,7 @@ async function createLinePath() {
       const bucket = manager.getTile(tileID).getBucket(loadedLayer);
       return { tileID, symbols: bucket?.symbolInstances.length, glyphs: bucket && Array.from({ length: bucket.text.placedSymbolArray.length }, (_, index) => bucket.text.placedSymbolArray.get(index).numGlyphs) };
     });
-    return { elapsed: performance.now() - changedAt, tilesLoaded: tileset.tilesLoaded, referenceLoaded: reference.loaded(), nativeFrames, referenceFrames, nativeDraws, referenceDraws: draws.length, nativeZoom: tileset._styleEvaluation.zoom, referenceZoom: reference.getZoom(), nativeTiles, referenceTiles, nativeGeometry: [...entries()].map(entry => ({ tileID: entry.input.tileID, batches: entry.batches.map(batch => ({ glyphs: batch.text?.instances.map(instance => instance.line?.glyphOffsets.length), instances: batch.text?.instances.length })) })), errors };
+    return { elapsed: performance.now() - changedAt, tilesLoaded: tileset.tilesLoaded, referenceLoaded: reference.loaded(), nativeFrames, referenceFrames, nativeDraws, referenceDraws: draws.length, nativeZoom: tileset._renderer.evaluation.zoom, referenceZoom: reference.getZoom(), nativeTiles, referenceTiles, nativeGeometry: [...entries()].map(entry => ({ tileID: entry.input.tileID, batches: entry.batches.map(batch => ({ glyphs: batch.text?.instances.map(instance => instance.line?.glyphOffsets.length), instances: batch.text?.instances.length })) })), errors };
   };
   return {
     setView,
@@ -391,7 +391,7 @@ async function createLinePath() {
       const camera = viewer.camera.positionWC;
       const nativeCoverage = coverage(nativePixels);
       const referenceCoverage = coverage(referencePixels);
-      return { scenario, keepUpright, offsetY, pose, errors, readyState: readyState(), sourceLoaded: reference.querySourceFeatures('lines').some(feature => feature.properties.name === 'RIVER'), native: nativeLabel, reference: referenceLabel, nativeLabels, referenceLabels, draws, nativeDraws, nativeGpuDraws, nativeCoverage, referenceCoverage, nativeArea: nativeCoverage.area, referenceArea: referenceCoverage.area, glyphSource: publicStyle.glyphs, camera: { nativePosition: { x: 0.5 + camera.y / circumference, y: 0.5 - camera.z / circumference, z: camera.x / circumference }, referencePosition, nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, pitch: reference.getPitch(), nativeHeading: viewer.camera.heading * 180 / Math.PI, heading: reference.getBearing(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeDistance: tileset._sceneCovering.cameraFrame?.cameraToCenterDistance, nativeZoom: tileset._styleEvaluation.zoom, referenceZoom: reference.getZoom() }, gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(gl) } };
+      return { scenario, keepUpright, offsetY, pose, errors, readyState: readyState(), sourceLoaded: reference.querySourceFeatures('lines').some(feature => feature.properties.name === 'RIVER'), native: nativeLabel, reference: referenceLabel, nativeLabels, referenceLabels, draws, nativeDraws, nativeGpuDraws, nativeCoverage, referenceCoverage, nativeArea: nativeCoverage.area, referenceArea: referenceCoverage.area, glyphSource: publicStyle.glyphs, camera: { nativePosition: { x: 0.5 + camera.y / circumference, y: 0.5 - camera.z / circumference, z: camera.x / circumference }, referencePosition, nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, pitch: reference.getPitch(), nativeHeading: viewer.camera.heading * 180 / Math.PI, heading: reference.getBearing(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeDistance: tileset._renderer.covering.cameraFrame?.cameraToCenterDistance, nativeZoom: tileset._renderer.evaluation.zoom, referenceZoom: reference.getZoom() }, gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(gl) } };
     },
   };
 }

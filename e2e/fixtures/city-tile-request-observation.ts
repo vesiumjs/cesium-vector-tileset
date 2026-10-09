@@ -172,7 +172,7 @@ export async function observeCityTileRequests(context: BrowserContext) {
     const stamp = () => ({
       at: performance.now(),
       frame: scene?._frameState?.frameNumber as number | undefined,
-      styleZoom: tileset?._styleEvaluation?.zoom as number | undefined,
+      styleZoom: tileset?._renderer.evaluation?.zoom as number | undefined,
     });
     const replaceMethod = (target: any, name: string, factory: (original: Method) => Method): (() => void) => {
       const original = target[name] as Method;
@@ -380,7 +380,7 @@ export async function observeCityTileRequests(context: BrowserContext) {
       return hook;
     };
     const synchronizeBuilders = (): void => {
-      const currentQueue = tileset?._tilePublishQueue;
+      const currentQueue = tileset?._renderer.publishQueue;
       if (publishQueue !== currentQueue) {
         restorePublishQueue?.();
         publishQueue = currentQueue;
@@ -410,7 +410,7 @@ export async function observeCityTileRequests(context: BrowserContext) {
           restoreEnqueue?.();
         };
       }
-      const currentRenderer = tileset?._vectorRenderer;
+      const currentRenderer = tileset?._renderer.vector;
       if (vectorRenderer !== currentRenderer) {
         restoreVectorRenderer?.();
         vectorRenderer = currentRenderer;
@@ -459,7 +459,7 @@ export async function observeCityTileRequests(context: BrowserContext) {
             if (!motion || motion.poseIndex < 95 || observation.returnFrames.length >= 128)
               return;
             measure(() => {
-              const covering = tileset?._sceneCovering;
+              const covering = tileset?._renderer.covering;
               const kinds: Record<string, string[]> = {};
               for (const command of scene._frameState.commandList) {
                 const batch = validation?.drawBatch(command) ?? validation?.drawBatch(command.owner);
@@ -484,7 +484,7 @@ export async function observeCityTileRequests(context: BrowserContext) {
           });
         }
         const current = new Set<object>();
-        for (const [sourceId, pyramid] of Object.entries(tileset?._style?.tilePyramids ?? {}) as Array<[string, any]>) {
+        for (const [sourceId, pyramid] of Object.entries(tileset?._renderer.style?.tilePyramids ?? {}) as Array<[string, any]>) {
           if (!pyramid || typeof pyramid._loadTile !== 'function' || typeof pyramid._updateRetainedTiles !== 'function')
             continue;
           const source = pyramid.getSource?.() as object | undefined;

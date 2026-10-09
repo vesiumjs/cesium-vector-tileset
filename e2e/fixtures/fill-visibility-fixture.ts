@@ -35,7 +35,7 @@ export function installFillVisibility(viewer: TestViewer, tileset: TestTileset) 
   let draws = 0;
   const owners = () => {
     const result: Array<{ owner: FillOwner; tileBounds: BoundingSphere }> = [];
-    for (const record of tileset._vectorRenderer._records.values()) {
+    for (const record of tileset._renderer.vector._records.values()) {
       for (const collection of record.collections.values()) {
         if (collection instanceof BufferPolygonCollection && drawBatchForOwner(collection)?.layerId === 'visibility-fill')
           result.push({ owner: collection as FillOwner, tileBounds: tileBoundingSphere(record.tileID) });

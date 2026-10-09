@@ -112,7 +112,7 @@ async function createHorizon() {
       const centerIntersection = IntersectionTests.rayEllipsoid(ray, ellipsoid);
       const viewProjection = Matrix4.multiply((camera.frustum as PerspectiveFrustum).projectionMatrix, camera.viewMatrix, new Matrix4());
       const occluder = new EllipsoidalOccluder(ellipsoid, camera.positionWC);
-      const anchors = [...tileset._symbolRenderer._tiles.values()].flatMap((entry) => {
+      const anchors = [...tileset._renderer.symbol._tiles.values()].flatMap((entry) => {
         const tile = 'canonical' in entry.input.tileID ? entry.input.tileID.canonical : entry.input.tileID;
         const precision = Math.SQRT2 * 2 * Math.PI * ellipsoid.maximumRadius / (2 ** tile.z * 8192);
         return entry.batches.flatMap(batch => batch.icon
@@ -132,7 +132,7 @@ async function createHorizon() {
         tilesLoaded: tileset.tilesLoaded,
         gpu: String(gl.getParameter(extension?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER)),
         viewport: [viewer.canvas.width, viewer.canvas.height, viewer.canvas.clientWidth, viewer.canvas.clientHeight],
-        camera: { mode: scene.mode, longitude: location.longitude, latitude: location.latitude, height: location.height, pitch: camera.pitch * 180 / Math.PI, heading: camera.heading, roll: camera.roll, fov: (camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, rayOriginError: Cartesian3.distance(ray.origin, camera.positionWC), rayDirectionError: Cartesian3.distance(ray.direction, camera.directionWC), centerIntersection: centerIntersection ? { start: centerIntersection.start, stop: centerIntersection.stop } : undefined, focusDistance: tileset._sceneCovering.cameraFrame?.cameraToCenterDistance, styleZoom: tileset._styleEvaluation.zoom },
+        camera: { mode: scene.mode, longitude: location.longitude, latitude: location.latitude, height: location.height, pitch: camera.pitch * 180 / Math.PI, heading: camera.heading, roll: camera.roll, fov: (camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, rayOriginError: Cartesian3.distance(ray.origin, camera.positionWC), rayDirectionError: Cartesian3.distance(ray.direction, camera.directionWC), centerIntersection: centerIntersection ? { start: centerIntersection.start, stop: centerIntersection.stop } : undefined, focusDistance: tileset._renderer.covering.cameraFrame?.cameraToCenterDistance, styleZoom: tileset._renderer.evaluation.zoom },
         points: points.map((point) => {
           // Worker points are quantized to the tile extent. Measure the actual
           // emitted ground anchor, and qualify it against one tile cell.

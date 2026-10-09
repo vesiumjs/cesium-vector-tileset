@@ -221,7 +221,7 @@ test.describe(() => {
             globe: window.renderValidation.viewer.scene.globe.show,
             msaaSamples: window.renderValidation.viewer.scene.msaaSamples,
             renderErrors: window.renderValidation.renderErrors,
-            sharedFamilies: window.renderValidation.tileset._vectorRenderer.tileIds.flatMap(tileId => window.renderValidation.tileset._vectorRenderer.getTileCollections(tileId)
+            sharedFamilies: window.renderValidation.tileset._renderer.vector.tileIds.flatMap(tileId => window.renderValidation.tileset._renderer.vector.getTileCollections(tileId)
               .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index))))
               .filter(entry => entry._layers?.length === 2)
               .length,

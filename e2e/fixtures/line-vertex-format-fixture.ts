@@ -337,7 +337,11 @@ export async function createLineFormatValidation(mode: '2d' | 'cv' | '3d', scena
   tileset.add(group);
   // Production cold primitives only advance through the owned preparation
   // queue. The FLOAT oracle shares the same group and draw lifecycle.
-  (tileset as unknown as { _sceneCollections: SceneCollections })._sceneCollections.queueFirstUpdate([group], false);
+  (tileset as unknown as {
+    _renderer: {
+      collections: SceneCollections;
+    };
+  })._renderer.collections.queueFirstUpdate([group], false);
   if (scenario === 'near-plane')
     scene.camera.setView({ destination: Cartesian3.fromDegrees(-0.1276, 51.5072, 2), orientation: { heading: 0, pitch: 0, roll: 0 } });
   let styleZoom: number | undefined;

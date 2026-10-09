@@ -98,15 +98,15 @@ async function replace(page: Page, next: StyleSpecification, expected: number[],
           blackCoverage: validation.readCoverage([0, 0, 0]),
           whiteCoverage: validation.readCoverage([255, 255, 255]),
           pixels: validation.readPixelSamples(),
-          vector: [...tileset._vectorRenderer.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as PrimitiveCollection).length })),
-          patterns: [...tileset._patternRenderer._tiles].flatMap(([id, entries]) => entries.map(entry => ({ id, show: entry.primitive.show, ready: entry.primitive.ready, layerId: entry.id.layerId, parentShow: entry.collection.show }))),
-          retainedPatterns: [...tileset._patternRenderer.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as PrimitiveCollection).length })),
-          rasters: [...tileset._rasterRenderer._tiles].flatMap(([id, entries]) => entries.map((entry) => {
+          vector: [...tileset._renderer.vector.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as PrimitiveCollection).length })),
+          patterns: [...tileset._renderer.pattern._tiles].flatMap(([id, entries]) => entries.map(entry => ({ id, show: entry.primitive.show, ready: entry.primitive.ready, layerId: entry.id.layerId, parentShow: entry.collection.show }))),
+          retainedPatterns: [...tileset._renderer.pattern.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as PrimitiveCollection).length })),
+          rasters: [...tileset._renderer.raster._tiles].flatMap(([id, entries]) => entries.map((entry) => {
             const texture = entry.material._textures.image;
             return { id, show: entry.primitive.show, ready: entry.primitive.ready, parentShow: entry.collection.show, fade: entry.material.uniforms.u_fade, opacity: entry.material.uniforms.opacity, texture: texture && { width: texture.width, height: texture.height, destroyed: texture.isDestroyed() }, source: { width: entry.image.width, height: entry.image.height } };
           })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
-          firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: update.index }))),
+          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+          firstUpdates: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: update.index }))),
         };
       }
       window.trackFrames.push(frame);
@@ -269,7 +269,7 @@ test('an opaque 8px pattern stays uniform through image updates, replacement and
     const result = await page.evaluate(() => {
       window.stopImageUpdateFrames();
       const validation = window.renderValidation;
-      const image = validation.tileset._style.getImage('blue');
+      const image = validation.tileset._renderer.style.getImage('blue');
       return { frames: window.imageUpdateFrames, pixels: validation.readPixelSamples(), stats: validation.tileset.stats(), image: { version: image.version, firstPixel: Array.from(image.data.data.subarray(0, 4)) } };
     });
     frames = result.frames;
@@ -326,7 +326,7 @@ test('public 8px icon image updates repaint an idle scene without refetching til
     const result = await page.evaluate(({ blue, green }) => {
       window.stopIconUpdateFrames();
       const validation = window.renderValidation;
-      const image = validation.tileset._style.getImage('blue');
+      const image = validation.tileset._renderer.style.getImage('blue');
       return { frames: window.iconUpdateFrames, blueCoverage: validation.readCoverage(blue), greenCoverage: validation.readCoverage(green), pixels: validation.readPixelSamples(), stats: validation.tileset.stats(), image: { version: image.version, firstPixel: Array.from(image.data.data.subarray(0, 4)) } };
     }, { blue, green });
     frames = result.frames;

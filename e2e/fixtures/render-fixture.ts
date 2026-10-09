@@ -103,7 +103,13 @@ async function createValidation() {
   const referenceErrors: string[] = [];
   if (query.has('compare')) {
     const referenceStyle = structuredClone(tileset.styleSpec) as StyleSpecification;
-    const { transformRequest } = (tileset as unknown as { _style: { transformRequest?: RequestTransformFunction } })._style;
+    const { transformRequest } = (tileset as unknown as {
+      _renderer: {
+        style: {
+          transformRequest?: RequestTransformFunction;
+        };
+      };
+    })._renderer.style;
     for (const [id, source] of Object.entries(referenceStyle.sources)) {
       if (source.type === 'vector' && source.url) {
         // MapLibre consumes TileJSON; Cesium's loader also normalizes ArcGIS
@@ -129,12 +135,24 @@ async function createValidation() {
 
   // Instrument actual work at its owner; no instrumentation enters the library.
   const internals = tileset as unknown as {
-    _styleEvaluation: { zoom: number };
-    _style: { tilePyramids: Record<string, { _updateRetainedTiles: (...args: unknown[]) => unknown }> };
-    _vectorRenderer: { beginTileBuild: (...args: unknown[]) => unknown };
-    _symbolRenderer: {
-      update: (...args: unknown[]) => unknown;
-      _tiles: Map<string, { collections: PrimitiveCollection[] }>;
+    _renderer: {
+      evaluation: {
+        zoom: number;
+      };
+      style: {
+        tilePyramids: Record<string, {
+          _updateRetainedTiles: (...args: unknown[]) => unknown;
+        }>;
+      };
+      vector: {
+        beginTileBuild: (...args: unknown[]) => unknown;
+      };
+      symbol: {
+        update: (...args: unknown[]) => unknown;
+        _tiles: Map<string, {
+          collections: PrimitiveCollection[];
+        }>;
+      };
     };
   };
   const measurements = {
@@ -167,32 +185,34 @@ async function createValidation() {
       };
     }
     const work = tileset as unknown as {
-      _tilePublishQueue: object;
-      _vectorRenderer: object;
-      _styleEvaluation: object;
-      _patternRenderer: object;
-      _backgroundRenderer: object;
-      _tileResidency: object;
-      _sourceRenderSync: object;
+      _renderer: {
+        publishQueue: object;
+        vector: object;
+        evaluation: object;
+        pattern: object;
+        _backgroundRenderer: object;
+        residency: object;
+        sourceSync: object;
+      };
     };
-    measureMethod(work._tilePublishQueue, 'drain', measurements.buildMs);
-    measureMethod(work._vectorRenderer, 'updatePaint', measurements.paintMs);
-    measureMethod(work._sourceRenderSync, 'updateSource', measurements.sourceMs);
-    measureMethod(work._styleEvaluation, 'evaluate', measurements.styleMs);
-    measureMethod(work._patternRenderer, 'update', measurements.patternMs);
-    measureMethod(work._backgroundRenderer, 'update', measurements.backgroundMs);
+    measureMethod(work._renderer.publishQueue, 'drain', measurements.buildMs);
+    measureMethod(work._renderer.vector, 'updatePaint', measurements.paintMs);
+    measureMethod(work._renderer.sourceSync, 'updateSource', measurements.sourceMs);
+    measureMethod(work._renderer.evaluation, 'evaluate', measurements.styleMs);
+    measureMethod(work._renderer.pattern, 'update', measurements.patternMs);
+    measureMethod(work._renderer._backgroundRenderer, 'update', measurements.backgroundMs);
     for (const method of ['syncRetiredCapacity', 'syncHeldTileVisibility', 'syncMemoryBudget', 'releaseReplacedFeatureIndices'])
-      measureMethod(work._tileResidency, method, measurements.residencyMs);
+      measureMethod(work._renderer.residency, method, measurements.residencyMs);
     for (const method of ['_publishVisibleLayers', '_buildRasterLayers', '_buildPatternLayers'])
-      measureMethod(tileset, method, measurements.rebuildMs);
-    const begin = internals._vectorRenderer.beginTileBuild;
-    internals._vectorRenderer.beginTileBuild = function (...args) {
+      measureMethod(tileset._renderer, method, measurements.rebuildMs);
+    const begin = internals._renderer.vector.beginTileBuild;
+    internals._renderer.vector.beginTileBuild = function (...args) {
       measurements.builds++;
       return begin.apply(this, args);
     };
     const measuredPyramids = new WeakSet<object>();
     function measurePyramids() {
-      for (const pyramid of Object.values(internals._style.tilePyramids)) {
+      for (const pyramid of Object.values(internals._renderer.style.tilePyramids)) {
         if (measuredPyramids.has(pyramid))
           continue;
         measuredPyramids.add(pyramid);
@@ -203,8 +223,8 @@ async function createValidation() {
         };
       }
     }
-    const placement = internals._symbolRenderer.update;
-    internals._symbolRenderer.update = function (...args) {
+    const placement = internals._renderer.symbol.update;
+    internals._renderer.symbol.update = function (...args) {
       const start = performance.now();
       const result = placement.apply(this, args);
       measurements.placementMs.push(performance.now() - start);
@@ -218,12 +238,14 @@ async function createValidation() {
       measurements.updateMs.push(performance.now() - start);
     };
     const sceneCollections = (tileset as unknown as {
-      _sceneCollections: {
-        pumpFirstUpdates: (...args: unknown[]) => unknown;
-        updateChildren: (...args: unknown[]) => unknown;
-        flushRemovals: (...args: unknown[]) => unknown;
+      _renderer: {
+        collections: {
+          pumpFirstUpdates: (...args: unknown[]) => unknown;
+          updateChildren: (...args: unknown[]) => unknown;
+          flushRemovals: (...args: unknown[]) => unknown;
+        };
       };
-    })._sceneCollections;
+    })._renderer.collections;
     measureMethod(sceneCollections, 'flushRemovals', measurements.releaseMs);
     for (const [method, timings] of [
       ['pumpFirstUpdates', measurements.uploadMs],
@@ -326,7 +348,7 @@ async function createValidation() {
         return batch && ['fill', 'extrusion', 'pattern', 'raster'].includes(batch.kind);
       }).length;
       measurements.frames.push({
-        zoom: internals._styleEvaluation.zoom,
+        zoom: internals._renderer.evaluation.zoom,
         tiles: stats.bucket.tiles,
         commands: stats.submittedCommands,
         surfaces,
@@ -377,7 +399,7 @@ async function createValidation() {
       const paint = linePaintForOwner(command.owner);
       return { kind: batch?.kind ?? 'native', layerId: batch?.layerId, tileId: batch?.tileId, width: paint?.width, alpha: paint?.color.alpha };
     }),
-    cityDiagnostics: () => cityDiagnostics(viewer, tileset, internals._styleEvaluation.zoom),
+    cityDiagnostics: () => cityDiagnostics(viewer, tileset, internals._renderer.evaluation.zoom),
     cityReadiness: () => cityReadiness(tileset as unknown as TestTileset, viewer),
     measurements,
     coverage,
@@ -413,7 +435,7 @@ async function createValidation() {
         symbolVisibility.clear();
       }
       else {
-        for (const entry of internals._symbolRenderer._tiles.values()) {
+        for (const entry of internals._renderer.symbol._tiles.values()) {
           for (const collection of entry.collections) {
             for (let index = 0; index < collection.length; index++) {
               const primitive = collection.get(index) as { show: boolean };
@@ -427,8 +449,15 @@ async function createValidation() {
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     },
     async probeLinePaint() {
-      const bucket = tileset as unknown as { _vectorRenderer: { tileIds: string[]; getTileCollections: (id: string) => object[] } };
-      const resources = bucket._vectorRenderer.tileIds.flatMap(tileId => bucket._vectorRenderer.getTileCollections(tileId)
+      const bucket = tileset as unknown as {
+        _renderer: {
+          vector: {
+            tileIds: string[];
+            getTileCollections: (id: string) => object[];
+          };
+        };
+      };
+      const resources = bucket._renderer.vector.tileIds.flatMap(tileId => bucket._renderer.vector.getTileCollections(tileId)
         .filter((collection): collection is PrimitiveCollection => collection instanceof PrimitiveCollection)
         .flatMap(collection => Array.from({ length: collection.length }, (_, index) => {
           const primitive = collection.get(index) as { _va?: object[] };
@@ -438,7 +467,7 @@ async function createValidation() {
             : [];
         }).flat()));
       const height = viewer.camera.positionCartographic.height;
-      const beforeZoom = internals._styleEvaluation.zoom;
+      const beforeZoom = internals._renderer.evaluation.zoom;
       const beforeBuilds = measurements.builds;
       viewer.camera.zoomIn(height * 0.001);
       for (let frame = 0; frame < 4; frame++) {
@@ -449,13 +478,13 @@ async function createValidation() {
         arraysStable: resources.every(({ primitive, arrays }) => arrays.length === primitive._va?.length && arrays.every((array, index) => array === primitive._va[index])),
         changedWidths: resources.filter(resource => resource.paint.width !== resource.width).length,
         builds: measurements.builds - beforeBuilds,
-        zoom: [beforeZoom, internals._styleEvaluation.zoom],
+        zoom: [beforeZoom, internals._renderer.evaluation.zoom],
       };
       viewer.camera.zoomOut(height - viewer.camera.positionCartographic.height);
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       return result;
     },
-    get zoom() { return internals._styleEvaluation.zoom; },
+    get zoom() { return internals._renderer.evaluation.zoom; },
     syncReference() {
       if (!reference)
         return;
@@ -468,7 +497,7 @@ async function createValidation() {
         reference.setVerticalFieldOfView(fov * 180 / Math.PI);
       reference?.jumpTo({
         center: [position.longitude * 180 / Math.PI, position.latitude * 180 / Math.PI],
-        zoom: zoom ?? internals._styleEvaluation.zoom,
+        zoom: zoom ?? internals._renderer.evaluation.zoom,
         bearing: viewer.camera.heading * 180 / Math.PI,
         pitch: Math.max(0, 90 + viewer.camera.pitch * 180 / Math.PI),
       });

@@ -109,7 +109,7 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
           measurements.push({ mode, ratio, view, depthTest, diagnostics: { ...diagnostics, depthTest: actualDepthTest }, ...actual });
         }
         await page.evaluate(() => {
-          window.renderValidation.tileset._style.setLayoutProperty('land', 'visibility', 'none');
+          window.renderValidation.tileset._renderer.style.setLayoutProperty('land', 'visibility', 'none');
           window.renderValidation.viewer.scene.requestRender();
         });
         await page.waitForTimeout(300);
@@ -118,7 +118,7 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
         for (const color of [backgroundOnly.left, backgroundOnly.right])
           assert.ok(color.every((value, index) => Math.abs(value - [128, 0, 128][index]) <= 2), `${mode}: viewport background ${color}`);
         await page.evaluate(() => {
-          window.renderValidation.tileset._style.setPaintProperty('blue', 'background-pattern', 'alpha');
+          window.renderValidation.tileset._renderer.style.setPaintProperty('blue', 'background-pattern', 'alpha');
           window.renderValidation.viewer.scene.requestRender();
         });
         await page.waitForTimeout(500);
@@ -126,7 +126,7 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
         assert.ok(transparentSprite.center.every((value, index) => Math.abs(value - [191, 0, 64][index]) <= 2), `${mode}: transparent sprite ${transparentSprite.center}`);
         await page.evaluate(() => {
           const { tileset, viewer } = window.renderValidation;
-          const image = tileset._style.getImage('alpha');
+          const image = tileset._renderer.style.getImage('alpha');
           for (let offset = 0; offset < image.data.data.length; offset += 4) {
             image.data.data[offset] = 255;
             image.data.data[offset + 1] = 255;
@@ -140,8 +140,8 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
         assert.ok(updatedSprite.center.every((value, index) => Math.abs(value - [255, 64, 0][index]) <= 2), `${mode}: updated sprite ${updatedSprite.center}`);
         await page.evaluate(() => {
           const { tileset, viewer } = window.renderValidation;
-          tileset._style.setPaintProperty('blue', 'background-pattern', 'stripe');
-          tileset._style.setPaintProperty('blue', 'background-opacity', 1);
+          tileset._renderer.style.setPaintProperty('blue', 'background-pattern', 'stripe');
+          tileset._renderer.style.setPaintProperty('blue', 'background-opacity', 1);
           viewer.scene.requestRender();
         });
         await page.waitForTimeout(700);
@@ -179,8 +179,8 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
         }
         if (mode === '3d') {
           await page.evaluate(() => {
-            window.renderValidation.tileset._style.setPaintProperty('blue', 'background-pattern', undefined);
-            window.renderValidation.tileset._style.setPaintProperty('blue', 'background-opacity', 0.5);
+            window.renderValidation.tileset._renderer.style.setPaintProperty('blue', 'background-pattern', undefined);
+            window.renderValidation.tileset._renderer.style.setPaintProperty('blue', 'background-opacity', 0.5);
             window.renderValidation.viewer.scene.requestRender();
           });
           await page.evaluate(() => {
@@ -232,14 +232,14 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
             renderErrors: validation.renderErrors,
             time: performance.now(),
             timeline: window.backgroundLoadTimeline,
-            sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({
+            sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({
               id,
               ideal: pyramid._covering?.idealTileIDs.map(tile => tile.toString()),
               renderable: pyramid.getRenderableIds().map(key => ({ key, state: pyramid.getTileByID(key).state })),
             })),
-            jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
-            patternRefreshes: [...tileset._tilePublishQueue._patternRefreshes.keys()],
-            firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, index: update.index }))),
+            jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+            patternRefreshes: [...tileset._renderer.publishQueue._patternRefreshes.keys()],
+            firstUpdates: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, index: update.index }))),
           };
         });
         const readinessOutput = testInfo.outputPath('readiness.json');

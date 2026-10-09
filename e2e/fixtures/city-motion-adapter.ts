@@ -141,7 +141,7 @@ export function installNativeCityMotion(viewer: TestViewer) {
     original.apply(this, args);
     const cpu = performance.now() - at;
     capture.tick(at, cpu, rendered);
-    const submittedCommands = tileset?._lastSubmittedCommands ?? 0;
+    const submittedCommands = tileset?._renderer._lastSubmittedCommands ?? 0;
     const commands = rendered ? submittedCommands : undefined;
     if (!loaded && tileset?.tilesLoaded && submittedCommands > 0) {
       loaded = true;
@@ -155,8 +155,8 @@ export function installNativeCityMotion(viewer: TestViewer) {
           position: [0.5 + camera.positionWC.y / circumference, 0.5 - camera.positionWC.z / circumference, camera.positionWC.x / circumference],
           direction: [camera.directionWC.y, -camera.directionWC.z, camera.directionWC.x],
           fov: camera.frustum.fovy! * 180 / Math.PI,
-          zoom: tileset?._styleEvaluation.zoom ?? Number.NaN,
-          styleZoom: tileset?._styleEvaluation.zoom,
+          zoom: tileset?._renderer.evaluation.zoom ?? Number.NaN,
+          styleZoom: tileset?._renderer.evaluation.zoom,
           groundProjections: (appliedPose.groundProjections ?? []).map(({ coordinate }) => ({ coordinate, pixel: projectGround(coordinate) })),
           gpu,
         });
@@ -177,10 +177,10 @@ export function installNativeCityMotion(viewer: TestViewer) {
             const batch = drawBatchForOwner(command) ?? drawBatchForOwner(command.owner);
             return batch?.kind === 'symbol' ? [`${batch.tileId}/${batch.layerId}`] : [];
           }));
-          sawStation = cityDiagnostics(viewer, tileset, tileset._symbolRenderer.cameraZoom).some((row) => {
+          sawStation = cityDiagnostics(viewer, tileset, tileset._renderer.symbol.cameraZoom).some((row) => {
             const box = row.screenBox;
             return row.opacity >= 0.1 && row.uploaded && row.shown && row.current
-              && tileset._symbolRenderer.isTilePlacementActive(row.tileId)
+              && tileset._renderer.symbol.isTilePlacementActive(row.tileId)
               && submitted.has(`${row.tileId}/${row.layerId}`) && box
               && box.x2 > 0 && box.y2 > 0 && box.x1 < viewer.canvas.width && box.y1 < viewer.canvas.height;
           });
@@ -273,7 +273,7 @@ export function installNativeCityMotion(viewer: TestViewer) {
     errors: [] as string[],
     attach(value: TestTileset) { tileset = value; },
     ready() {
-      const ready = Boolean(tileset?.tilesLoaded && tileset._lastSubmittedCommands > 0);
+      const ready = Boolean(tileset?.tilesLoaded && tileset._renderer._lastSubmittedCommands > 0);
       return ready;
     },
     generate,
@@ -296,7 +296,7 @@ export function installNativeCityMotion(viewer: TestViewer) {
     state: capture.state,
     mapFeatures: (): CityFeature[] => { throw new Error('MapLibre feature queries belong to the reference'); },
     sourceCoverage() {
-      return Object.entries(tileset!._style.tilePyramids).map(([sourceId, pyramid]) => ({
+      return Object.entries(tileset!._renderer.style.tilePyramids).map(([sourceId, pyramid]) => ({
         sourceId,
         tiles: pyramid._covering!.idealTileIDs.map(id => ({ z: id.canonical.z, x: id.canonical.x, y: id.canonical.y })),
       }));

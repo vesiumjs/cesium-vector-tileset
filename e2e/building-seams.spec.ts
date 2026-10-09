@@ -104,7 +104,7 @@ test('15 metre building walls update color, light and opacity without rebuilding
   const sourceRequests = requestCount;
   const owners = await page.evaluateHandle(({ x, y, width, height }) => {
     const { tileset, drawBatch, viewer } = window.renderValidation;
-    const collections = [...tileset._vectorRenderer.collections.values()].filter((collection): collection is PrimitiveCollection => 'length' in collection && collection.length > 0
+    const collections = [...tileset._renderer.vector.collections.values()].filter((collection): collection is PrimitiveCollection => 'length' in collection && collection.length > 0
       && drawBatch(collection.get(0))?.kind === 'extrusion');
     const position = { x: x + width / 2, y: y + height / 2 };
     return {
@@ -120,7 +120,7 @@ test('15 metre building walls update color, light and opacity without rebuilding
     };
   }, fixture.roi);
   const geometryStable = () => owners.evaluate(({ owners }) => {
-    const current = new Set(window.renderValidation.tileset._vectorRenderer.collections.values());
+    const current = new Set(window.renderValidation.tileset._renderer.vector.collections.values());
     return owners.every(({ collection, primitives }) => current.has(collection) && !collection.isDestroyed()
       && primitives.every(({ primitive, arrays }, index) => collection.get(index) === primitive && !primitive.isDestroyed()
         && primitive._va.length === arrays.length && arrays.every((array, index) => primitive._va[index] === array && !array.isDestroyed())));
@@ -130,13 +130,13 @@ test('15 metre building walls update color, light and opacity without rebuilding
     assert.equal(await owners.evaluate(({ picked }) => picked?.layerId), 'white-buildings', 'wall ROI does not pick the captured facade');
     await page.evaluate(() => {
       const { tileset, viewer } = window.renderValidation;
-      tileset._style.setFeatureState({ source: 'basemap', sourceLayer: 'points', id: 1 }, { selected: true });
+      tileset._renderer.style.setFeatureState({ source: 'basemap', sourceLayer: 'points', id: 1 }, { selected: true });
       viewer.scene.requestRender();
     });
     await expect.poll(() => page.evaluate(() => {
       const { tileset, atlas, drawBatch } = window.renderValidation;
       const { BufferPoint, BufferPointMaterial } = atlas.cesium;
-      const collections = [...tileset._vectorRenderer.collections.values()];
+      const collections = [...tileset._renderer.vector.collections.values()];
       const points = collections.find(collection => drawBatch(collection)?.layerId === 'points') as BufferPointCollection | undefined;
       if (!points)
         return undefined;
@@ -149,13 +149,13 @@ test('15 metre building walls update color, light and opacity without rebuilding
 
     await page.evaluate(() => {
       const { tileset, viewer } = window.renderValidation;
-      tileset._style.setPaintProperty('points', 'circle-opacity', 0.5);
+      tileset._renderer.style.setPaintProperty('points', 'circle-opacity', 0.5);
       viewer.scene.requestRender();
     });
     await expect.poll(() => page.evaluate(() => {
       const { tileset, atlas, drawBatch } = window.renderValidation;
       const { BufferPoint, BufferPointMaterial } = atlas.cesium;
-      const points = [...tileset._vectorRenderer.collections.values()].find(collection => drawBatch(collection)?.layerId === 'points') as BufferPointCollection | undefined;
+      const points = [...tileset._renderer.vector.collections.values()].find(collection => drawBatch(collection)?.layerId === 'points') as BufferPointCollection | undefined;
       return points?.get(0, new BufferPoint()).getMaterial(new BufferPointMaterial()).color.alpha;
     })).toBeCloseTo(0.5, 2);
     assert.ok(await geometryStable(), 'unrelated constant paint replaced the building geometry');
@@ -164,7 +164,7 @@ test('15 metre building walls update color, light and opacity without rebuilding
 
     await page.evaluate(() => {
       const { tileset, viewer } = window.renderValidation;
-      tileset._style.setPaintProperty('white-buildings', 'fill-extrusion-color', '#4466aa');
+      tileset._renderer.style.setPaintProperty('white-buildings', 'fill-extrusion-color', '#4466aa');
       viewer.scene.requestRender();
     });
     await expect.poll(async () => (await wallPixels(page)).neutral).toBeLessThan(1000);
@@ -174,7 +174,7 @@ test('15 metre building walls update color, light and opacity without rebuilding
 
     await page.evaluate(() => {
       const { tileset, viewer } = window.renderValidation;
-      tileset._style.setLight({ intensity: 0 });
+      tileset._renderer.style.setLight({ intensity: 0 });
       viewer.scene.requestRender();
     });
     await expect.poll(async () => (await wallPixels(page)).mean[2]).toBeGreaterThan(colored.mean[2] + 20);
@@ -182,7 +182,7 @@ test('15 metre building walls update color, light and opacity without rebuilding
 
     await page.evaluate(() => {
       const { tileset, viewer } = window.renderValidation;
-      tileset._style.setPaintProperty('white-buildings', 'fill-extrusion-opacity', 0.5);
+      tileset._renderer.style.setPaintProperty('white-buildings', 'fill-extrusion-opacity', 0.5);
       viewer.scene.requestRender();
     });
     await expect.poll(() => owners.evaluate(({ owners }) => owners.every(({ primitives }) => primitives.every(({ primitive }) => {
@@ -198,7 +198,7 @@ test('15 metre building walls update color, light and opacity without rebuilding
     for (const opacity of [0, 1]) {
       await page.evaluate((opacity) => {
         const { tileset, viewer } = window.renderValidation;
-        tileset._style.setPaintProperty('white-buildings', 'fill-extrusion-opacity', opacity);
+        tileset._renderer.style.setPaintProperty('white-buildings', 'fill-extrusion-opacity', opacity);
         viewer.scene.requestRender();
       }, opacity);
       await expect.poll(() => owners.evaluate(({ owners }, visible) => owners.every(({ primitives }) => primitives.every(({ primitive }) => primitive.show === visible)), opacity > 0)).toBe(true);

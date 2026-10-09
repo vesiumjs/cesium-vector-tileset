@@ -75,7 +75,7 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
     const { tileset, viewer, drawBatch } = window.renderValidation;
     viewer.scene.debugShowFramesPerSecond = true;
     viewer.scene.postProcessStages.fxaa.enabled = false;
-    const bucket = tileset._vectorRenderer;
+    const bucket = tileset._renderer.vector;
     window.bufferOwners = bucket.tileIds.flatMap(tileId => bucket.getTileCollections(tileId)
       .filter(collection => ['parcels', 'points'].includes(drawBatch(collection)?.layerId ?? ''))
       .map((source) => {

@@ -167,7 +167,7 @@ async function createPerspective() {
       const actualNative = viewer.camera.positionWC;
       const nativePosition = { x: 0.5 + actualNative.y / circumference, y: 0.5 - actualNative.z / circumference, z: actualNative.x / circumference };
       const loaded = reference.querySourceFeatures('points').map(feature => String(feature.properties.name));
-      const nativeGeometries = [...tileset._symbolRenderer._tiles.values()].flatMap(entry => entry.batches.flatMap(batch => batch.icon ? batch.icon.instances.map(instance => ({ opacity: batch.icon!.opacities[instance.vertexStart], anchor: Array.from(batch.icon!.positions.subarray(instance.vertexStart * 3, instance.vertexStart * 3 + 3)) })) : []));
+      const nativeGeometries = [...tileset._renderer.symbol._tiles.values()].flatMap(entry => entry.batches.flatMap(batch => batch.icon ? batch.icon.instances.map(instance => ({ opacity: batch.icon!.opacities[instance.vertexStart], anchor: Array.from(batch.icon!.positions.subarray(instance.vertexStart * 3, instance.vertexStart * 3 + 3)) })) : []));
       const pointRows = points.map((point) => {
         const lngLat = coordinate(point.x, point.y);
         const center = SceneTransforms.worldToWindowCoordinates(viewer.scene, Cartesian3.fromDegrees(...lngLat))!;

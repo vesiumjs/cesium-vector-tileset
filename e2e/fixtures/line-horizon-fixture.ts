@@ -120,8 +120,8 @@ async function createHorizon() {
   // Native normally lifts roads above the globe; at this low camera height
   // that separate surface changes both the actual pixel phase and width.
   viewer.scene.preRender.addEventListener(() => {
-    for (const id of tileset._vectorRenderer.tileIds) {
-      for (const collection of tileset._vectorRenderer.getTileCollections(id)) {
+    for (const id of tileset._renderer.vector.tileIds) {
+      for (const collection of tileset._renderer.vector.getTileCollections(id)) {
         for (let index = 0; index < ('length' in collection ? Number(collection.length) : 0); index++) {
           const entry = (collection as { get: (index: number) => NativePrimitive & { primitive?: NativePrimitive } }).get(index);
           const paint = linePaintForOwner(entry.primitive ?? entry);
@@ -216,7 +216,7 @@ async function createHorizon() {
         const value = linePaintForOwner(command.owner);
         return value ? [{ width: value.widthUniform(), metersPerPixel: value.metersPerPixelUniform(), surfaceOffset: value.offsetUniform() }] : [];
       });
-      const root = tileset._sceneCollections._root;
+      const root = tileset._renderer.collections._root;
       const ray = viewer.camera.getPickRay(new Cartesian2(viewer.canvas.clientWidth / 2, viewer.canvas.clientHeight / 2))!;
       return {
         mode,

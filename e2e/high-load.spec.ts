@@ -117,7 +117,7 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
       window.highLoadColdStarted = performance.now();
       window.stopHighLoadColdFrames = validation.viewer.scene.postRender.addEventListener(() => {
         const tileset = validation.tileset;
-        const covering = tileset._sceneCovering;
+        const covering = tileset._renderer.covering;
         const camera = validation.viewer.camera;
         window.highLoadColdFrames.push({
           time: performance.now(),
@@ -128,8 +128,8 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
           cameraObserved: covering._cameraPose === covering._observedCamera,
           camera: { position: { ...camera.positionWC }, direction: { ...camera.directionWC }, right: { ...camera.rightWC }, fovY: camera.frustum.fovy, aspectRatio: camera.frustum.aspectRatio },
           globe: validation.viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`),
-          sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds(), supplemented: !!covering._globeCoverings.get(pyramid).supplementalPose })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols, generationId: job.generationId })),
+          sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds(), supplemented: !!covering._globeCoverings.get(pyramid).supplementalPose })),
+          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols, generationId: job.generationId })),
         });
       });
       validation.setObliqueView();
@@ -151,7 +151,7 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
         const validation = window.renderValidation;
         const tileset = validation.tileset;
         const warmedMemory: ColdObliqueReport['warmedMemory'] = [];
-        tileset._vectorRenderer.visitMemoryEntries((key, bytes, pinned) => {
+        tileset._renderer.vector.visitMemoryEntries((key, bytes, pinned) => {
           warmedMemory.push(pinned === undefined ? { key, bytes } : { key, bytes, pinned });
         });
         return {
@@ -161,12 +161,12 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
           stats: tileset.stats(),
           globeLoaded: validation.viewer.scene.globe.tilesLoaded,
           tilesLoaded: tileset.tilesLoaded,
-          cameraObserved: tileset._sceneCovering._cameraPose === tileset._sceneCovering._observedCamera,
-          warmedSources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
+          cameraObserved: tileset._renderer.covering._cameraPose === tileset._renderer.covering._observedCamera,
+          warmedSources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
           warmedMemory,
-          held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols, generationId: job.generationId })),
-          firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, index: update.index }))),
+          held: [...tileset._renderer.residency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
+          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols, generationId: job.generationId })),
+          firstUpdates: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, index: update.index }))),
           measurements: validation.measurements,
           renderErrors: validation.renderErrors,
         };
@@ -217,12 +217,12 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
     const diagnose = () => {
       const tileset = validation.tileset;
       const camera = validation.viewer.camera;
-      const sources = Object.entries(tileset._style.tilePyramids);
+      const sources = Object.entries(tileset._renderer.style.tilePyramids);
       const tileInfo = (tile: OverscaledTileID) => ({ key: tile.key, coordinate: tile.toString(), canonical: { ...tile.canonical }, wrap: tile.wrap });
       const owns = (tile: OverscaledTileID, ground: ReturnType<Window['renderValidation']['readMismatchRanges']>[number]['samples'][number]['ground']) => ground && Math.floor((ground.mercatorX - tile.wrap) * 2 ** tile.canonical.z) === tile.canonical.x
         && Math.floor(ground.mercatorY * 2 ** tile.canonical.z) === tile.canonical.y;
       const memory: ColdObliqueReport['warmedMemory'] = [];
-      tileset._vectorRenderer.visitMemoryEntries((key, bytes, pinned) => {
+      tileset._renderer.vector.visitMemoryEntries((key, bytes, pinned) => {
         memory.push(pinned === undefined ? { key, bytes } : { key, bytes, pinned });
       });
       return {
@@ -240,14 +240,14 @@ test('dense local MVT stays drawn through delayed loads, rapid zoom, pan and an 
         })),
         previousGlobe,
         currentGlobe: rectangles(validation.viewer.scene.globe),
-        sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering?.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
-        live: [...tileset._vectorRenderer.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as { show: boolean; length?: number }).length })),
-        retired: tileset._vectorRenderer.retiredCollections.map(collection => ({ show: collection.show, length: (collection as { show: boolean; length?: number }).length })),
-        held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
+        sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering?.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
+        live: [...tileset._renderer.vector.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as { show: boolean; length?: number }).length })),
+        retired: tileset._renderer.vector.retiredCollections.map(collection => ({ show: collection.show, length: (collection as { show: boolean; length?: number }).length })),
+        held: [...tileset._renderer.residency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
         memory,
-        hiddenSurfaceLayers: [...tileset._tileResidency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
-        jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
-        firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, length: collection.length, index: update.index, owners: [...tileset._vectorRenderer.collections].filter(([, candidate]) => candidate === collection).map(([id]) => id) }))),
+        hiddenSurfaceLayers: [...tileset._renderer.residency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
+        jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+        firstUpdates: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, length: collection.length, index: update.index, owners: [...tileset._renderer.vector.collections].filter(([, candidate]) => candidate === collection).map(([id]) => id) }))),
       };
     };
     const remove = validation.viewer.scene.postRender.addEventListener(() => {

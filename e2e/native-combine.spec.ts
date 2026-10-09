@@ -132,7 +132,7 @@ for (const mode of ['3d', '2d', 'cv']) {
         const { viewer, tileset } = window.renderValidation;
         viewer.scene.debugShowFramesPerSecond = true;
         const control: NativeCombineControl = window.nativeCombineControl = { held: [], scheduled: 0, holding: true, frames: [], phase: 'first', dashDefaultFrames: 0, exhaustPaint: false, budgetSkipped: 0 };
-        const renderer = tileset._vectorRenderer;
+        const renderer = tileset._renderer.vector;
         const paintUpdate = renderer.updatePaint;
         if (exhaustPaint) {
           renderer.updatePaint = function (frame) {
@@ -142,9 +142,9 @@ for (const mode of ['3d', '2d', 'cv']) {
           };
         }
         control.primitives = () => [...new Set([
-          ...tileset._vectorRenderer.tileIds.flatMap(id => tileset._vectorRenderer.getTileCollections(id)
+          ...tileset._renderer.vector.tileIds.flatMap(id => tileset._renderer.vector.getTileCollections(id)
             .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index)))),
-          ...tileset._patternRenderer.tileIds.flatMap(id => tileset._patternRenderer.getTilePrimitives(id)),
+          ...tileset._renderer.pattern.tileIds.flatMap(id => tileset._renderer.pattern.getTilePrimitives(id)),
         ].map(entry => entry.primitive ?? entry))].filter(primitive => typeof primitive._layout === 'string');
         const stop = viewer.scene.postRender.addEventListener(() => {
           const { canvas, scene } = viewer;
@@ -187,7 +187,7 @@ for (const mode of ['3d', '2d', 'cv']) {
           });
           control.latest = { red, green, newGround, coverage, pickPosition };
           control.frames.push({ phase: control.phase, red, green, newGround, coverage });
-          const material = tileset._vectorRenderer.dashMaterial?._material;
+          const material = tileset._renderer.vector.dashMaterial?._material;
           if (green > 0 && material && (!material._textures.u_dashAtlas || material._textures.u_dashAtlas === scene.context.defaultTexture))
             control.dashDefaultFrames++;
           if (red > 0 || green > 0)
@@ -291,7 +291,7 @@ for (const mode of ['3d', '2d', 'cv']) {
         const picked = viewer.scene.pick(control.latest.pickPosition);
         return {
           oldDestroyed: control.predecessors.every(primitive => primitive.isDestroyed()),
-          hidden: tileset._tileResidency.hiddenStyleTiles.size,
+          hidden: tileset._renderer.residency.hiddenStyleTiles.size,
           newGround: control.latest.newGround,
           green: control.latest.green,
           pickLayer: (picked?.id ?? picked)?.layerId,

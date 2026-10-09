@@ -40,10 +40,6 @@ const buildingIndex = new GeoJSONVT({
   })),
 }, { extent, maxZoom: 18 });
 
-function buildingTile(z, x, y) {
-  return fromGeojsonVt({ building: buildingIndex.getTile(z, x, y) ?? { features: [] } }, { version: 2, extent });
-}
-
 async function flyToHeight(page: Page, height: number): Promise<void> {
   await page.evaluate(({ destination, heading, pitch }) => {
     const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
@@ -85,17 +81,17 @@ async function attachBuildingState(page: Page, testInfo: TestInfo, height: strin
     const tileset = Array.from({ length: scene.primitives.length }, (_, index) => scene.primitives.get(index))
       .find(primitive => typeof primitive.stats === 'function') as TestTileset;
     return {
-      zoom: tileset._style.z,
-      styleZoom: tileset._styleEvaluation.zoom,
-      hidden: tileset._style.getLayer('white-buildings').isHidden(tileset._style.z),
+      zoom: tileset._renderer.style.z,
+      styleZoom: tileset._renderer.evaluation.zoom,
+      hidden: tileset._renderer.style.getLayer('white-buildings').isHidden(tileset._renderer.style.z),
       stats: tileset.stats(),
-      jobs: [...tileset._tilePublishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols, tile: job.data.tileID.canonical, buildPhase: job.vectorBuild?.phase })),
-      firstUploads: tileset._sceneCollections._firstUpdates.map(queue => [...queue].map(([collection, upload]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: upload.index }))),
+      jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols, tile: job.data.tileID.canonical, buildPhase: job.vectorBuild?.phase })),
+      firstUploads: tileset._renderer.collections._firstUpdates.map(queue => [...queue].map(([collection, upload]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: upload.index }))),
       camera: { longitude: scene.camera.positionCartographic.longitude, latitude: scene.camera.positionCartographic.latitude, height: scene.camera.positionCartographic.height, pitch: scene.camera.pitch },
       loaded: tileset.tilesLoaded,
       globeLoaded: scene.globe.tilesLoaded,
-      renderable: Object.entries(tileset._style.tilePyramids).map(([source, pyramid]) => ({ source, tiles: pyramid.getRenderableIds().map(id => pyramid.getTileByID(id).tileID.canonical) })),
-      records: [...tileset._vectorRenderer._records].map(([id, record]) => ({
+      renderable: Object.entries(tileset._renderer.style.tilePyramids).map(([source, pyramid]) => ({ source, tiles: pyramid.getRenderableIds().map(id => pyramid.getTileByID(id).tileID.canonical) })),
+      records: [...tileset._renderer.vector._records].map(([id, record]) => ({
         id,
         buckets: Object.entries(record.buckets).map(([id, bucket]) => ({ id, vertices: (bucket as typeof bucket & { layoutVertexArray?: { length: number } }).layoutVertexArray?.length, triangles: (bucket as typeof bucket & { indexArray?: { length: number } }).indexArray?.length })),
         collections: [...record.collections].map(([kind, collection]) => ({
@@ -105,7 +101,7 @@ async function attachBuildingState(page: Page, testInfo: TestInfo, height: strin
           children: Array.from({ length: (collection as PrimitiveCollection).length }, (_, index) => ({ show: (collection as PrimitiveCollection).get(index).show, ready: (collection as PrimitiveCollection).get(index).ready })),
         })),
       })),
-      hiddenSurfaceLayers: [...tileset._tileResidency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
+      hiddenSurfaceLayers: [...tileset._renderer.residency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
     };
   });
   await testInfo.attach(`real-building-state-${height}m`, { body: JSON.stringify(state, null, 2), contentType: 'application/json' });
@@ -126,7 +122,8 @@ test('Manhattan white buildings remain visible at 60 and 15 metre camera heights
   await page.route('**/building-fixture/**/*.pbf', (route) => {
     const [z, x, y] = new URL(route.request().url()).pathname.match(/(\d+)\/(\d+)\/(\d+)\.pbf$/).slice(1).map(Number);
     requested.add(`${z}/${x}/${y}`);
-    return route.fulfill({ body: Buffer.from(buildingTile(z, x, y)), contentType: 'application/x-protobuf' });
+    const tile = buildingIndex.getTile(z, x, y) ?? { features: [] };
+    return route.fulfill({ body: Buffer.from(fromGeojsonVt({ building: tile }, { version: 2, extent })), contentType: 'application/x-protobuf' });
   });
   await page.route('**/src/styles/buildings.json', route => route.fulfill({ json: style }));
   await page.route('**/building-fixture/no-buildings.json', route => route.fulfill({ json: {

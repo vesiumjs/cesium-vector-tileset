@@ -53,7 +53,7 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
   assert.ok(moduleRequests.some(url => url.includes('/dist/worker.mjs')));
 
   const tiles = await page.evaluate(() => {
-    const pyramid = window.renderValidation.tileset._style.tilePyramids.points;
+    const pyramid = window.renderValidation.tileset._renderer.style.tilePyramids.points;
     return pyramid.getRenderableIds().map(id => pyramid.getTileByID(id).tileID.canonical);
   });
   const coordinates = tiles.map(({ z, x, y }) => {
@@ -96,7 +96,7 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
       return;
     const object = picked.id ?? picked;
     const feature = validation.tileset.pick(object);
-    const index = validation.tileset._tileResidency.featureIndex(object.tileId, object.generationId);
+    const index = validation.tileset._renderer.residency.featureIndex(object.tileId, object.generationId);
     return { feature, hasRawData: 'rawTileData' in index, id: index.features.getFeature('layer1', object.featureIndex).id };
   }, point);
   assert.deepEqual(picked, { feature: { layerId: 'points', properties: {} }, hasRawData: false, id: '9007199254740993' });
@@ -104,7 +104,7 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
   const requestsBeforeState = tileRequests.length;
   await page.evaluate(() => {
     const validation = window.renderValidation;
-    validation.tileset._style.setFeatureState({ source: 'points', sourceLayer: 'layer1', id: '9007199254740993' }, { selected: true });
+    validation.tileset._renderer.style.setFeatureState({ source: 'points', sourceLayer: 'layer1', id: '9007199254740993' }, { selected: true });
     validation.viewer.scene.requestRender();
   });
   await expect.poll(async () => (await pixel()).slice(0, 3)).toEqual([0, 255, 0]);

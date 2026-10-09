@@ -47,7 +47,7 @@ test('pattern commands and pixels return after continuous pan, zoom visibility c
 
   const initial = await page.evaluate(() => {
     const { viewer, tileset } = window.renderValidation;
-    const renderer = tileset._patternRenderer;
+    const renderer = tileset._renderer.pattern;
     const clear = renderer.clearRetired.bind(renderer);
     const observation = window.patternMotion = { evicted: 0, pixel: [] as number[], stop: () => {} };
     renderer.clearRetired = () => {

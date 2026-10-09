@@ -83,7 +83,7 @@ test('date-line viewports share preparation time and draw a Native upload before
       asynchronous: false,
     });
     tileset.add(primitive);
-    const collections = tileset._sceneCollections;
+    const collections = tileset._renderer.collections;
     collections.queueFirstUpdate([primitive]);
     const pump = collections.pumpFirstUpdates;
     const calls: Array<{ frame: number; budget: Budget; commands: number; ready: boolean }> = [];
@@ -163,7 +163,7 @@ for (const mode of ['2d', 'cv']) {
     const layout = await page.evaluate(() => {
       const { tileset, viewer, drawBatch } = window.renderValidation;
       viewer.scene.debugShowFramesPerSecond = true;
-      const bucket = tileset._vectorRenderer;
+      const bucket = tileset._renderer.vector;
       const primitives = [...new Set(bucket.tileIds.flatMap(id => bucket.getTileCollections(id)
         .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index) as NativePrimitive))))];
       window.surfaceResources = primitives.filter(primitive => primitive._attributeLocations
@@ -291,7 +291,7 @@ test('surface morph uploads both exact position tracks and finishes in the 3D Na
     window.stopSurfaceMorph = viewer.scene.postRender.addEventListener(() => {
       if (viewer.scene.mode !== 0)
         return;
-      const bucket = tileset._vectorRenderer;
+      const bucket = tileset._renderer.vector;
       for (const primitive of bucket.tileIds.flatMap(id => bucket.getTileCollections(id)
         .flatMap(collection => Array.from({ length: (collection as PrimitiveCollection).length ?? 0 }, (_, index) => (collection as PrimitiveCollection).get(index) as NativePrimitive)))) {
         if (primitive._layout === 'surface-morph' && primitive.ready && primitive._va.length) {
@@ -338,7 +338,7 @@ test('surface morph uploads both exact position tracks and finishes in the 3D Na
     && window.renderValidation.tileset.tilesLoaded), { timeout: 60_000 }).toBe(true);
   const result = await page.evaluate((floatReference) => {
     const { viewer, tileset, renderErrors } = window.renderValidation;
-    const bucket = tileset._vectorRenderer;
+    const bucket = tileset._renderer.vector;
     const collections = bucket.tileIds.flatMap(id => bucket.getTileCollections(id));
     window.stopSurfaceMorph();
     return { floatReference, layouts: window.surfaceMorphLayouts, renderErrors, fps: viewer.scene.debugShowFramesPerSecond, buffers3D: collections.filter(collection => collection.constructor.name === 'BufferPolygonCollection').length };

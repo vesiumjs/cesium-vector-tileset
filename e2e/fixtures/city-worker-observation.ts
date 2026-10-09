@@ -152,7 +152,7 @@ export async function observeCityWorkers(context: BrowserContext, observeGeometr
         super(url, options);
         const workerUrl = new URL(String(url), location.href);
         const stage = workerUrl.pathname.endsWith('/geometry-worker.mjs')
-          || (workerUrl.pathname.endsWith('/geometry-worker-entry.ts') && workerUrl.searchParams.has('worker_file'))
+          || (workerUrl.pathname.endsWith('/geometry.worker.ts') && workerUrl.searchParams.has('worker_file'))
           ? 'prepare'
           : workerUrl.pathname.endsWith('/createGeometry.js')
             ? 'create'

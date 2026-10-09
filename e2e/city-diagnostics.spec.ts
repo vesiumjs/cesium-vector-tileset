@@ -58,7 +58,7 @@ test('real station symbol identities before and after camera motion @performance
           if (renderer !== 'cesium')
             return { ready };
           const tileset = window.renderValidation.tileset as unknown as TestTileset;
-          const symbols = tileset._symbolRenderer;
+          const symbols = tileset._renderer.symbol;
           const scope = (value: typeof symbols._targetPlacement) => ({
             pending: value.pending,
             dirty: value._dirty,
@@ -74,11 +74,11 @@ test('real station symbol identities before and after camera motion @performance
             at: performance.now(),
             frames: window.renderValidation.renderedFrames,
             stats: tileset.stats(),
-            styleLoaded: tileset._style.loaded(),
-            firstUpdates: tileset._sceneCollections.pendingFirstUpdateCount,
-            paint: tileset._vectorRenderer.needsPaintUpdate,
-            jobs: [...tileset._tilePublishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols })),
-            patternRefreshes: tileset._tilePublishQueue._patternRefreshes.size,
+            styleLoaded: tileset._renderer.style.loaded(),
+            firstUpdates: tileset._renderer.collections.pendingFirstUpdateCount,
+            paint: tileset._renderer.vector.needsPaintUpdate,
+            jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols })),
+            patternRefreshes: tileset._renderer.publishQueue._patternRefreshes.size,
             visibility: window.renderValidation.cityReadiness(),
             symbols: { drawable: symbols.hasDrawableSymbols, pending: symbols.hasPendingWork, runnable: symbols.hasRunnableWork, zoom: symbols.cameraZoom, lineZoom: symbols._lineView?.cameraZoom, fullReplace: symbols._fullReplaceNeeded, visibleInputs: symbols._visibleInputsDirty, images: symbols._pendingImageEntries.size, opacity: symbols._pendingOpacityHalves.size, dynamic: symbols._pendingDynamicHalves.size, target: scope(symbols._targetPlacement), visible: scope(symbols._visiblePlacement), handoff: scope(symbols._handoffPlacement) },
           };

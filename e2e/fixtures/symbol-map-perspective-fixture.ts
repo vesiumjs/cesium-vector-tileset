@@ -373,7 +373,7 @@ async function createMapPerspective() {
       };
       const viewportEast = normalized(eye[9], eye[5]);
       const viewportSouth = normalized(eye[8], eye[4]);
-      const nativeEntries = new Set([...tileset._symbolRenderer._tiles.values(), ...tileset._symbolRenderer._visibleEntries.values(), ...tileset._symbolRenderer._held.values()]);
+      const nativeEntries = new Set([...tileset._renderer.symbol._tiles.values(), ...tileset._renderer.symbol._visibleEntries.values(), ...tileset._renderer.symbol._held.values()]);
       const nativeAnchors = [...nativeEntries].filter(entry => drawnTiles.has(entry.input.tileId)).flatMap((entry) => {
         const tile = 'canonical' in entry.input.tileID ? entry.input.tileID.canonical : entry.input.tileID;
         return entry.batches.flatMap(batch => batch.icon
@@ -389,11 +389,11 @@ async function createMapPerspective() {
               const dynamic = Array.from(geometry.dynamics.subarray(base, base + 3));
               const w = viewProjection[3] * projected.z + viewProjection[7] * projected.x + viewProjection[11] * projected.y + viewProjection[15];
               const clip = multiply(viewProjection, [projected.z, projected.x, projected.y, 1]);
-              const distance = tileset._sceneCovering.cameraFrame?.cameraToCenterDistance;
+              const distance = tileset._renderer.covering.cameraFrame?.cameraToCenterDistance;
               if (!distance)
                 throw new Error('Actual Native camera focus distance is required');
               const ratio = geometry.sizePerspective ? Math.min(4, 0.5 + 0.5 * (geometry.mapPitch ? w / distance : geometry.viewportPerspective ? distance / w : 1)) : 1;
-              const mpp = circumference / (512 * 2 ** tileset._styleEvaluation.zoom);
+              const mpp = circumference / (512 * 2 ** tileset._renderer.evaluation.zoom);
               const clipCorners = Array.from({ length: instance.vertexCount }, (_, corner) => {
                 const vertex = instance.vertexStart + corner;
                 const size = Math.floor(geometry.sizes[vertex] / 4) / 128 * ratio;
@@ -445,7 +445,7 @@ async function createMapPerspective() {
         referenceDraws,
         draws,
         drawnTiles: [...drawnTiles],
-        camera: { nativeDistance: tileset._sceneCovering.cameraFrame?.cameraToCenterDistance, nativeZoom: tileset._styleEvaluation.zoom, referenceDistance: transform.cameraToCenterDistance / transform.worldSize * circumference, nativePosition, referencePosition, pitch: reference.getPitch(), nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, bearing: reference.getBearing(), roll: reference.getRoll(), nativeHeading: viewer.camera.heading, nativeRoll: viewer.camera.roll, elevation: reference.getCenterElevation(), zoom: reference.getZoom() },
+        camera: { nativeDistance: tileset._renderer.covering.cameraFrame?.cameraToCenterDistance, nativeZoom: tileset._renderer.evaluation.zoom, referenceDistance: transform.cameraToCenterDistance / transform.worldSize * circumference, nativePosition, referencePosition, pitch: reference.getPitch(), nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, bearing: reference.getBearing(), roll: reference.getRoll(), nativeHeading: viewer.camera.heading, nativeRoll: viewer.camera.roll, elevation: reference.getCenterElevation(), zoom: reference.getZoom() },
         gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(reference.getCanvas().getContext('webgl2')!) },
         viewport: { native: [viewer.canvas.width, viewer.canvas.height, viewer.canvas.clientWidth, viewer.canvas.clientHeight], reference: [reference.getCanvas().width, reference.getCanvas().height, reference.getCanvas().clientWidth, reference.getCanvas().clientHeight] },
         points: pointRows,

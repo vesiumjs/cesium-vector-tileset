@@ -139,17 +139,6 @@ export async function observeCityAdmissions(context: BrowserContext) {
       }
       return { viewBytes, viewCount, backingBytes, backingCount: buffers.size, backings };
     };
-    const input = (request: Record<string, unknown>) => footprint([
-      // Canonical preparation batches contain owned single-request payloads.
-      // Legacy fields remain observable for comparisons to frozen baselines.
-      request.requests,
-      request.geometries,
-      request.lineInputs,
-      request.parameters,
-      request.subTasks,
-      request.createGeometryResults,
-      request.packedInstances,
-    ]);
     const peaks = (): void => {
       observation.peaks.admittedNotPostedBytes = Math.max(observation.peaks.admittedNotPostedBytes, admitted.bytes);
       observation.peaks.postedNotReceivedBytes = Math.max(observation.peaks.postedNotReceivedBytes, posted.bytes);
@@ -261,7 +250,17 @@ export async function observeCityAdmissions(context: BrowserContext) {
         if (!request || !(request.requests || request.geometries || request.subTasks || request.createGeometryResults))
           return original.call(this, request, transfers);
         const task = measure(() => {
-          const bytes = input(request);
+          const bytes = footprint([
+            // Canonical preparation batches contain owned single-request payloads.
+            // Legacy fields remain observable for comparisons to frozen baselines.
+            request.requests,
+            request.geometries,
+            request.lineInputs,
+            request.parameters,
+            request.subTasks,
+            request.createGeometryResults,
+            request.packedInstances,
+          ]);
           const payloads = (Array.isArray(request.requests) ? request.requests : [request]) as Array<{
             geometries?: unknown[];
             subTasks?: unknown[];
@@ -320,7 +319,13 @@ export async function observeCityAdmissions(context: BrowserContext) {
       prototype.scheduleTask = wrapped;
       observation.armed = performance.now();
       const remove = scene.postRender.addEventListener(() => measure(() => {
-        const pending = (validation.tileset as unknown as { _sceneCollections: { _firstUpdates: Map<object, unknown>[] } })._sceneCollections._firstUpdates;
+        const pending = (validation.tileset as unknown as {
+          _renderer: {
+            collections: {
+              _firstUpdates: Map<object, unknown>[];
+            };
+          };
+        })._renderer.collections._firstUpdates;
         const owners = new Set<object>();
         const results: unknown[] = [];
         let slotWaitingOwners = 0;

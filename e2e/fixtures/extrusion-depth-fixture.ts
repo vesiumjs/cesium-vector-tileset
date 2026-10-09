@@ -190,14 +190,14 @@ async function createDepth() {
         throw new Error('The independently visible nearest building must provide an eroded pick point');
       const picked = viewer.scene.pick(point) as { primitive?: ExtrusionOwner; id?: { layerId: string; featureIndex: number } } | undefined;
       const pickedId = picked?.primitive?.getGeometryInstanceAttributes(picked.id).pickId;
-      const owners = [...tileset._vectorRenderer._records.values()].flatMap((record) => {
+      const owners = [...tileset._renderer.vector._records.values()].flatMap((record) => {
         const collection = record.collections.get('extrusions') as PrimitiveCollection | undefined;
         return collection ? Array.from({ length: collection.length }, (_, index) => collection.get(index) as ExtrusionOwner) : [];
       });
       const pickedOwner = owners.find(owner => owner === picked?.primitive);
       const pickIds = [...new Set(owners.flatMap(owner => owner._pickIds))];
       if (!pickedId || !pickedOwner?._pickIds.includes(pickedId)) {
-        return { point, picked: picked?.id, pickIdCount: pickIds.length, ownerSelected: false, qualification: { ownerCount: owners.length, pickedPrimitive: picked?.primitive?.constructor.name, hasPickedId: !!pickedId, ownerFound: !!pickedOwner, collections: [...tileset._vectorRenderer._records.values()].map(record => [...record.collections.keys()]) } };
+        return { point, picked: picked?.id, pickIdCount: pickIds.length, ownerSelected: false, qualification: { ownerCount: owners.length, pickedPrimitive: picked?.primitive?.constructor.name, hasPickedId: !!pickedId, ownerFound: !!pickedOwner, collections: [...tileset._renderer.vector._records.values()].map(record => [...record.collections.keys()]) } };
       }
       if (!selectedStage) {
         selectedStage = new PostProcessStage({
@@ -321,7 +321,13 @@ void main() {
         diagnostics: {
           frustumRatio: { linear: viewer.scene.farToNearRatio, logarithmic: viewer.scene.logarithmicDepthFarToNearRatio },
           frustums: (viewer.scene as unknown as { _view: { frustumCommandsList: Array<{ near: number; far: number }> } })._view.frustumCommandsList.map(bin => ({ near: bin.near, far: bin.far })),
-          ownedExtrusionGpuBytes: (tileset as unknown as { _drawCommands: { extrusionGpuBytes: number } })._drawCommands.extrusionGpuBytes,
+          ownedExtrusionGpuBytes: (tileset as unknown as {
+            _renderer: {
+              commands: {
+                extrusionGpuBytes: number;
+              };
+            };
+          })._renderer.commands.extrusionGpuBytes,
         },
         pixels: Object.fromEntries([['native', nativePixels], ['reference', referencePixels]].map(([name, value]) => {
           const pixels = value as Uint8Array;

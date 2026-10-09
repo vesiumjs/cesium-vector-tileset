@@ -372,7 +372,7 @@ async function createSurfaceHorizon() {
         command = Object.assign(Object.create(Object.getPrototypeOf(command)), command, { renderState: state });
       }
       const frustum = (this as unknown as { uniformState: { currentFrustum: Cartesian2 } }).uniformState.currentFrustum;
-      const id = tileset._vectorRenderer._records.get(batch.tileId)?.tileID;
+      const id = tileset._renderer.vector._records.get(batch.tileId)?.tileID;
       const canonical = id && ('canonical' in id ? id.canonical : id);
       const world = canonical && 2 ** canonical.z;
       draws.push({
@@ -400,7 +400,7 @@ async function createSurfaceHorizon() {
     }
     let canonical: { z: number; x: number; y: number } | undefined;
     if (collecting && current.pitch === 89 && sampleIndex === 16 && batch?.layerId === 'water') {
-      const id = tileset._vectorRenderer._records.get(batch.tileId)?.tileID;
+      const id = tileset._renderer.vector._records.get(batch.tileId)?.tileID;
       canonical = id && ('canonical' in id ? id.canonical : id);
     }
     let control: ReturnType<typeof subdivideSeamCommand> | undefined;
