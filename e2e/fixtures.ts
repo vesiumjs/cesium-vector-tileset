@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { fromGeojsonVt as encodeTile } from '@maplibre/vt-pbf';
@@ -41,6 +43,11 @@ export const test = base.extend<{ cpuThrottle: void }, { renderUrl: string }>({
         return;
       }
       const server = await createServer({
+        resolve: {
+          alias: process.env.E2E_CESIUM_BUILD === 'production'
+            ? [{ find: /^cesium$/, replacement: path.join(path.dirname(createRequire(import.meta.url).resolve('cesium/package.json')), 'Build/Cesium/index.js') }]
+            : [],
+        },
         cacheDir: path.resolve('node_modules/.cache/playwright/vite', `${process.pid}-${workerInfo.workerIndex}`),
         optimizeDeps: {
           entries: [
@@ -49,6 +56,28 @@ export const test = base.extend<{ cpuThrottle: void }, { renderUrl: string }>({
             'e2e/fixtures/*.html',
           ],
         },
+        plugins: process.env.E2E_BASELINE_DIR
+          ? [{
+              name: 'captured-performance-baseline',
+              enforce: 'pre',
+              async load(id) {
+                // Vite generates the URL wrapper; freeze the worker module
+                // itself when its worker_file request reaches this loader.
+                if (new URLSearchParams(id.split('?')[1]).has('worker'))
+                  return;
+                const relative = path.relative(process.cwd(), id.split('?')[0]);
+                if (!relative.startsWith('packages/cesium-vector-tileset/src/'))
+                  return;
+                try {
+                  return await readFile(path.join(process.env.E2E_BASELINE_DIR!, relative), 'utf8');
+                }
+                catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                    throw error;
+                }
+              },
+            }]
+          : [],
         server: { host: '127.0.0.1', port: 0, hmr: false },
       });
       try {

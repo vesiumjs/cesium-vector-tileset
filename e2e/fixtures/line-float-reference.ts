@@ -1,9 +1,10 @@
 import type { CanonicalTileID } from '../../packages/cesium-vector-tileset/src/tile/tile-id';
 import { BoundingSphere, Cartesian3, Ellipsoid, WebMercatorProjection } from 'cesium';
 
-// Independent E2E oracle frozen before topology compaction. Do not import
-// production bake or shader generators here: that would mask shared defects.
-// Source SHA256: 49c222462d62cc7d99d958a9e7ec5dd876ab5d95b28d22bf42a2591ad7517dac
+// Independent E2E oracle: topology and FLOAT attributes were frozen before
+// compaction; projection and AA follow the ground extrusion contract. Do not
+// import production bake or shader generators: that would mask shared defects.
+// Frozen bake source SHA256: 49c222462d62cc7d99d958a9e7ec5dd876ab5d95b28d22bf42a2591ad7517dac
 interface ReferenceSource { positions: Float64Array; longitudes: Float64Array; vertices: Uint32Array; closed: boolean }
 interface DashAtlasRow { y: number; height: number; width: number }
 function tileLocalToMercatorFraction(tile: CanonicalTileID, x: number, y: number) {
@@ -16,8 +17,8 @@ const LINE_CORNER_JOIN_FAN = 3;
 const LINE_CORNER_ROUND_CAP = 4;
 const LINE_CORNER_SQUARE = 5;
 const LINE_CORNER_ANCHOR = 6;
-// The two unused byte roles identify regular endpoint pairs, which provide
-// flat cap coordinates to the cap quad and its adjacent strip segment.
+// Regular endpoint pairs provide one flat ground-cap equation to the cap
+// quad and its adjacent strip segment.
 const LINE_CORNER_ROUND_END = 30;
 const LINE_CORNER_ROUND_BOTH_ENDS = 31;
 const MAX_FAN_VERTICES = 9;
@@ -531,8 +532,43 @@ function referenceLineShader(dash: boolean, planar = false): string {
     vec4 next = p + vec4(nextOffset.zxy, 0.0);
     p.x += u_line_layer_offset;
     prev.x += u_line_layer_offset;
-    next.x += u_line_layer_offset;`
-    : '    vec4 p = czm_translateRelativeToEye(position3DHigh, position3DLow);\n    vec4 prev = p + vec4(prevOffset, 0.0);\n    vec4 next = p + vec4(nextOffset, 0.0);';
+    next.x += u_line_layer_offset;
+    vec4 positionEC = czm_modelViewRelativeToEye * p;
+    vec4 prevEC = czm_modelViewRelativeToEye * prev;
+    vec4 nextEC = czm_modelViewRelativeToEye * next;
+    float planarNorthScale = u_line_mercator_projection > 0.5 ? 1.0
+        : cos((position2DHigh.y + position2DLow.y) / ${Ellipsoid.WGS84.maximumRadius.toFixed(1)});
+    vec3 eastEC = (czm_modelViewRelativeToEye * vec4(0.0, 1.0, 0.0, 0.0)).xyz;
+    vec3 northEC = (czm_modelViewRelativeToEye * vec4(0.0, 0.0, planarNorthScale, 0.0)).xyz;
+    vec2 previousGround = prevOffset.xy / vec2(1.0, planarNorthScale);
+    vec2 nextGround = nextOffset.xy / vec2(1.0, planarNorthScale);`
+    : `    vec4 p = czm_translateRelativeToEye(position3DHigh, position3DLow);
+    vec4 prev = p + vec4(prevOffset, 0.0);
+    vec4 next = p + vec4(nextOffset, 0.0);
+    vec4 positionEC = czm_modelViewRelativeToEye * p;
+    vec4 prevEC = czm_modelViewRelativeToEye * prev;
+    vec4 nextEC = czm_modelViewRelativeToEye * next;
+    vec3 centerMC = position3DHigh + position3DLow;
+    vec3 world = (czm_model * vec4(centerMC, 1.0)).xyz;
+    vec3 normal = czm_geodeticSurfaceNormal(world, vec3(0.0),
+        vec3(${Ellipsoid.WGS84.oneOverRadiiSquared.x}, ${Ellipsoid.WGS84.oneOverRadiiSquared.y}, ${Ellipsoid.WGS84.oneOverRadiiSquared.z}));
+    vec3 east = normalize(vec3(-normal.y, normal.x, 0.0));
+    vec3 north = cross(normal, east);
+    float cosine = length(normal.xy);
+    float eccentricitySquared = ${1 - (Ellipsoid.WGS84.minimumRadius / Ellipsoid.WGS84.maximumRadius) ** 2};
+    float denominator = 1.0 - eccentricitySquared * normal.z * normal.z;
+    float primeVertical = ${Ellipsoid.WGS84.maximumRadius.toFixed(1)} / sqrt(denominator);
+    float meridional = primeVertical * (1.0 - eccentricitySquared) / denominator;
+    vec3 radiiSquared = vec3(${Ellipsoid.WGS84.radiiSquared.x.toFixed(1)}, ${Ellipsoid.WGS84.radiiSquared.y.toFixed(1)}, ${Ellipsoid.WGS84.radiiSquared.z.toFixed(1)});
+    vec3 surface = radiiSquared * normal / sqrt(dot(radiiSquared * normal, normal));
+    float height = dot(world - surface, normal) + u_line_layer_offset;
+    vec2 scale = vec2(primeVertical + height, meridional + height) * cosine / ${Ellipsoid.WGS84.maximumRadius.toFixed(1)};
+    vec3 eastEC = czm_viewRotation * east * scale.x;
+    vec3 northEC = czm_viewRotation * north * scale.y;
+    vec3 previousWorld = mat3(czm_model) * prevOffset;
+    vec3 nextWorld = mat3(czm_model) * nextOffset;
+    vec2 previousGround = vec2(dot(previousWorld, east), dot(previousWorld, north)) / scale;
+    vec2 nextGround = vec2(dot(nextWorld, east), dot(nextWorld, north)) / scale;`;
   return `
 ${LINE_COMMON_SHADER}
 
@@ -542,16 +578,20 @@ in float a_corner;
 in float a_cornerParam;
 uniform float u_line_width;
 uniform vec4 u_line_color;
-${planar ? 'uniform float u_line_layer_offset;' : ''}
+uniform float u_line_layer_offset;
+uniform float u_line_meters_per_pixel;
+uniform float u_line_mercator_projection;
 
 ${dash ? 'in float a_linesofar;\nin vec3 a_dashFrom;\nin vec3 a_dashTo;' : ''}
 in vec4 color;
 in float batchId;
 
 out vec4 v_color;
-out float v_expandDir;
-flat out vec4 v_lineCap;
-flat out vec3 v_otherCap;
+out vec2 v_lineDistance;
+out float v_gamma_scale;
+flat out vec3 v_capTangent;
+flat out vec3 v_capDenominator;
+flat out vec2 v_capExtent;
 out float v_width;
 #ifdef LINE_TILE_CLIP
 out vec3 v_lineClipEye;
@@ -563,9 +603,8 @@ void main()
     float expandDir = expandAndWidth.x;
     bool usePrev = expandAndWidth.y < 0.0;
     float width = czm_batchTable_lineWidth(batchId) * u_line_width;
-    // The AA boundary is half a device pixel outside the painted width.
-    // One more device pixel covers every sample in an intersecting pixel,
-    // including diagonals, without changing the fragment coverage.
+    // The painted width is extruded in Mercator ground units. The extra
+    // device pixel only supplies Native's transparent MSAA geometry margin.
     float outset = width * 0.5 + 1.5 / czm_pixelRatio;
 
     // Cesium projects the center; both tracks store relative neighbours.
@@ -573,15 +612,8 @@ ${positions}
 
     v_color = color * u_line_color;
     v_color.a *= step(0.001, width);
-    v_expandDir = expandDir;
-    v_lineCap = vec4(0.0);
-    v_otherCap = vec3(0.0);
     v_width = width;
 ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
-
-    vec4 positionEC = czm_modelViewRelativeToEye * p;
-    vec4 prevEC = czm_modelViewRelativeToEye * prev;
-    vec4 nextEC = czm_modelViewRelativeToEye * next;
 
     vec4 clippedPrevWC, clippedPrevEC;
     bool prevSegmentClipped, prevSegmentCulled;
@@ -601,44 +633,35 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
         return;
     }
 
-    vec2 directionToPrevWC = normalize(clippedPrevWC.xy - clippedPositionWC.xy);
-    vec2 directionToNextWC = normalize(clippedNextWC.xy - clippedPositionWC.xy);
+    vec2 directionToPrevGround = normalize(previousGround);
+    vec2 directionToNextGround = normalize(nextGround);
     if (prevSegmentCulled)
     {
-        directionToPrevWC = -directionToNextWC;
+        directionToPrevGround = -directionToNextGround;
     }
     else if (nextSegmentCulled)
     {
-        directionToNextWC = -directionToPrevWC;
+        directionToNextGround = -directionToPrevGround;
     }
 
-    // Left normals of the incoming (prev -> position) and outgoing
-    // (position -> next) segments, in window space.
-    vec2 nPrev = vec2(directionToPrevWC.y, -directionToPrevWC.x);
-    vec2 nNext = vec2(-directionToNextWC.y, directionToNextWC.x);
+    // Join normals live in east/north coordinates before camera projection.
+    vec2 nPrev = vec2(-directionToPrevGround.y, directionToPrevGround.x);
+    vec2 nNext = vec2(directionToNextGround.y, -directionToNextGround.x);
 
-    // The endpoint pair provokes both cap and adjacent strip triangles.
-    // Flat window coordinates give every MSAA sample the same analytic cap
-    // distance even when its pixel center lies across their shared edge.
-    if (a_corner >= 30.0)
-    {
-        v_lineCap = vec4(clippedPositionWC.xy, -(usePrev ? directionToPrevWC : directionToNextWC));
-        v_otherCap = vec3(usePrev ? clippedPrevWC.xy : clippedNextWC.xy, a_corner == 31.0 ? 1.0 : 0.0);
-    }
-
-    vec2 thisSegmentForwardWC, otherSegmentForwardWC;
+    vec2 thisSegmentForwardGround, otherSegmentForwardGround;
     if (usePrev)
     {
-        thisSegmentForwardWC = -directionToPrevWC;
-        otherSegmentForwardWC = directionToNextWC;
+        thisSegmentForwardGround = -directionToPrevGround;
+        otherSegmentForwardGround = directionToNextGround;
     }
     else
     {
-        thisSegmentForwardWC = directionToNextWC;
-        otherSegmentForwardWC = -directionToPrevWC;
+        thisSegmentForwardGround = directionToNextGround;
+        otherSegmentForwardGround = -directionToPrevGround;
     }
 
     vec2 offsetDir = vec2(0.0);
+    vec2 squareTangent = vec2(0.0);
     float expandWidth = outset;
 
     if (a_corner == 1.0 || a_corner == 2.0)
@@ -649,8 +672,7 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
     }
     else if (a_corner == 3.0)
     {
-        // Round join fan: sweep the outer side of the turn from nPrev to
-        // nNext, mirroring MapLibre's fakeround pie slices.
+        // Sweep the authored FLOAT fan fraction along the ground normals.
         float crossN = nPrev.x * nNext.y - nPrev.y * nNext.x;
         float phi = atan(crossN, dot(nPrev, nNext));
         float theta = phi * a_cornerParam;
@@ -663,11 +685,13 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
         // Both caps extend a quad by half a width. Round caps use the endpoint
         // pair's flat coordinates for fragment-space semicircle clipping.
         vec2 left = usePrev ? nPrev : nNext;
-        vec2 fwd = usePrev ? -directionToPrevWC : directionToNextWC;
+        vec2 fwd = usePrev ? -directionToPrevGround : directionToNextGround;
         // Square caps have no fragment clipping along the tangent, so their
         // painted length must exclude the transparent MSAA geometry margin.
         float capScale = a_corner == 5.0 ? (outset - 1.0 / czm_pixelRatio) / outset : 1.0;
         offsetDir = left * expandDir + fwd * a_cornerParam * capScale;
+        if (a_corner == 5.0)
+            squareTangent = fwd * a_cornerParam;
     }
     else if (a_corner == 6.0)
     {
@@ -676,29 +700,63 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
     }
     else
     {
-        // Regular vertex: Cesium's miter expansion.
-        vec2 thisSegmentLeftWC = vec2(-thisSegmentForwardWC.y, thisSegmentForwardWC.x);
-        vec2 leftWC = thisSegmentLeftWC;
+        // Regular vertex: the bounded miter is measured in the ground plane.
+        vec2 thisSegmentNormal = vec2(thisSegmentForwardGround.y, -thisSegmentForwardGround.x);
+        vec2 groundNormal = thisSegmentNormal;
         if (!czm_equalsEpsilon(prevEC.xyz - positionEC.xyz, vec3(0.0), czm_epsilon1) && !czm_equalsEpsilon(nextEC.xyz - positionEC.xyz, vec3(0.0), czm_epsilon1))
         {
-            vec2 otherSegmentLeftWC = vec2(-otherSegmentForwardWC.y, otherSegmentForwardWC.x);
+            vec2 otherSegmentNormal = vec2(otherSegmentForwardGround.y, -otherSegmentForwardGround.x);
 
-            vec2 leftSumWC = thisSegmentLeftWC + otherSegmentLeftWC;
-            float leftSumLength = length(leftSumWC);
-            leftWC = leftSumLength < czm_epsilon6 ? thisSegmentLeftWC : (leftSumWC / leftSumLength);
+            vec2 normalSum = thisSegmentNormal + otherSegmentNormal;
+            float normalSumLength = length(normalSum);
+            groundNormal = normalSumLength < czm_epsilon6 ? thisSegmentNormal : (normalSum / normalSumLength);
 
-            vec2 u = -thisSegmentForwardWC;
-            vec2 v = leftWC;
+            vec2 u = -thisSegmentForwardGround;
+            vec2 v = groundNormal;
             float sinAngle = abs(u.x * v.y - u.y * v.x);
             // Regular vertices read the feature's exact FLOAT miter limit
             // from Native's instance table.
             expandWidth = clamp(expandWidth / sinAngle, 0.0, outset * max(a_cornerParam, 1.0));
         }
-        offsetDir = leftWC * expandDir;
+        offsetDir = groundNormal * expandDir;
     }
 
-    vec4 positionWC = vec4(clippedPositionWC.xy + offsetDir * expandWidth * czm_pixelRatio, -clippedPositionWC.z, 1.0) * (czm_projection * clippedPositionEC).w;
-    gl_Position = czm_viewportOrthographic * positionWC;
+    vec2 direction = offsetDir * expandWidth / outset + squareTangent / (outset * czm_pixelRatio);
+    vec2 gammaDirection = length(direction) > 0.0 ? direction : nNext;
+    vec2 paintExtrusion = gammaDirection * (width * 0.5 + 0.5 / czm_pixelRatio);
+    vec3 paintExpansionEC = (eastEC * paintExtrusion.x + northEC * paintExtrusion.y) * u_line_meters_per_pixel;
+    vec4 projectedCenter = czm_projection * clippedPositionEC;
+    v_capTangent = vec3(0.0);
+    v_capDenominator = vec3(0.0, 0.0, 1.0);
+    v_capExtent = vec2(0.0);
+    if (a_corner >= 30.0 || a_corner == 4.0)
+    {
+        // Solve the endpoint's projected ground plane at the pixel center.
+        // A screen-space circle cannot preserve a cap under pitch/shear, and
+        // the strip must use the same equation as its adjacent cap quad.
+        vec4 projectedEast = czm_projection * vec4(eastEC * u_line_meters_per_pixel, 0.0);
+        vec4 projectedNorth = czm_projection * vec4(northEC * u_line_meters_per_pixel, 0.0);
+        mat3 groundFromClip = inverse(mat3(
+            vec3(projectedEast.xy, projectedEast.w),
+            vec3(projectedNorth.xy, projectedNorth.w),
+            vec3(projectedCenter.xy, projectedCenter.w)));
+        vec2 outward = -(usePrev ? directionToPrevGround : directionToNextGround);
+        v_capTangent = outward.x * vec3(groundFromClip[0].x, groundFromClip[1].x, groundFromClip[2].x)
+            + outward.y * vec3(groundFromClip[0].y, groundFromClip[1].y, groundFromClip[2].y);
+        v_capDenominator = vec3(groundFromClip[0].z, groundFromClip[1].z, groundFromClip[2].z);
+        v_capExtent = vec2(1.0, a_corner == 31.0
+            ? length(usePrev ? previousGround : nextGround) / u_line_meters_per_pixel : -1.0);
+    }
+    vec4 projectedPaint = czm_projection * (clippedPositionEC + vec4(paintExpansionEC, 0.0));
+    vec2 screenExtrusion = (projectedPaint.xy - projectedCenter.xy) / projectedPaint.w
+        * czm_viewport.zw / (2.0 * czm_pixelRatio);
+    v_gamma_scale = length(paintExtrusion) / max(length(screenExtrusion), czm_epsilon7);
+    float geometryOutset = width * 0.5 + (0.5 + v_gamma_scale) / czm_pixelRatio;
+    vec2 extrusion = direction * geometryOutset - squareTangent * v_gamma_scale / czm_pixelRatio;
+    vec3 expansionEC = (eastEC * extrusion.x + northEC * extrusion.y) * u_line_meters_per_pixel;
+    vec4 expandedPositionEC = clippedPositionEC + vec4(expansionEC, 0.0);
+    gl_Position = czm_projection * expandedPositionEC;
+    v_lineDistance = vec2(expandDir, a_corner == 4.0 ? abs(a_cornerParam) : 0.0) * geometryOutset;
 #ifdef LINE_TILE_CLIP
     // Native's inverseProjection is zero in 2D/orthographic views. Its
     // window helper also restores those views from the current frustum.
@@ -707,9 +765,8 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
     vec4 lineClipPositionEC = czm_windowToEyeCoordinates(lineClipWindow);
     v_lineClipEye = lineClipPositionEC.xyz / lineClipPositionEC.w;
 #endif
-    // Coverage is a window-space distance. Cancel perspective interpolation
-    // in the fragment shader so different endpoint depths do not skew it.
-    v_expandDir *= gl_Position.w;
+    // Keep perspective interpolation: these distances describe the ground
+    // strip, not a constant window-space width.
 }
 `;
 }
@@ -778,20 +835,29 @@ float lineCoverage()
 #ifdef LINE_TILE_CLIP
     clipLineTile();
 #endif
-    float halfWidth = v_width * czm_pixelRatio * 0.5;
-    float tangent = max(dot(gl_FragCoord.xy - v_lineCap.xy, v_lineCap.zw), 0.0);
-    if (v_otherCap.z > 0.0)
-        tangent = max(tangent, dot(gl_FragCoord.xy - v_otherCap.xy, -v_lineCap.zw));
-    float normal = v_expandDir * gl_FragCoord.w * (halfWidth + 1.5);
-    return clamp(halfWidth + 0.5 - length(vec2(normal, tangent)), 0.0, 1.0);
+    float halfWidth = v_width * 0.5;
+    float tangent = max(v_lineDistance.y, 0.0);
+    if (v_capExtent.x > 0.0)
+    {
+        vec3 clip = vec3((gl_FragCoord.xy - czm_viewport.xy) / czm_viewport.zw * 2.0 - 1.0, 1.0);
+        float along = dot(v_capTangent, clip) / dot(v_capDenominator, clip);
+        tangent = max(along, 0.0);
+        if (v_capExtent.y >= 0.0)
+            tangent = max(tangent, -along - v_capExtent.y);
+    }
+    float distance = length(vec2(v_lineDistance.x, tangent));
+    float blur = v_gamma_scale / czm_pixelRatio;
+    return clamp((halfWidth + 0.5 / czm_pixelRatio - distance) / blur, 0.0, 1.0);
 }
 `;
 
 export const REFERENCE_LINE_AA_FS = `
 in vec4 v_color;
-in float v_expandDir;
-flat in vec4 v_lineCap;
-flat in vec3 v_otherCap;
+in vec2 v_lineDistance;
+in float v_gamma_scale;
+flat in vec3 v_capTangent;
+flat in vec3 v_capDenominator;
+flat in vec2 v_capExtent;
 in float v_width;
 
 ${LINE_COVERAGE_SHADER}

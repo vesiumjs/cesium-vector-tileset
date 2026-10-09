@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Cesium and MapLibre rendering validation</title>
+    <title>Ground line perspective comparison</title>
     <style>
       html,
       body {
@@ -19,17 +19,11 @@
         flex: 1;
         min-width: 0;
       }
-      body.single #maplibre {
-        display: none;
-      }
-      body.maplibre-only #cesium {
-        display: none;
-      }
     </style>
   </head>
   <body>
     <div id="cesium"></div>
     <div id="maplibre"></div>
-    <script type="module" src="./render-fixture"></script>
+    <script type="module" src="./line-perspective-fixture"></script>
   </body>
 </html>

@@ -1,14 +1,16 @@
 import type { MapProjection } from 'cesium';
 import type { LinePrimitiveGeometry } from '../../packages/cesium-vector-tileset/src/data/projected-geometry';
+import type { SceneCollections } from '../../packages/cesium-vector-tileset/src/render/scene/scene-collections';
 import type { ReferenceLineBake } from './line-float-reference';
 import Point from '@mapbox/point-geometry';
 import * as Cesium from 'cesium';
-import { BoundingSphere, Cartesian2, Cartesian3, Cartographic, Color, ColorGeometryInstanceAttribute, ComponentDatatype, Geometry, GeometryAttribute, GeometryInstance, GeometryInstanceAttribute, GeometryPipeline, Matrix4, PolylineColorAppearance, Primitive, PrimitiveCollection, PrimitiveType } from 'cesium';
+import { BoundingSphere, Cartesian2, Cartesian3, Cartographic, Color, ColorGeometryInstanceAttribute, ComponentDatatype, Ellipsoid, Geometry, GeometryAttribute, GeometryInstance, GeometryInstanceAttribute, GeometryPipeline, Matrix4, PolylineColorAppearance, Primitive, PrimitiveCollection, PrimitiveType, WebMercatorProjection } from 'cesium';
 import { LineBucket } from '../../packages/cesium-vector-tileset/src/data/bucket/line-bucket';
 import { EXTENT } from '../../packages/cesium-vector-tileset/src/data/extent';
 import { GeometryPrimitive } from '../../packages/cesium-vector-tileset/src/render/geometry/geometry-primitive';
 import { LineGeometryCache } from '../../packages/cesium-vector-tileset/src/render/line/line-geometry';
 import { LINE_AA_FS, LINE_AA_VS } from '../../packages/cesium-vector-tileset/src/render/line/line-renderer';
+import { cameraZoom } from '../../packages/cesium-vector-tileset/src/render/scene/covering';
 import { captureUploadedPrimitiveBytes, collectionGpuBytes, rememberPrimitiveBytes } from '../../packages/cesium-vector-tileset/src/render/scene/resource-memory';
 import { lineBucketPrimitives } from '../../packages/cesium-vector-tileset/src/render/vector/bucket-geometry';
 import { EvaluationParameters } from '../../packages/cesium-vector-tileset/src/style/evaluation-parameters';
@@ -317,7 +319,7 @@ export async function createLineFormatValidation(mode: '2d' | 'cv' | '3d', scena
   }
   // Native Primitive.getUniforms consumes Appearance.uniforms at runtime.
   const appearance = (vertexShaderSource: string, fragmentShaderSource = LINE_AA_FS) => Object.assign(new PolylineColorAppearance({ translucent: true, vertexShaderSource, fragmentShaderSource, renderState: { cull: { enabled: false } } }), {
-    uniforms: { u_line_width: 1, u_line_color: Color.WHITE, u_line_layer_offset: 0 },
+    uniforms: { u_line_width: 1, u_line_color: Color.WHITE, u_line_layer_offset: 0, u_line_meters_per_pixel: 0, u_line_mercator_projection: 0 },
   });
   const reference = new NativeFloatReference({ geometryInstances: referenceInstances, appearance: appearance(referenceShader, REFERENCE_LINE_AA_FS), asynchronous: false, cull: false }, planar);
   const sharedAppearance = appearance(shader);
@@ -331,9 +333,33 @@ export async function createLineFormatValidation(mode: '2d' | 'cv' | '3d', scena
   group.add(compact);
   if (peer)
     group.add(peer);
-  scene.primitives.add(group);
+  const { tileset } = window.renderValidation;
+  tileset.add(group);
+  // Production cold primitives only advance through the owned preparation
+  // queue. The FLOAT oracle shares the same group and draw lifecycle.
+  (tileset as unknown as { _sceneCollections: SceneCollections })._sceneCollections.queueFirstUpdate([group], false);
   if (scenario === 'near-plane')
     scene.camera.setView({ destination: Cartesian3.fromDegrees(-0.1276, 51.5072, 2), orientation: { heading: 0, pitch: 0, roll: 0 } });
+  let styleZoom: number | undefined;
+  const updateProjection = () => {
+    const input = { camera: scene.camera, mode: scene.mode, projection: scene.mapProjection, width: scene.canvas.clientWidth, height: scene.canvas.clientHeight };
+    styleZoom = cameraZoom(input) ?? styleZoom ?? cameraZoom({ ...input, sampleY: input.height - 1 });
+    if (styleZoom === undefined)
+      throw new Error('Native line format camera has no measurable surface scale');
+    // Both layouts use the same actual camera scale. The FLOAT oracle keeps
+    // its own shader and DOUBLE source centers; no packed geometry is read.
+    const metersPerPixel = 2 * Math.PI * Ellipsoid.WGS84.maximumRadius / (512 * 2 ** styleZoom);
+    const mercatorProjection = scene.mapProjection instanceof WebMercatorProjection ? 1 : 0;
+    for (const owned of [sharedAppearance, reference.appearance, compact.appearance, peer && !peer.isDestroyed() ? peer.appearance : undefined]) {
+      if (!owned)
+        continue;
+      const uniforms = (owned as typeof sharedAppearance).uniforms;
+      uniforms.u_line_meters_per_pixel = metersPerPixel;
+      uniforms.u_line_mercator_projection = mercatorProjection;
+    }
+  };
+  updateProjection();
+  const stopProjection = scene.preRender.addEventListener(updateProjection);
   let latest: Uint8Array | undefined;
   const stop = scene.postRender.addEventListener(() => {
     const { canvas, context } = scene;
@@ -431,7 +457,9 @@ export async function createLineFormatValidation(mode: '2d' | 'cv' | '3d', scena
       const cpuRecordsReleased = (compact as unknown as { _linePositionData?: Float32Array })._linePositionData === undefined;
       const result = { paintedPixels, changedPixels, cameraViews, comparedPixels: packed.length / 4, packedPick, referencePick, geometryBytes: collectionGpuBytes(compact), textureBytes: texture?.sizeInBytes, textureFormat: texture && { pixelFormat: texture.pixelFormat, pixelDatatype: texture.pixelDatatype }, cpuRecordsReleased, isolation, indexDatatypes, uploadedVertices, sourcePointCounts, sourceZoom: zoom, shortLegMeters, attributes: Object.keys((compact as GeometryPrimitive & { _attributeLocations: Record<string, number> })._attributeLocations), fps: scene.debugShowFramesPerSecond, errors: window.renderValidation.renderErrors };
       stop();
-      scene.primitives.remove(group);
+      stopProjection();
+      tileset.remove(group);
+      group.destroy();
       return { ...result, textureDestroyed: texture?.isDestroyed() };
     },
   };

@@ -46,21 +46,6 @@ interface AntialiasEndpointsProbe {
     }>;
   }>;
 }
-interface ObliqueLineProbe {
-  coordinates: string;
-  ratio: number;
-  start: PixelPosition;
-  end: PixelPosition;
-  length: number;
-  profiles: Array<{ progress: number; center: PixelPosition; samples: Array<{
-    x: number;
-    y: number;
-    distance: number;
-    alpha: number;
-    expected: number[];
-    rgb: number[];
-  }>; }>;
-}
 declare global {
   interface Window {
     stopAntialiasPixels: () => void;
@@ -68,9 +53,6 @@ declare global {
     antialiasReference: Uint8Array;
     antialiasProbe: (tiles: string[], width: number) => AntialiasProbe;
     antialiasEndpointsProbe: (tiles: string[], width: number) => AntialiasEndpointsProbe;
-    stopObliquePixels: () => void;
-    obliquePixels: Uint8Array;
-    obliqueLineProbe: (tiles: string[], width: number) => ObliqueLineProbe;
   }
 }
 
@@ -398,105 +380,53 @@ test.describe(() => {
 for (const mode of ['3d', 'cv']) {
   for (const kind of ['solid', 'dash']) {
     test(`${kind} line keeps pixel coverage in an oblique ${mode} view`, async ({ page, renderUrl }, testInfo) => {
-      const errors = [];
+      const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
-      const { style, requestedTiles } = await serveLines(page, renderUrl, kind);
-      const query = new URLSearchParams({ mode, scale: '0.25', style: `${renderUrl}/line-antialias/style.json` });
-      await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
-      await expect.poll(() => page.evaluate(() => window.renderValidation?.tileset.tilesLoaded && window.renderValidation.viewer.scene.globe.tilesLoaded), { timeout: 60_000 }).toBe(true);
-      await page.evaluate(() => {
-        const validation = window.renderValidation;
-        validation.viewer.scene.debugShowFramesPerSecond = true;
-        validation.setObliqueView();
-        window.stopObliquePixels = validation.viewer.scene.postRender.addEventListener(() => {
-          const { canvas, scene } = validation.viewer;
-          window.obliquePixels = scene.context.readPixels({ width: canvas.width, height: canvas.height });
-        });
-        window.obliqueLineProbe = (tiles, width) => {
-          if (!window.obliquePixels)
-            return undefined;
-          const { canvas } = validation.viewer;
-          const ratio = canvas.width / canvas.clientWidth;
-          const project = (z, x, y, tileX) => {
-            const longitude = (x + tileX / 4096) / 2 ** z * 360 - 180;
-            const latitude = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / 2 ** z))) * 180 / Math.PI;
-            // The second style layer is lifted by the common 1m surface
-            // offset plus its 0.01m layer offset. Oblique views see this lift.
-            const position = validation.projectPosition(longitude, latitude, 1.01);
-            return position && { x: position.x * ratio, y: position.y * ratio };
-          };
-          const sample = (x, y) => {
-            const offset = ((canvas.height - 1 - y) * canvas.width + x) * 4;
-            return Array.from(window.obliquePixels.slice(offset, offset + 3));
-          };
-          const halfWidth = width * ratio / 2;
-          const margin = halfWidth + 10;
-          for (const coordinates of tiles) {
-            const [z, x, y] = coordinates.split('/').map(Number);
-            const start = project(z, x, y, 1024);
-            const end = project(z, x, y, 3072);
-            if (!start || !end || [start, end].some(position => position.x < margin || position.x > canvas.width - margin || position.y < margin || position.y > canvas.height - margin))
-              continue;
-            const length = Math.hypot(end.x - start.x, end.y - start.y);
-            if (length < width * ratio * 5 || Math.abs(end.y - start.y) < 40)
-              continue;
-            const tangent = { x: (end.x - start.x) / length, y: (end.y - start.y) / length };
-            const normal = { x: -tangent.y, y: tangent.x };
-            const profiles = [0.2, 0.5, 0.8].map((progress) => {
-              const center = { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress };
-              const samples = new Map();
-              for (let across = -Math.ceil(halfWidth + 2); across <= Math.ceil(halfWidth + 2); across += 0.5) {
-                for (const along of [-1, 0, 1]) {
-                  const px = Math.floor(center.x + normal.x * across + tangent.x * along);
-                  const py = Math.floor(center.y + normal.y * across + tangent.y * along);
-                  const distance = Math.abs((px + 0.5 - start.x) * normal.x + (py + 0.5 - start.y) * normal.y);
-                  const alpha = Math.max(0, Math.min(1, halfWidth + 0.5 - distance));
-                  const expected = [34, 68, 85].map((background, channel) => Math.round(background + ((channel === 0 ? 255 : 0) - background) * alpha));
-                  samples.set(`${px}/${py}`, { x: px, y: py, distance, alpha, expected, rgb: sample(px, py) });
-                }
-              }
-              return { progress, center, samples: [...samples.values()] };
-            });
-            if (profiles.some(profile => Math.max(...profile.samples.map(pixel => pixel.rgb[0])) < 250))
-              continue;
-            return { coordinates, ratio, start, end, length, profiles };
-          }
-        };
-        validation.viewer.scene.requestRender();
-      });
-      const measurements = [];
+      const query = new URLSearchParams({ mode, kind });
+      await page.goto(`${renderUrl}/e2e/fixtures/line-antialias-fixture.html?${query}`);
+      await expect.poll(() => page.evaluate(() => window.lineAntialias?.ready()), { timeout: 60_000 }).toBe(true);
+      const measurements: Array<{ width: number } & ReturnType<Window['lineAntialias']['capture']>> = [];
       for (const width of [12, 24]) {
-        const next = structuredClone(style);
-        next.layers[1].paint['line-width'] = width;
-        await page.evaluate((next) => {
-          window.obliquePixels = undefined;
-          window.renderValidation.tileset.setStyle(next);
-          window.renderValidation.viewer.scene.requestRender();
-        }, next);
-        await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded), { timeout: 60_000 }).toBe(true);
-        await expect.poll(() => page.evaluate(({ tiles, width }) => window.obliqueLineProbe(tiles, width), { tiles: [...requestedTiles], width })).toBeTruthy();
-        measurements.push({ width, ...await page.evaluate(({ tiles, width }) => window.obliqueLineProbe(tiles, width), { tiles: [...requestedTiles], width }) });
+        await page.evaluate(width => window.lineAntialias.setWidth(width), width);
+        await expect.poll(() => page.evaluate(() => window.lineAntialias.ready()), { timeout: 60_000 }).toBe(true);
+        measurements.push({ width, ...await page.evaluate(width => window.lineAntialias.capture(width), width) });
       }
-      const state = await page.evaluate(() => ({
-        fps: window.renderValidation.viewer.scene.debugShowFramesPerSecond,
-        msaaSamples: window.renderValidation.viewer.scene.msaaSamples,
-        renderErrors: window.renderValidation.renderErrors,
-      }));
       const output = testInfo.outputPath('oblique-line-profiles.json');
-      await writeFile(output, JSON.stringify({ mode, kind, measurements, ...state }, null, 2));
+      await writeFile(output, JSON.stringify({ mode, kind, measurements, errors }, null, 2));
       await testInfo.attach('oblique-line-profiles', { path: output, contentType: 'application/json' });
+      await page.screenshot({ path: testInfo.outputPath('oblique-line-comparison.png') });
       assert.deepEqual(errors, []);
-      assert.deepEqual(state.renderErrors, []);
-      assert.ok(state.fps);
-      assert.equal(state.msaaSamples, 4);
-      for (const { width, profiles } of measurements) {
-        for (const { progress, samples } of profiles) {
-          assert.ok(samples.some(pixel => pixel.alpha > 0 && pixel.alpha < 1), 'probe must include a fractional edge pixel');
-          for (const sample of samples)
-            assert.ok(sample.rgb.every((channel, index) => Math.abs(channel - sample.expected[index]) <= 6), `${mode}/${kind}/${width}/${progress}: pixel ${sample.x}/${sample.y} differs from constant screen-space coverage: ${sample.rgb} vs ${sample.expected}`);
+      for (const measurement of measurements) {
+        const { width, camera, viewport, lines } = measurement;
+        assert.deepEqual(measurement.errors, []);
+        assert.ok(measurement.fps);
+        assert.equal(measurement.msaaSamples, 4);
+        assert.ok(Object.values(measurement.gpu).every(renderer => !/swiftshader|llvmpipe|software/i.test(renderer)), 'real hardware must qualify both renderers');
+        assert.deepEqual(viewport.native, viewport.reference, 'DPR and viewport must match');
+        assert.equal(viewport.native[0] / viewport.native[2], 1);
+        assert.ok(Math.abs(camera.fov - camera.nativeFov) < 1e-6);
+        assert.ok(Math.abs(camera.zoom - camera.nativeZoom) < 1e-6);
+        assert.equal(camera.pitch, 45);
+        assert.equal(camera.bearing, 35);
+        assert.ok(Math.abs(camera.pitch - camera.nativePitch) < 1e-6);
+        assert.ok(Math.abs(camera.bearing - camera.nativeBearing) < 1e-6);
+        assert.equal(measurement.mode, mode === '3d' ? 3 : 1);
+        assert.equal(lines.length, 3, 'finite source must supply near, middle and far lines');
+        for (const { depth, ratio, start, end, referenceStart, referenceEnd, length, profiles } of lines) {
+          assert.equal(ratio, 1);
+          assert.ok(Math.hypot(start.x - referenceStart.x, start.y - referenceStart.y) < 0.05, 'both renderers must use the same start pixel phase');
+          assert.ok(Math.hypot(end.x - referenceEnd.x, end.y - referenceEnd.y) < 0.05, 'both renderers must use the same end pixel phase');
+          assert.ok(length > width * 5 && Math.abs(end.y - start.y) > 40, 'the ground line must be long and oblique');
+          assert.equal(profiles.length, 3);
+          for (const { progress, samples } of profiles) {
+            assert.ok(samples.every(pixel => pixel.x > 0 && pixel.x < viewport.native[0] - 1 && pixel.y > 0 && pixel.y < viewport.native[1] - 1), 'all measured pixels must be inside the actual viewport');
+            assert.ok(samples.some(pixel => pixel.expected[0] > 250 && pixel.rgb[0] > 250), 'both actual renderers must paint the line body');
+            assert.ok(samples.some(pixel => pixel.expected[0] > 40 && pixel.expected[0] < 249), 'actual MapLibre must supply a fractional edge pixel');
+            for (const sample of samples)
+              assert.ok(sample.rgb.every((channel, index) => Math.abs(channel - sample.expected[index]) <= 6), `${mode}/${kind}/${width}/depth${depth}/${progress}: pixel ${sample.x}/${sample.y} differs from actual MapLibre ground coverage: ${sample.rgb} vs ${sample.expected}`);
+          }
         }
       }
-      await page.evaluate(() => window.stopObliquePixels());
     });
   }
 }

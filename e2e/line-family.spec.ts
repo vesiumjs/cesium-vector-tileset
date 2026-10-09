@@ -12,7 +12,7 @@ import * as Cesium from 'cesium';
 import { expect } from 'playwright/test';
 import { fromGeojsonVt, test } from './fixtures';
 
-const Pass = (Cesium as typeof Cesium & { Pass: { TRANSLUCENT: number; OVERLAY: number } }).Pass;
+const Pass = (Cesium as typeof Cesium & { Pass: { OPAQUE: number; OVERLAY: number } }).Pass;
 
 type LineFamilyResource = (NativePrimitive | Omit<LineFamilyChunk, 'primitive'>) & {
   primitive?: NativePrimitive;
@@ -33,6 +33,7 @@ declare global {
     lineFamilyTextures: NativeTexture[];
     stopLineFamilyPixels: () => void;
     lineFamilySnapshot: Uint8Array;
+    lineFamilyCommands: Record<string, number>;
     lineFamilyPixels: (color: number[]) => { count: number; position?: { x: number; y: number }; picked?: TilePickObject };
     lineFamilyBuilding: () => TilePickObject | undefined;
   }
@@ -67,7 +68,7 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       ...(kind === 'dash' ? { sprite: `${renderUrl}/line-family/sprite` } : {}),
       sources: { city: { type: 'vector', tiles: [`${renderUrl}/line-family/{z}/{x}/{y}.pbf`], maxzoom: 14 } },
       layers: [
-        { 'id': 'ground', 'type': 'fill', 'source': 'city', 'source-layer': 'ground', 'paint': { 'fill-color': '#224455', 'fill-antialias': false } },
+        { 'id': 'ground', 'type': 'fill', 'source': 'city', 'source-layer': 'ground', 'paint': { 'fill-color': '#224455', 'fill-antialias': mode === '3d', ...(mode === '3d' ? { 'fill-outline-color': '#224455' } : {}) } },
         { 'id': 'buildings', 'type': 'fill-extrusion', 'source': 'city', 'source-layer': 'buildings', 'paint': { 'fill-extrusion-color': '#0000ff', 'fill-extrusion-height': 80, ...(kind === 'dash' ? { 'fill-extrusion-pattern': 'building-blue' } : {}) } },
         ...([['casing', '#00cc00', 24], ['roads', '#ffffff', 6]] as Array<[string, string, number]>).map(([id, color, width]) => ({
           'id': id,
@@ -91,7 +92,7 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       }
       return route.fulfill({ json: style });
     });
-    const query = new URLSearchParams({ mode, style: `${renderUrl}/line-family/style.json`, synthetic: '4096' });
+    const query = new URLSearchParams({ mode, style: `${renderUrl}/line-family/style.json`, synthetic: '4096', atlas: '1' });
     await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
     await expect.poll(() => page.evaluate(() => {
       const validation = window.renderValidation;
@@ -135,6 +136,15 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       // displayed framebuffer. Picking has its own framebuffer as well.
       window.stopLineFamilyPixels = viewer.scene.postRender.addEventListener(() => {
         window.lineFamilySnapshot = viewer.scene.context.readPixels({ x, y, width: rowWidth, height: rows });
+        const commands: Record<string, number> = {};
+        const key = Symbol.for('cesium-vector-tileset.draw-batch');
+        for (const command of viewer.scene._frameState.commandList) {
+          const batch = (command as unknown as Record<symbol, DrawBatch | undefined>)[key]
+            ?? (command.owner as Record<symbol, DrawBatch | undefined> | undefined)?.[key];
+          if (batch)
+            commands[batch.layerId] = (commands[batch.layerId] ?? 0) + 1;
+        }
+        window.lineFamilyCommands = commands;
       });
       window.lineFamilyPixels = (color) => {
         const pixels = window.lineFamilySnapshot;
@@ -235,6 +245,49 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       assert.ok(depth.logDepth, '3D pick must exercise the Native logarithmic-depth derivative');
       assert.equal(depth.building?.layerId, 'buildings', 'surface picking ignored the visible physical building');
     }
+    if (mode === '3d') {
+      const cache = await page.evaluate(async () => {
+        const { viewer } = window.renderValidation;
+        const native = window.renderValidation.atlas!.cesium as unknown as {
+          DerivedCommand: { createLogDepthCommand: (command: { owner?: object }, ...args: unknown[]) => unknown };
+        };
+        const derive = native.DerivedCommand.createLogDepthCommand;
+        const derivations: Record<string, number> = { roads: 0, casing: 0, outline: 0 };
+        native.DerivedCommand.createLogDepthCommand = function (command, ...args) {
+          const batch = window.renderValidation.drawBatch(command) ?? window.renderValidation.drawBatch(command.owner);
+          if (batch?.kind === 'fill-outline')
+            derivations.outline++;
+          else if (batch && batch.layerId in derivations)
+            derivations[batch.layerId]++;
+          return derive.call(this, command, ...args);
+        };
+        const { heading, pitch, roll } = viewer.camera;
+        const before = window.renderValidation.renderedFrames;
+        try {
+          for (const offset of [0.0001, -0.0001, 0.0001, 0]) {
+            await new Promise<void>((resolve) => {
+              const stop = viewer.scene.postRender.addEventListener(() => {
+                stop();
+                resolve();
+              });
+              viewer.camera.setView({ orientation: { heading: heading + offset, pitch, roll } });
+            });
+          }
+          const outlines = viewer.scene._frameState.commandList.filter(command =>
+            (window.renderValidation.drawBatch(command) ?? window.renderValidation.drawBatch(command.owner))?.kind === 'fill-outline').length;
+          return { derivations, frames: window.renderValidation.renderedFrames - before, commands: window.lineFamilyCommands.roads ?? 0, outlines, stable: window.lineFamilyBuffersStable() };
+        }
+        finally {
+          native.DerivedCommand.createLogDepthCommand = derive;
+        }
+      });
+      await writeFile(testInfo.outputPath('line-family-derived-cache.json'), JSON.stringify(cache, null, 2));
+      expect(cache.frames).toBeGreaterThanOrEqual(4);
+      expect(cache.commands).toBeGreaterThan(0);
+      expect(cache.outlines).toBeGreaterThan(0);
+      expect(cache.stable).toBe(true);
+      expect(cache.derivations).toEqual({ roads: 0, casing: 0, outline: 0 });
+    }
     const beforeRequests = tileRequests;
     const next = structuredClone(style);
     const roadPaint = (next.layers.find(layer => layer.id === 'roads') as LineLayerSpecification).paint!;
@@ -262,12 +315,288 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       (invisible.layers.find(layer => layer.id === 'roads') as LineLayerSpecification).paint![property] = 0;
       await page.evaluate(invisible => window.renderValidation.tileset.setStyle(invisible), invisible);
       await expect.poll(() => page.evaluate(() => window.lineFamilyPixels([255, 0, 0]).count)).toBe(0);
+      await expect.poll(() => page.evaluate(() => window.lineFamilyCommands.roads ?? 0), { message: `${property} zero retained Native roads commands` }).toBe(0);
+      assert.ok(await page.evaluate(() => (window.lineFamilyCommands.casing ?? 0) > 0), `${property} zero removed the visible casing commands`);
       assert.ok(await page.evaluate(() => window.lineFamilyBuffersStable()), `${property} zero replaced line buffers or position textures`);
       await page.evaluate(next => window.renderValidation.tileset.setStyle(next), next);
       await expect.poll(() => page.evaluate(() => window.lineFamilyPixels([255, 0, 0]).count)).toBeGreaterThan(initial.white.count);
+      assert.ok(await page.evaluate(() => (window.lineFamilyCommands.roads ?? 0) > 0), `${property} restoration did not submit Native roads commands`);
+      assert.equal((await page.evaluate(() => window.lineFamilyPixels([255, 0, 0]))).picked?.layerId, 'roads', `${property} restoration lost roads picking`);
       assert.ok(await page.evaluate(() => window.lineFamilyBuffersStable()), `${property} restoration replaced line buffers or position textures`);
     }
     assert.equal(tileRequests, beforeRequests, 'line restoration refetched source tiles');
+    if (mode === '3d') {
+      const invisible = structuredClone(next);
+      for (const layer of invisible.layers) {
+        if (layer.type === 'line')
+          layer.paint!['line-opacity'] = 0;
+      }
+      await page.evaluate(invisible => window.renderValidation.tileset.setStyle(invisible), invisible);
+      await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+      await expect.poll(() => page.evaluate(() => (window.lineFamilyCommands.roads ?? 0) + (window.lineFamilyCommands.casing ?? 0))).toBe(0);
+      const hiddenUpdates = await page.evaluate(async (visible) => {
+        const { viewer, tileset } = window.renderValidation;
+        const owners = new Set(window.lineFamilyCurrentResources().filter(entry => (entry.primitive && entry._layers?.length === 2)
+          || entry[Symbol.for('cesium-vector-tileset.draw-batch')]?.kind === 'dash').map(entry => (entry.primitive ?? entry) as NativePrimitive));
+        let updates = 0;
+        const native = window.renderValidation.atlas!.cesium.Primitive.prototype as unknown as { update: (this: NativePrimitive, frame: unknown) => void };
+        const update = native.update;
+        native.update = function (frame) {
+          if (owners.has(this))
+            updates++;
+          update.call(this, frame);
+        };
+        const { heading, pitch, roll } = viewer.camera;
+        const before = window.renderValidation.renderedFrames;
+        try {
+          for (const offset of [0.0001, -0.0001, 0.0001, 0]) {
+            await new Promise<void>((resolve) => {
+              const stop = viewer.scene.postRender.addEventListener(() => {
+                stop();
+                resolve();
+              });
+              viewer.camera.setView({ orientation: { heading: heading + offset, pitch, roll } });
+            });
+          }
+          const hidden = {
+            owners: owners.size,
+            updates,
+            frames: window.renderValidation.renderedFrames - before,
+            stable: window.lineFamilyBuffersStable(),
+            pixels: window.lineFamilyPixels([255, 0, 0]).count + window.lineFamilyPixels([0, 204, 0]).count,
+          };
+          await new Promise<void>((resolve) => {
+            const stop = viewer.scene.postRender.addEventListener(() => {
+              if (updates > 0) {
+                stop();
+                resolve();
+              }
+            });
+            tileset.setStyle(visible);
+          });
+          return { ...hidden, restoredUpdates: updates };
+        }
+        finally {
+          native.update = update;
+        }
+      }, next);
+      assert.ok(hiddenUpdates.owners > 0, 'all-zero validation observed no Native owners');
+      assert.ok(hiddenUpdates.frames >= 4, 'all-zero validation did not render camera motion');
+      assert.equal(hiddenUpdates.updates, 0, 'ready all-zero families still updated their Native owners');
+      assert.ok(hiddenUpdates.restoredUpdates > 0, 'Native delegate observer did not see restored owners update');
+      assert.ok(hiddenUpdates.stable, 'camera motion replaced hidden family resources');
+      assert.equal(hiddenUpdates.pixels, 0, 'hidden owners retained visible pixels');
+      await expect.poll(() => page.evaluate(() => window.lineFamilyPixels([255, 0, 0]).count)).toBeGreaterThan(initial.white.count);
+      assert.equal((await page.evaluate(() => window.lineFamilyPixels([255, 0, 0]))).picked?.layerId, 'roads');
+      assert.equal((await page.evaluate(() => window.lineFamilyPixels([0, 204, 0]))).picked?.layerId, 'casing');
+      assert.ok(await page.evaluate(() => window.lineFamilyBuffersStable()), 'all-zero restoration replaced Native resources');
+      assert.equal(tileRequests, beforeRequests, 'all-zero restoration refetched source tiles');
+    }
+    if (mode === '3d') {
+      const cameraPaint = structuredClone(next);
+      const paint = (cameraPaint.layers.find(layer => layer.id === 'roads') as LineLayerSpecification).paint!;
+      // These literal linear stops make width = zoom and alpha = zoom / 24.
+      paint['line-width'] = ['interpolate', ['linear'], ['zoom'], 0, 0, 24, 24];
+      paint['line-opacity'] = ['interpolate', ['linear'], ['zoom'], 0, 0, 24, 1];
+      await page.evaluate(cameraPaint => window.renderValidation.tileset.setStyle(cameraPaint), cameraPaint);
+      await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+      const samples = await page.evaluate(async () => {
+        const { tileset, viewer } = window.renderValidation;
+        const renderer = tileset._vectorRenderer;
+        const updatePaint = renderer.updatePaint;
+        const initialHeight = viewer.camera.positionCartographic.height;
+        const initialZoom = window.renderValidation.zoom;
+        const applied = [...renderer._records.values()].map(record => ({ record, zoom: record.paint.lastZoom }));
+        // Only admission to heavy paint changes; StyleEvaluation and all
+        // Native uploads, commands and uniform getters still run normally.
+        renderer.updatePaint = frame => updatePaint.call(renderer, { ...frame, budget: { exhausted: true } });
+        const frames: Array<{ zoom: number; widths: number[]; alphas: number[]; stable: boolean; heavyPaintUntouched: boolean }> = [];
+        try {
+          for (let index = 0; index < 4; index++) {
+            viewer.camera.zoomIn(initialHeight * 0.001);
+            await new Promise<void>((resolve) => {
+              const stop = viewer.scene.postRender.addEventListener(() => {
+                stop();
+                const key = Symbol.for('cesium-vector-tileset.draw-batch');
+                const commands = viewer.scene._frameState.commandList.filter((command) => {
+                  const batch = (command as unknown as Record<symbol, DrawBatch | undefined>)[key]
+                    ?? (command.owner as Record<symbol, DrawBatch | undefined> | undefined)?.[key];
+                  return batch?.layerId === 'roads';
+                });
+                frames.push({
+                  zoom: window.renderValidation.zoom,
+                  widths: commands.map(command => command.uniformMap!.u_line_width() as number),
+                  alphas: commands.map(command => (command.uniformMap!.u_line_color() as Cesium.Color).alpha),
+                  stable: window.lineFamilyBuffersStable(),
+                  heavyPaintUntouched: applied.every(({ record, zoom }) => record.paint.lastZoom === zoom),
+                });
+                resolve();
+              });
+              viewer.scene.requestRender();
+            });
+          }
+        }
+        finally {
+          renderer.updatePaint = updatePaint;
+          viewer.camera.zoomOut(initialHeight - viewer.camera.positionCartographic.height);
+          viewer.scene.requestRender();
+        }
+        return { initialZoom, frames };
+      });
+      assert.ok(samples.frames.every(frame => frame.zoom > samples.initialZoom), 'camera did not change the evaluated zoom');
+      for (const frame of samples.frames) {
+        assert.ok(frame.widths.length > 0 && frame.alphas.length > 0, 'Native roads commands disappeared');
+        assert.ok(frame.widths.every(width => Math.abs(width - frame.zoom) < 1e-6), 'exhausted budget delayed Native camera width uniforms');
+        assert.ok(frame.alphas.every(alpha => Math.abs(alpha - frame.zoom / 24) < 1e-6), 'exhausted budget delayed Native camera opacity uniforms');
+        assert.ok(frame.stable, 'camera uniforms replaced uploaded buffers or position textures');
+        assert.ok(frame.heavyPaintUntouched, 'live uniforms marked budgeted record paint complete');
+      }
+      assert.equal(tileRequests, beforeRequests, 'camera uniforms refetched source tiles');
+      await page.evaluate(next => window.renderValidation.tileset.setStyle(next), next);
+      await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+      const heldCamera = structuredClone(next);
+      const cutoff = await page.evaluate(() => window.renderValidation.zoom + 0.0001);
+      const heldPaint = (heldCamera.layers.find(layer => layer.id === 'roads') as LineLayerSpecification).paint!;
+      heldPaint['line-width'] = ['step', ['zoom'], 10, cutoff, 0];
+      heldPaint['line-opacity'] = ['step', ['zoom'], 1, cutoff, 0];
+      await page.evaluate(heldCamera => window.renderValidation.tileset.setStyle(heldCamera), heldCamera);
+      await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+      await expect.poll(() => page.evaluate(() => {
+        const key = Symbol.for('cesium-vector-tileset.draw-batch');
+        const commands = window.renderValidation.viewer.scene._frameState.commandList.filter((command) => {
+          const batch = (command as unknown as Record<symbol, DrawBatch | undefined>)[key]
+            ?? (command.owner as Record<symbol, DrawBatch | undefined> | undefined)?.[key];
+          return batch?.layerId === 'roads';
+        });
+        return commands.length > 0 && commands.every(command => command.uniformMap!.u_line_width() === 10
+          && (command.uniformMap!.u_line_color() as Cesium.Color).alpha === 1)
+        && window.lineFamilyPixels([255, 0, 0]).picked?.layerId === 'roads';
+      }), { message: 'old camera expression did not commit real Native paint before freezing' }).toBe(true);
+      const heldSuccessor = structuredClone(heldCamera);
+      const successorRoads = heldSuccessor.layers.find(layer => layer.id === 'roads') as LineLayerSpecification;
+      successorRoads.layout!['line-join'] = 'bevel';
+      successorRoads.paint!['line-width'] = 18;
+      successorRoads.paint!['line-opacity'] = 1;
+      successorRoads.paint!['line-color'] = '#ff00ff';
+      const heldResult = await page.evaluate(async ({ heldSuccessor, cutoff }) => {
+        const { tileset, viewer } = window.renderValidation;
+        const renderer = tileset._vectorRenderer;
+        const queue = tileset._tilePublishQueue;
+        const drain = queue.drain;
+        const sceneCollections = tileset._sceneCollections;
+        const pump = sceneCollections.pumpFirstUpdates;
+        const initialHeight = viewer.camera.positionCartographic.height;
+        const original = new Map(renderer._records);
+        const oldResources = window.lineFamilyCurrentResources();
+        const oldOwners = window.lineFamilyPrimitiveOwners(oldResources);
+        const arrays = new Map(oldOwners.map(owner => [owner, [...owner._va]]));
+        const textures = new Map(oldOwners.map(owner => [owner, owner.positionTexture]));
+        const atlas = renderer.dashMaterial.material.uniforms.u_dashAtlas;
+        const usesDash = oldResources.some(resource => resource[Symbol.for('cesium-vector-tileset.draw-batch')]?.kind === 'dash');
+        const stable = () => oldResources.every(resource => !resource.isDestroyed())
+          && oldOwners.every(owner => !owner.isDestroyed()
+            && owner.positionTexture === textures.get(owner)
+            && owner._va.length === arrays.get(owner)!.length
+            && owner._va.every((array, index) => array === arrays.get(owner)![index]))
+          && (!usesDash || renderer.dashMaterial.material.uniforms.u_dashAtlas === atlas);
+        const frame = () => new Promise<void>((resolve) => {
+          const stop = viewer.scene.postRender.addEventListener(() => {
+            stop();
+            resolve();
+          });
+          viewer.scene.requestRender();
+        });
+        const commands = () => viewer.scene._frameState.commandList.filter((command) => {
+          const key = Symbol.for('cesium-vector-tileset.draw-batch');
+          const batch = (command as unknown as Record<symbol, DrawBatch | undefined>)[key]
+            ?? (command.owner as Record<symbol, DrawBatch | undefined> | undefined)?.[key];
+          return batch?.layerId === 'roads';
+        });
+        const uniforms = () => commands().map(command => ({ width: command.uniformMap!.u_line_width() as number, alpha: (command.uniformMap!.u_line_color() as Cesium.Color).alpha }));
+        const heldMaps = commands().map(command => command.uniformMap!);
+        const hidden = async (stage: string) => {
+          for (let index = 0; index < 3; index++) {
+            viewer.camera.zoomIn(initialHeight * 0.001);
+            await frame();
+            const paints = heldMaps.map(map => ({ width: map.u_line_width() as number, alpha: (map.u_line_color() as Cesium.Color).alpha }));
+            if (window.renderValidation.zoom <= cutoff || paints.length === 0)
+              throw new Error(`${stage}: did not cross the camera cutoff with Native roads commands`);
+            if (!paints.every(paint => paint.width === 0 && paint.alpha === 0))
+              throw new Error(`${stage}: held Native camera paint did not become zero: ${JSON.stringify(paints)}`);
+            if (commands().length !== 0)
+              throw new Error(`${stage}: zero camera paint retained Native color or pick commands`);
+            const redPixels = window.lineFamilyPixels([255, 0, 0]).count;
+            if (redPixels > 0)
+              throw new Error(`${stage}: zero camera paint retained ${redPixels} red pixels`);
+            if (!stable())
+              throw new Error(`${stage}: camera paint replaced held Native storage`);
+          }
+        };
+        let publishedGeneration = false;
+        let deletedRecords = 0;
+        try {
+          // Only successor publication admission is held; real style evaluation,
+          // Native commands, GPU buffers, picking and camera projection continue.
+          queue.drain = () => 0;
+          sceneCollections.pumpFirstUpdates = (state, budget, measure, minimumProgress) => pump.call(sceneCollections, state, publishedGeneration ? { exhausted: true } : budget, measure, publishedGeneration ? false : minimumProgress);
+          tileset.setStyle(heldSuccessor);
+          await frame();
+          if (!original.size || ![...original.values()].every(record => record.paint.frozen))
+            throw new Error('structural style replacement did not hold the committed generation');
+          if (window.lineFamilyPixels([255, 0, 0]).picked?.layerId !== 'roads')
+            throw new Error(`held generation lost Native roads picking before its successor: ${JSON.stringify({ zoom: window.renderValidation.zoom, cutoff, paints: uniforms(), pixels: window.lineFamilyPixels([255, 0, 0]) })}`);
+          await hidden('before successor publication');
+          viewer.camera.zoomOut(initialHeight - viewer.camera.positionCartographic.height);
+          await frame();
+          if (!uniforms().every(paint => paint.width === 10 && paint.alpha === 1)
+            || window.lineFamilyPixels([255, 0, 0]).picked?.layerId !== 'roads') {
+            throw new Error('held generation did not restore its old camera curve and picking');
+          }
+          // Let actual publication replace the renderer record, then stop
+          // admission while SceneCollections still draws replacement.old.
+          queue.drain = (budget, _maxCommits, priority, minimumProgress) => {
+            if (publishedGeneration)
+              return 0;
+            return drain.call(queue, {
+              get exhausted() {
+                deletedRecords = [...original].filter(([tileId, record]) => {
+                  const current = renderer._records.get(tileId);
+                  return current && current !== record;
+                }).length;
+                publishedGeneration = deletedRecords > 0;
+                return publishedGeneration || budget.exhausted;
+              },
+              takeMinimumProgress: budget.takeMinimumProgress?.bind(budget),
+            }, 1, priority, minimumProgress);
+          };
+          for (let index = 0; index < 120; index++) {
+            await frame();
+            if (publishedGeneration)
+              break;
+          }
+          if (!publishedGeneration || ![...tileset._sceneCollections._replacements].some(replacement => replacement.kind === 'vector' && (replacement.awaitingDetail || replacement.waiting.size > 0) && replacement.old.size > 0)) {
+            throw new Error(`real publication did not leave a drawable held generation: ${JSON.stringify({
+              publishedGeneration,
+              deletedRecords,
+              replacements: [...tileset._sceneCollections._replacements].map(replacement => ({ tileId: replacement.tileId, kind: replacement.kind, detail: replacement.awaitingDetail, old: replacement.old.size, next: replacement.next.size, waiting: replacement.waiting.size })),
+              records: [...renderer._records].map(([tileId, record]) => ({ tileId, complete: record.complete, frozen: record.paint.frozen })),
+            })}`);
+          }
+          await hidden('after successor publication removed the old record');
+          return { deletedRecords, heldOwners: oldOwners.length };
+        }
+        finally {
+          queue.drain = drain;
+          sceneCollections.pumpFirstUpdates = pump;
+          viewer.camera.zoomOut(initialHeight - viewer.camera.positionCartographic.height);
+          viewer.scene.requestRender();
+        }
+      }, { heldSuccessor, cutoff });
+      assert.ok(heldResult.deletedRecords > 0 && heldResult.heldOwners > 0, 'held Native regression did not cross the renderer/scene ownership seam');
+      await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+      await page.evaluate(next => window.renderValidation.tileset.setStyle(next), next);
+      await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+    }
     if (mode === '2d' && kind === 'solid') {
       // Leave gaps between the dense road rows so the same framebuffer can
       // verify buildings as well as roads throughout the mode handoff.
@@ -372,8 +701,8 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
         assert.equal(samples.roads.picked?.layerId, 'roads');
         assert.equal(samples.casing.picked?.layerId, 'casing');
         assert.equal(samples.building?.layerId, 'buildings');
-        assert.ok(samples.buildingArrays.length > 0 && samples.buildingArrays.every(array => array.layout === 'native'
-          && ['position3DHigh', 'position3DLow', 'position2DHigh', 'position2DLow'].every(name => array.attributes.includes(name))), 'building bypassed Native cross-mode geometry');
+        assert.ok(samples.buildingArrays.length > 0 && samples.buildingArrays.every(array => array.layout === 'extrusion'
+          && ['a_extrusionHigh3D', 'a_extrusionLow3D', 'a_extrusionHigh2D', 'a_extrusionLow2D'].every(name => array.attributes.includes(name))), 'building lost packed cross-mode positions');
         assert.ok(samples.buildingsReleased, 'mode replacement leaked the old building owner or VA');
         assert.ok(samples.released && samples.fps);
       }
@@ -394,16 +723,21 @@ for (const [mode, kind] of ['2d', 'cv', '3d'].flatMap(mode => ['solid', 'dash'].
       const building = await page.evaluate(() => window.lineFamilyBuilding());
       assert.equal(building?.layerId, 'buildings', 'translucent building lost its physical pick');
       await page.evaluate(() => window.renderValidation.viewer.scene.requestRender());
-      await expect.poll(() => page.evaluate(({ translucentPass, overlayPass }) => {
+      await expect.poll(() => page.evaluate(({ opaquePass, overlayPass }) => {
         const { viewer } = window.renderValidation;
         const commands = viewer.scene._frameState.commandList.filter(command =>
           (command.owner as Record<symbol, DrawBatch | undefined>)?.[Symbol.for('cesium-vector-tileset.draw-batch')]?.kind === 'extrusion');
         const labels = viewer.scene._frameState.commandList.filter(command =>
           (command.owner as Record<symbol, DrawBatch | undefined>)?.[Symbol.for('cesium-vector-tileset.draw-batch')]?.layerId === 'labels');
         return !viewer.scene._frameState.passes.pick && commands.length > 0
-          && commands.every(command => (command.owner as { appearance: { isTranslucent: () => boolean } }).appearance.isTranslucent() && command.pass === translucentPass)
+          && commands.every((command) => {
+            const layer = command as unknown as { pass: number; _commands?: Array<{ owner: { appearance: { isTranslucent: () => boolean } }; renderState: { depthMask: boolean; blending: { enabled: boolean } } }> };
+            return layer.pass === opaquePass && layer._commands && layer._commands.length > 0
+              && layer._commands.every(source => source.owner.appearance.isTranslucent()
+                && source.renderState.depthMask && !source.renderState.blending.enabled);
+          })
           && labels.length > 0 && labels.every(command => command.pass === overlayPass);
-      }, { translucentPass: Pass.TRANSLUCENT, overlayPass: Pass.OVERLAY })).toBe(true);
+      }, { opaquePass: Pass.OPAQUE, overlayPass: Pass.OVERLAY })).toBe(true);
     }
     assert.deepEqual(painted.errors, []);
     assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);

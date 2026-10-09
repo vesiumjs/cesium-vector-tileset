@@ -104,8 +104,19 @@ type TestTileRenderRecord = Omit<VectorTileRecord, 'standard'> & {
 type FirstUpdateQueue = SceneCollections['_firstUpdates'][number];
 type TestFirstUpdateQueue = FirstUpdateQueue extends Map<infer Collection, infer Update>
   ? Map<Collection & { length?: number; ready?: boolean }, Update> : never;
+type PlacementScope = SymbolTileRenderer['_targetPlacement'];
+type PlacementJob = NonNullable<PlacementScope['job']>;
+type TestPlacementScope = Omit<Public<PlacementScope>, 'job'> & {
+  job?: Omit<PlacementJob, 'pass'> & { pass: Public<SymbolPlacementPass> & { _batchIndex: SymbolPlacementPass['_batchIndex'] } };
+  _dirty: PlacementScope['_dirty'];
+  _urgent: PlacementScope['_urgent'];
+  _revision: PlacementScope['_revision'];
+  _view: PlacementScope['_view'];
+  _lastCommitMs: PlacementScope['_lastCommitMs'];
+};
 type RasterEntry = RasterTileRenderer['_tiles'] extends Map<string, Array<infer Entry>> ? Entry : never;
 export type TestTileset = Public<CesiumVectorTileset> & {
+  _lastSubmittedCommands: CesiumVectorTileset['_lastSubmittedCommands'];
   _style: CesiumVectorTileset['_style'];
   _styleEvaluation: CesiumVectorTileset['_styleEvaluation'];
   _sceneCovering: Public<SceneTileCovering> & { _cameraPose: SceneTileCovering['_cameraPose']; _observedCamera: SceneTileCovering['_observedCamera']; _globeCoverings: SceneTileCovering['_globeCoverings'] };
@@ -118,21 +129,32 @@ export type TestTileset = Public<CesiumVectorTileset> & {
   _patternRenderer: Public<PatternTileRenderer> & { _tiles: PatternTileRenderer['_tiles'] };
   _symbolRenderer: Public<SymbolTileRenderer> & {
     _tiles: SymbolTileRenderer['_tiles'];
+    _visibleEntries: SymbolTileRenderer['_visibleEntries'];
+    _held: SymbolTileRenderer['_held'];
+    _fading: SymbolTileRenderer['_fading'];
+    _hiddenPlacementTiles: SymbolTileRenderer['_hiddenPlacementTiles'];
+    _prospectiveVisibleTiles: SymbolTileRenderer['_prospectiveVisibleTiles'];
     _excludedPlacementTiles: SymbolTileRenderer['_excludedPlacementTiles'];
     _retired: SymbolTileRenderer['_retired'];
-    _placementDirty: SymbolTileRenderer['_placementDirty'];
-    _placementUrgent: SymbolTileRenderer['_placementUrgent'];
-    _orderedBatches: SymbolTileRenderer['_orderedBatches'];
+    _targetPlacement: TestPlacementScope;
+    _visiblePlacement: TestPlacementScope;
+    _handoffPlacement: TestPlacementScope;
     _pendingOpacityHalves: SymbolTileRenderer['_pendingOpacityHalves'];
     _pendingDynamicHalves: SymbolTileRenderer['_pendingDynamicHalves'];
-    _placement: Public<SymbolPlacementPass> & { _batchIndex: SymbolPlacementPass['_batchIndex'] };
+    _lineView: SymbolTileRenderer['_lineView'];
+    _visibleInputsDirty: SymbolTileRenderer['_visibleInputsDirty'];
+    _fullReplaceNeeded: SymbolTileRenderer['_fullReplaceNeeded'];
+    _pendingImageEntries: SymbolTileRenderer['_pendingImageEntries'];
   };
   _tilePublishQueue: Public<TilePublishQueue> & { _jobs: TilePublishQueue['_jobs']; _patternRefreshes: TilePublishQueue['_patternRefreshes'] };
-  _sceneCollections: Public<SceneCollections> & { _firstUpdates: TestFirstUpdateQueue[] };
+  _sceneCollections: Public<SceneCollections> & { _root: SceneCollections['_root']; _firstUpdates: TestFirstUpdateQueue[]; _replacements: SceneCollections['_replacements'] };
   _sourceRenderSync: Public<SourceRenderSync>;
   _tileResidency: Public<TileResidency> & {
     _sources: TileResidency['_sources'];
     _tiles: TileResidency['_tiles'];
+    _visibleSymbolTiles: TileResidency['_visibleSymbolTiles'];
+    _visibility: TileResidency['_visibility'];
+    _pendingSymbolRetirements: TileResidency['_pendingSymbolRetirements'];
   };
   _tileWorkFrame: CesiumVectorTileset['_tileWorkFrame'];
 };
