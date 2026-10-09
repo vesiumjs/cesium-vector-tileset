@@ -62,7 +62,7 @@ function mercatorScale(lat: number): number {
  *
  * For example, `MercatorCoordinate(0, 0, 0)` is the north-west corner of the mercator world and
  * `MercatorCoordinate(1, 1, 0)` is the south-east corner. If you are familiar with
- * [vector tiles](https://github.com/mapbox/vector-tile-spec) it may be helpful to think
+ * vector tiles, it may be helpful to think
  * of the coordinate space as the `0/0/0` tile with an extent of `1`.
  *
  * The `z` dimension of `MercatorCoordinate` is conformal. A cube in the mercator coordinate space would be rendered as a cube.

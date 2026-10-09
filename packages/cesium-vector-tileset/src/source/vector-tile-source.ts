@@ -32,7 +32,7 @@ export interface LoadTileResult {
 }
 
 /**
- * A source containing vector tiles in [Maplibre Vector Tile format](https://maplibre.org/maplibre-tile-spec/) or [Mapbox Vector Tile format](https://docs.mapbox.com/vector-tiles/reference/).
+ * A source containing MVT or MLT vector tiles.
  * (See the [Style Specification](https://maplibre.org/maplibre-style-spec/) for detailed documentation of options.)
  *
  * @group Sources

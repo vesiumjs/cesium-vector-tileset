@@ -303,27 +303,15 @@ const EPSG3857_HALF_CIRCUMFERENCE = Math.PI * EPSG3857_RADIUS;
 /**
  * Builds the `{bbox-epsg-3857}` token used in WMS tile URLs: the tile's bounding
  * box in EPSG:3857 meters as a `minX,minY,maxX,maxY` string.
- *
- * Adapted from MapLibre GL JS's tile URL bounding box calculation.
- * The inherited ISC notice is included in THIRD_PARTY_NOTICES.txt.
+ * XYZ tile edges divide the projected world uniformly, with Y increasing south.
  */
 function getTileBBox(x: number, y: number, z: number): string {
-  // for Google/OSM tile scheme we need to alter the y
-  y = 2 ** z - y - 1;
-
-  const min = getEpsg3857Coords(x * 256, y * 256, z);
-  const max = getEpsg3857Coords((x + 1) * 256, (y + 1) * 256, z);
-
-  return `${min[0]},${min[1]},${max[0]},${max[1]}`;
-}
-
-/** Projects tile pixel coordinates to EPSG:3857 meters. */
-function getEpsg3857Coords(x: number, y: number, z: number): [number, number] {
-  const resolution = (2 * EPSG3857_HALF_CIRCUMFERENCE / 256) / 2 ** z;
-  const mercX = x * resolution - EPSG3857_HALF_CIRCUMFERENCE;
-  const mercY = y * resolution - EPSG3857_HALF_CIRCUMFERENCE;
-
-  return [mercX, mercY];
+  const span = 2 * EPSG3857_HALF_CIRCUMFERENCE / 2 ** z;
+  const west = x * span - EPSG3857_HALF_CIRCUMFERENCE;
+  const east = (x + 1) * span - EPSG3857_HALF_CIRCUMFERENCE;
+  const north = EPSG3857_HALF_CIRCUMFERENCE - y * span;
+  const south = EPSG3857_HALF_CIRCUMFERENCE - (y + 1) * span;
+  return `${west},${south},${east},${north}`;
 }
 
 function getQuadkey(z: number, x: number, y: number): string {

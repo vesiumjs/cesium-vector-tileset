@@ -1,6 +1,6 @@
 # Cesium 矢量瓦片领域术语
 
-本项目参考 MapLibre GL JS 的代码与设计，在 Cesium 场景中加载 Mapbox Vector Tiles（MVT），并按 MapLibre 的地图样式语义绘制它们。本表统一瓦片选择、发布与渲染资源的称谓。
+本项目参考 MapLibre GL JS 的代码与设计，在 Cesium 场景中加载 MVT 与 MLT 矢量瓦片，并按 MapLibre 的地图样式语义绘制它们。本表统一瓦片选择、发布与渲染资源的称谓。
 
 ## 瓦片与内容
 

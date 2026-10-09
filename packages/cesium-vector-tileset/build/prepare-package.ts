@@ -25,8 +25,6 @@ const licenses = [
   ['pbf', '../node_modules/pbf/LICENSE'],
   ['potpack', '../node_modules/potpack/LICENSE'],
   ['tinyqueue', '../node_modules/tinyqueue/LICENSE'],
-  // Preserve the upstream ISC notice inherited through MapLibre's tile URL helper.
-  ['MapLibre GL JS tile URL bounding box calculation (upstream ISC notice)', './whoots-license.txt'],
 ];
 
 const notices = licenses.map(([name, file]) => `${name}\n\n${readFileSync(new URL(file, import.meta.url), 'utf8').trim()}`);
