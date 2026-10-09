@@ -275,8 +275,11 @@ export class Style extends Evented<StyleEventType> {
   renderRevision = 0;
   /** Revision for style mutations, excluding a camera-only zoom change. */
   styleRevision = 0;
+
   private readonly _sourceParseStates = new Map<string, PendingSourceParseState>();
+
   private readonly _pendingSourceParses = new Map<string, PendingSourceParseState>();
+
   private readonly _awaitingSourceParses = new Map<string, PendingSourceParseState>();
 
   /** Identity changes immediately when worker bucket construction must change. */
@@ -289,6 +292,9 @@ export class Style extends Evented<StyleEventType> {
     return state;
   }
 
+  /**
+   * @internal
+   */
   private _invalidateSourceParse(source: string): void {
     // Superseded waiters must wake so their source lease can seek the new schema.
     this._sourceParseStates.get(source)?.resolve();
@@ -305,6 +311,9 @@ export class Style extends Evented<StyleEventType> {
     this._awaitingSourceParses.set(source, state);
   }
 
+  /**
+   * @internal
+   */
   private _hasSourcePaintTransition(source: string): boolean {
     for (const id of this._order) {
       const layer = this._layers[id];
@@ -325,6 +334,9 @@ export class Style extends Evented<StyleEventType> {
     return false;
   }
 
+  /**
+   * @internal
+   */
   private _settleSourceParses(): void {
     for (const [source, state] of this._awaitingSourceParses) {
       if (state.workerReady && !this._hasSourcePaintTransition(source)) {
@@ -389,6 +401,9 @@ export class Style extends Evented<StyleEventType> {
     });
   }
 
+  /**
+   * @internal
+   */
   private _getInitialValues() {
     return {
       _spritesImagesIds: {},
@@ -416,7 +431,10 @@ export class Style extends Evented<StyleEventType> {
     };
   }
 
-  _rtlPluginLoaded: () => void = () => {
+  /**
+   * @internal
+   */
+  private _rtlPluginLoaded: () => void = () => {
     for (const id in this.tilePyramids) {
       const sourceType = this.tilePyramids[id].getSource().type;
       if (sourceType === 'vector' || sourceType === 'geojson') {
@@ -472,7 +490,7 @@ export class Style extends Evented<StyleEventType> {
    * For example, if a layer filter uses global-state expression, this function will find the source id of that layer.
    * @internal
    */
-  _applyGlobalStateChanges(globalStateRefs: string[]): void {
+  private _applyGlobalStateChanges(globalStateRefs: string[]): void {
     if (globalStateRefs.length === 0) {
       return;
     }
@@ -564,7 +582,10 @@ export class Style extends Evented<StyleEventType> {
     this._load(empty, { validate: false });
   }
 
-  _load(json: StyleSpecification, options: StyleSwapOptions & StyleSetterOptions, previousStyle?: StyleSpecification): void {
+  /**
+   * @internal
+   */
+  private _load(json: StyleSpecification, options: StyleSwapOptions & StyleSetterOptions, previousStyle?: StyleSpecification): void {
     let nextState = options.transformStyle ? options.transformStyle(previousStyle, json) : json;
     if (options.validate && validateStyleAndEmit(this, nextState)) {
       return;
@@ -600,6 +621,9 @@ export class Style extends Evented<StyleEventType> {
     this.fire(new StyleLoadEvent());
   }
 
+  /**
+   * @internal
+   */
   private _createLayers() {
     const dereferencedLayers = derefLayers(this.stylesheet.layers);
 
@@ -621,7 +645,10 @@ export class Style extends Evented<StyleEventType> {
     }
   }
 
-  _loadSprite(sprite: SpriteSpecification, isUpdate: boolean = false, completion?: (err?: Error) => void): void {
+  /**
+   * @internal
+   */
+  private _loadSprite(sprite: SpriteSpecification, isUpdate: boolean = false, completion?: (err?: Error) => void): void {
     this._spriteRequest?.abort();
     this.images.setLoaded(false);
 
@@ -706,7 +733,10 @@ export class Style extends Evented<StyleEventType> {
     });
   }
 
-  _unloadSprite(): void {
+  /**
+   * @internal
+   */
+  private _unloadSprite(): void {
     this._spriteRequest?.abort();
     delete this._spriteRequest;
     for (const id of Object.values(this._spritesImagesIds).flat()) {
@@ -722,7 +752,10 @@ export class Style extends Evented<StyleEventType> {
     this.fire(new StyleDataEvent('data'));
   }
 
-  _validateLayer(layer: StyleLayer): void {
+  /**
+   * @internal
+   */
+  private _validateLayer(layer: StyleLayer): void {
     if (!layer.source) {
       return;
     }
@@ -767,6 +800,7 @@ export class Style extends Evented<StyleEventType> {
    * @param ids - an array of string IDs, for which serialized layers will be generated. If omitted, all serialized layers will be returned
    * @param returnClone - if true, return a clone of the layer object
    * @returns generated result
+   * @internal
    */
   private _serializeByIds(ids: string[], returnClone: boolean = false): LayerSpecification[] {
     const serializedLayersDictionary = this._serializedAllLayers();
@@ -790,6 +824,7 @@ export class Style extends Evented<StyleEventType> {
    * @hidden
    * Lazy initialization of this._serializedLayers dictionary and return it
    * @returns this._serializedLayers dictionary
+   * @internal
    */
   private _serializedAllLayers(): { [_: string]: LayerSpecification } {
     let serializedLayers = this._serializedLayers;
@@ -820,7 +855,10 @@ export class Style extends Evented<StyleEventType> {
     return renderTransitionFlags(this.light, this.tilePyramids, this._layers, this._order);
   }
 
-  _checkLoaded(): asserts this is this & { light: Light } {
+  /**
+   * @internal
+   */
+  private _checkLoaded(): asserts this is this & { light: Light } {
     if (!this._loaded) {
       throw new Error('Style is not done loading.');
     }
@@ -969,7 +1007,10 @@ export class Style extends Evented<StyleEventType> {
   /*
      * Apply any queued image changes.
      */
-  _updateTilesForChangedImages(): void {
+  /**
+   * @internal
+   */
+  private _updateTilesForChangedImages(): void {
     const changedImages = Object.keys(this._changedImages);
     if (changedImages.length) {
       for (const name in this.tilePyramids) {
@@ -982,8 +1023,9 @@ export class Style extends Evented<StyleEventType> {
   /**
    * Feed each raster layer's `raster-fade-duration` to its source's tile
    * pyramid so the crossfade driver knows how long transitions last.
+   * @internal
    */
-  _applyRasterFadeDurations(): void {
+  private _applyRasterFadeDurations(): void {
     for (const id of this._order) {
       const layer = this._layers[id];
       if (!isRasterStyleLayer(layer)) {
@@ -993,7 +1035,10 @@ export class Style extends Evented<StyleEventType> {
     }
   }
 
-  _updateTilesForChangedGlyphs(): void {
+  /**
+   * @internal
+   */
+  private _updateTilesForChangedGlyphs(): void {
     if (this._glyphsDidChange) {
       for (const name in this.tilePyramids) {
         this.tilePyramids[name].reloadTilesForDependencies(['glyphs'], ['']);
@@ -1002,14 +1047,20 @@ export class Style extends Evented<StyleEventType> {
     }
   }
 
-  _updateWorkerLayers(updatedIds: string[], removedIds: string[]): Promise<void> {
+  /**
+   * @internal
+   */
+  private _updateWorkerLayers(updatedIds: string[], removedIds: string[]): Promise<void> {
     return this.dispatcher.broadcast(MessageType.updateLayers, {
       layers: this._serializeByIds(updatedIds, false),
       removedIds,
     }).then(() => {});
   }
 
-  _resetUpdates(): void {
+  /**
+   * @internal
+   */
+  private _resetUpdates(): void {
     this._changed = false;
 
     this._updatedLayers = {};
@@ -1076,7 +1127,10 @@ export class Style extends Evented<StyleEventType> {
     return true;
   }
 
-  _getOperationsToPerform(diff: Array<DiffCommand<DiffOperations>>): { operations: Array<() => void>; unimplemented: string[] } {
+  /**
+   * @internal
+   */
+  private _getOperationsToPerform(diff: Array<DiffCommand<DiffOperations>>): { operations: Array<() => void>; unimplemented: string[] } {
     const operations: Array<() => void> = [];
     const unimplemented: string[] = [];
     for (const op of diff) {
@@ -1208,7 +1262,10 @@ export class Style extends Evented<StyleEventType> {
     this._afterImageUpdated(id);
   }
 
-  _afterImageUpdated(id: string): void {
+  /**
+   * @internal
+   */
+  private _afterImageUpdated(id: string): void {
     this._availableImages = this.images.listImages();
     this._changedImages[id] = true;
     this._imagesListDirty = true;
@@ -1461,7 +1518,7 @@ export class Style extends Evented<StyleEventType> {
    * Return the live internal order for render-path iteration.
    * @internal
    */
-  _getLayerOrder(): readonly string[] {
+  getLayerOrder(): readonly string[] {
     return this._order;
   }
 
@@ -1579,7 +1636,10 @@ export class Style extends Evented<StyleEventType> {
     this._updatePaintProperty(layer, name, value, options);
   }
 
-  _updatePaintProperty<K extends keyof AllPaintProperties>(layer: StyleLayer, name: K, value: AllPaintProperties[K], options: StyleSetterOptions = {}): void {
+  /**
+   * @internal
+   */
+  private _updatePaintProperty<K extends keyof AllPaintProperties>(layer: StyleLayer, name: K, value: AllPaintProperties[K], options: StyleSetterOptions = {}): void {
     const requiresRelayout = layer.setPaintProperty(name, value, options);
     if (requiresRelayout) {
       this._updateLayer(layer);
@@ -1703,7 +1763,10 @@ export class Style extends Evented<StyleEventType> {
     }, value => value !== undefined) as StyleSpecification;
   }
 
-  _updateLayer(layer: StyleLayer): void {
+  /**
+   * @internal
+   */
+  private _updateLayer(layer: StyleLayer): void {
     this._updatedLayers[layer.id] = true;
     if (layer.source && this.tilePyramids[layer.source].getSource().type !== 'raster') {
       this._invalidateSourceParse(layer.source);
@@ -1752,7 +1815,10 @@ export class Style extends Evented<StyleEventType> {
     this.light.updateTransitions(parameters);
   }
 
-  _validate(validate: Validator, key: string, value: any, props: any, options: StyleSetterOptions = {}): boolean {
+  /**
+   * @internal
+   */
+  private _validate(validate: Validator, key: string, value: any, props: any, options: StyleSetterOptions = {}): boolean {
     return validateAndEmit(this, validate, {
       key,
       style: this.serialize(),
@@ -1761,11 +1827,17 @@ export class Style extends Evented<StyleEventType> {
     }, options);
   }
 
-  _clearSource(id: string): void {
+  /**
+   * @internal
+   */
+  private _clearSource(id: string): void {
     this.tilePyramids[id].clearTiles();
   }
 
-  _reloadSource(id: string): void {
+  /**
+   * @internal
+   */
+  private _reloadSource(id: string): void {
     this.tilePyramids[id].resume();
     this.tilePyramids[id].reload();
   }

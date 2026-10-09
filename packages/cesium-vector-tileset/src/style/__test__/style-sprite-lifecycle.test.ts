@@ -67,7 +67,7 @@ function completeSprite(pending: SpriteRequest[], id: string, rgba: number[]): v
 async function createTileset() {
   const tileset = new CesiumVectorTileset({ style: emptyStyle });
   await tileset.whenReady();
-  return { tileset, style: (tileset as unknown as { _style: Style })._style };
+  return { tileset, style: (tileset as unknown as { _renderer: { style: Style } })._renderer.style };
 }
 
 describe('sprite request ownership', () => {

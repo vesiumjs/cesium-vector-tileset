@@ -95,7 +95,10 @@ export class SymbolStyleLayer extends StyleLayer<
     return value;
   }
 
-  _setPaintOverrides(): void {
+  /**
+   * @internal
+   */
+  private _setPaintOverrides(): void {
     for (const overridable of properties.paint.overridableProperties) {
       if (!SymbolStyleLayer.hasPaintOverride(this.layout, overridable)) {
         continue;
@@ -114,7 +117,10 @@ export class SymbolStyleLayer extends StyleLayer<
     }
   }
 
-  _handleOverridablePaintPropertyUpdate<T, R>(name: string, oldValue: PropertyValue<T, R>, newValue: PropertyValue<T, R>): boolean {
+  /**
+   * @internal
+   */
+  handleOverridablePaintPropertyUpdate<T, R>(name: string, oldValue: PropertyValue<T, R>, newValue: PropertyValue<T, R>): boolean {
     if (!this.layout || oldValue.isDataDriven() || newValue.isDataDriven()) {
       return false;
     }

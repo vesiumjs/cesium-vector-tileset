@@ -107,7 +107,10 @@ export class StyleImages extends Evented {
     }
   }
 
-  _validate(id: string, image: StyleImage): boolean {
+  /**
+   * @internal
+   */
+  private _validate(id: string, image: StyleImage): boolean {
     let valid = true;
     const data = image.data || image.spriteData;
     if (!this._validateStretch(image.stretchX, data?.width)) {
@@ -125,7 +128,10 @@ export class StyleImages extends Evented {
     return valid;
   }
 
-  _validateStretch(stretch?: Array<[number, number]>, size?: number): boolean {
+  /**
+   * @internal
+   */
+  private _validateStretch(stretch?: Array<[number, number]>, size?: number): boolean {
     if (!stretch)
       return true;
     if (size === undefined)
@@ -139,7 +145,10 @@ export class StyleImages extends Evented {
     return true;
   }
 
-  _validateContent(image: StyleImage, content?: [number, number, number, number]): boolean {
+  /**
+   * @internal
+   */
+  private _validateContent(image: StyleImage, content?: [number, number, number, number]): boolean {
     if (!content)
       return true;
     if (content.length !== 4)
@@ -212,7 +221,10 @@ export class StyleImages extends Evented {
     });
   }
 
-  async _getImagesForIds(ids: string[]): Promise<GetImagesResponse> {
+  /**
+   * @internal
+   */
+  private async _getImagesForIds(ids: string[]): Promise<GetImagesResponse> {
     const unresolvedIds = new Set(ids.filter(id => !this.getImage(id)));
     const resolver = this.missingImageResolver;
 

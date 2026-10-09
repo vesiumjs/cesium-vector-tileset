@@ -36,7 +36,7 @@ const ContextLimits = (cesium as unknown as CesiumRuntime).ContextLimits;
  */
 function borrowedTexture(texture: SharedTexture): SharedTexture {
   return Object.create(texture, {
-    destroy: { value: () => undefined },
+    destroy: { value: (): void => {} },
   }) as SharedTexture;
 }
 
@@ -118,7 +118,9 @@ export class SharedAtlasTextures {
   }
 
   private _records = new Map<string, SharedAtlasRecord>();
+
   private _dirty = new Set<SharedAtlasRecord>();
+
   private _bindings = new WeakMap<Material, Map<string, AtlasBinding>>();
 
   get size(): number {

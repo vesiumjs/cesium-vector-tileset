@@ -92,7 +92,9 @@ export class ImageAtlas {
   haveRenderCallbacks: string[];
   /** Monotonic version for runtime image patches applied to this atlas. */
   revision = 0;
-  /** StyleImages revision covered by the last patch pass. */
+  /**
+   * StyleImages revision covered by the last patch pass.
+   */
   private _imageUpdateRevision = -1;
 
   constructor(icons: GetImagesResponse, patterns: GetImagesResponse) {

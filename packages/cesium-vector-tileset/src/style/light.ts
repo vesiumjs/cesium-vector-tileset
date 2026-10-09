@@ -4,7 +4,6 @@ import type { StyleSetterOptions } from '../style/style';
 import type { LightProps, LightPropsPossiblyEvaluated } from './light-properties.g';
 
 import type { PossiblyEvaluated, Transitioning, TransitionParameters } from './properties';
-import type { Validator } from './validate-style';
 import { Evented } from '../util/evented';
 import { sphericalToCartesian } from '../util/math';
 import { EvaluationParameters } from './evaluation-parameters';
@@ -41,7 +40,7 @@ export class Light extends Evented {
   }
 
   setLight(light: LightSpecification, options: StyleSetterOptions = {}): void {
-    if (this._validate(validateStyle.light, light, options)) {
+    if (validateAndEmit(this, validateStyle.light, { value: light }, options)) {
       return;
     }
 
@@ -68,10 +67,6 @@ export class Light extends Evented {
 
   recalculate(parameters: EvaluationParameters): void {
     this.properties = this._transitioning.possiblyEvaluate(parameters);
-  }
-
-  _validate(validate: Validator, value: unknown, options?: StyleSetterOptions): boolean {
-    return validateAndEmit(this, validate, { value }, options);
   }
 }
 

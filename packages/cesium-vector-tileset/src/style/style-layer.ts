@@ -47,7 +47,9 @@ export abstract class StyleLayer<
   maxzoom: number;
   filter?: FilterSpecification;
   visibility: VisibilitySpecification;
+
   private _evaluatedVisibility: 'visible' | 'none';
+
   private _visibilitySet: boolean;
 
   _crossfadeParameters: CrossfadeParameters = { fromScale: 1, toScale: 1, t: 1 };
@@ -263,11 +265,14 @@ export abstract class StyleLayer<
       // if a cross-faded value is changed, we need to make sure the new icons get added to each tile's iconAtlas
       // so a call to _updateLayer is necessary, and we return true from this function so it gets called in
       // Style.setPaintProperty
-      return isDataDriven || wasDataDriven || isCrossFadedProperty || this._handleOverridablePaintPropertyUpdate(name, oldValue, newValue);
+      return isDataDriven || wasDataDriven || isCrossFadedProperty || this.handleOverridablePaintPropertyUpdate(name, oldValue, newValue);
     }
   }
 
-  _handleOverridablePaintPropertyUpdate<T, R>(_name: string, _oldValue: PropertyValue<T, R>, _newValue: PropertyValue<T, R>): boolean {
+  /**
+   * @internal
+   */
+  handleOverridablePaintPropertyUpdate<T, R>(_name: string, _oldValue: PropertyValue<T, R>, _newValue: PropertyValue<T, R>): boolean {
     // No-op; can be overridden by derived classes.
     return false;
   }
@@ -333,7 +338,10 @@ export abstract class StyleLayer<
     }) as LayerSpecification;
   }
 
-  _validate(validate: Validator, key: string, name: string, value: unknown, options: StyleSetterOptions = {}): boolean {
+  /**
+   * @internal
+   */
+  private _validate(validate: Validator, key: string, name: string, value: unknown, options: StyleSetterOptions = {}): boolean {
     return validateAndEmit(this, validate, {
       key,
       layerType: this.type,

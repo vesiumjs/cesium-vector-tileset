@@ -21,15 +21,12 @@ export interface CrossFaded<T> {
 
 /**
  *  Implementations of the `Property` interface:
- *
  *  Hold metadata about a property that's independent of any specific value: stuff like the type of the value,
  *    the default value, etc. This comes from the style specification JSON.
  *  Define behavior that needs to be polymorphic across different properties: "possibly evaluating"
  *    an input value (see below), and interpolating between two possibly-evaluted values.
- *
  *  The type `T` is the fully-evaluated value type (e.g. `number`, `string`, `Color`).
  *  The type `R` is the intermediate "possibly evaluated" value type. See below.
- *
  *  There are two main implementations of the interface -- one for properties that allow data-driven values,
  *  and one for properties that don't. There are a few "special case" implementations as well: one for properties
  *  which cross-fade between two values rather than interpolating, and one for `light-position`.
@@ -57,15 +54,12 @@ export interface PropertyOverrides {
  *  `PropertyValue` represents the value part of a property key-value unit. It's used to represent both
  *  paint and layout property values, and regardless of whether or not their property supports data-driven
  *  expressions.
- *
  *  `PropertyValue` stores the raw input value as seen in a style or a runtime styling API call, i.e. one of the
  *  following:
- *
  *    A constant value of the type appropriate for the property
  *    A function which produces a value of that type (but functions are quasi-deprecated in favor of expressions)
  *    An expression which produces a value of that type
  *    "undefined"/"not present", in which case the property is assumed to take on its default value.
- *
  *  In addition to storing the original input value, `PropertyValue` also stores a normalized representation,
  *  effectively treating functions as if they are expressions, and constant or default values as if they are
  *  (constant) expressions.
@@ -112,10 +106,8 @@ export interface TransitionParameters {
 /**
  * Paint properties are _transitionable_: they can change in a fluid manner, interpolating or cross-fading between
  * old and new value. The duration of the transition, and the delay before it begins, is configurable.
- *
  * `TransitionablePropertyValue` is a compositional class that stores both the property value and that transition
  * configuration.
- *
  * A `TransitionablePropertyValue` can calculate the next step in the evaluation chain for paint property values:
  * `TransitioningPropertyValue`.
  * @internal
@@ -148,7 +140,9 @@ class TransitionablePropertyValue<T, R> {
 export class Transitionable<Props> {
   _properties: Properties<Props>;
   _values: { [K in keyof Props]: TransitionablePropertyValue<any, unknown> };
+
   private _globalState: Record<string, any>;
+
   private _rootKey: string;
 
   constructor(properties: Properties<Props>, rootKey: string, globalState: Record<string, any>) {
@@ -158,7 +152,9 @@ export class Transitionable<Props> {
     this._rootKey = rootKey;
   }
 
-  /** rootKey of a property, e.g. `layers[3].paint.line-color`. */
+  /**
+   * rootKey of a property, e.g. `layers[3].paint.line-color`.
+   */
   private _propertyRootKey(name: keyof Props): string {
     return `${this._rootKey}.${String(name)}`;
   }
@@ -336,7 +332,9 @@ export class Transitioning<Props> {
 export class Layout<Props> {
   _properties: Properties<Props>;
   _values: { [K in keyof Props]: PropertyValue<any, PossiblyEvaluatedPropertyValue<any>> };
+
   private _globalState: Record<string, any>; // reference to global state
+
   private _rootKey: string;
 
   constructor(properties: Properties<Props>, rootKey: string, globalState: Record<string, any>) {
@@ -346,7 +344,10 @@ export class Layout<Props> {
     this._rootKey = rootKey;
   }
 
-  /** rootKey of a property, e.g. `layers[3].layout.line-cap`. */
+  /**
+   * rootKey of a property, e.g. `layers[3].layout.line-cap`.
+   * @internal
+   */
   private _propertyRootKey(name: keyof Props): string {
     return `${this._rootKey}.${String(name)}`;
   }
@@ -682,7 +683,7 @@ export class CrossFadedDataDrivenProperty<T> extends DataDrivenProperty<CrossFad
     }
   }
 
-  _calculate(min: T, mid: T, max: T, parameters: EvaluationParameters): CrossFaded<T> {
+  private _calculate(min: T, mid: T, max: T, parameters: EvaluationParameters): CrossFaded<T> {
     const z = parameters.zoom;
     return z > parameters.zoomHistory.lastIntegerZoom ? { from: min, to: mid } : { from: max, to: mid };
   }
@@ -728,7 +729,7 @@ export class CrossFadedProperty<T> implements Property<T, CrossFaded<T> | undefi
     }
   }
 
-  _calculate(min: T, mid: T, max: T, parameters: EvaluationParameters): CrossFaded<T> {
+  private _calculate(min: T, mid: T, max: T, parameters: EvaluationParameters): CrossFaded<T> {
     const z = parameters.zoom;
     return z > parameters.zoomHistory.lastIntegerZoom ? { from: min, to: mid } : { from: max, to: mid };
   }

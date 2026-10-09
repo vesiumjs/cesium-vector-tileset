@@ -113,7 +113,10 @@ export class GlyphSource {
     return await this._downloadAndCacheRangePromise(stack, id, url);
   }
 
-  async _downloadAndCacheRangePromise(stack: string, id: number, url: string): Promise<GlyphResult> {
+  /**
+   * @internal
+   */
+  private async _downloadAndCacheRangePromise(stack: string, id: number, url: string): Promise<GlyphResult> {
     // Try to get the glyph from the cache of server-side glyphs by PBF range.
     const entry = this.entries[stack];
     const range = Math.floor(id / 256);
@@ -156,7 +159,10 @@ export class GlyphSource {
     }
   }
 
-  /** Tiles share a font's pending draw while retaining independent response bitmaps. */
+  /**
+   * Tiles share a font's pending draw while retaining independent response bitmaps.
+   * @internal
+   */
   private _loadLocalGlyph(entry: Entry, stack: string, id: number): Promise<StyleGlyph> {
     const glyph = entry.glyphs[id];
     if (glyph)
@@ -170,7 +176,10 @@ export class GlyphSource {
     });
   }
 
-  _warnOnMissingGlyphRange(range: number, id: number, err: Error): void {
+  /**
+   * @internal
+   */
+  private _warnOnMissingGlyphRange(range: number, id: number, err: Error): void {
     const begin = range * 256;
     const end = begin + 255;
     const codePoint = id.toString(16).padStart(4, '0').toUpperCase();
@@ -179,15 +188,17 @@ export class GlyphSource {
 
   /**
    * Returns whether the given codepoint should be rendered locally.
+   * @internal
    */
-  _charUsesLocalIdeographFontFamily(id: number): boolean {
+  private _charUsesLocalIdeographFontFamily(id: number): boolean {
     return !!this.localIdeographFontFamily && codePointUsesLocalIdeographFontFamily(id);
   }
 
   /**
    * Draws a glyph offscreen using TinySDF, creating a TinySDF instance lazily.
+   * @internal
    */
-  async _drawGlyph(entry: Entry, stack: string, id: number): Promise<StyleGlyph> {
+  private async _drawGlyph(entry: Entry, stack: string, id: number): Promise<StyleGlyph> {
     // The CJK fallback font specified by the developer takes precedence over the last resort fontstack in the style specification.
     const usesLocalIdeographFontFamily = stack === defaultStack && this.localIdeographFontFamily !== '' && this._charUsesLocalIdeographFontFamily(id);
 
@@ -229,7 +240,10 @@ export class GlyphSource {
     };
   }
 
-  async _createTinySDF(stack: string | false): Promise<TinySDF> {
+  /**
+   * @internal
+   */
+  private async _createTinySDF(stack: string | false): Promise<TinySDF> {
     // Escape and quote the font family list for use in CSS.
     const fontFamilies = stack ? stack.split(',') : [];
     fontFamilies.push(defaultGenericFontFamily);
@@ -265,8 +279,9 @@ export class GlyphSource {
 
   /**
    * Sniffs the font style out of a font family name.
+   * @internal
    */
-  _fontStyle(fontFamily: string): string {
+  private _fontStyle(fontFamily: string): string {
     if (/italic/i.test(fontFamily)) {
       return 'italic';
     }
@@ -278,8 +293,9 @@ export class GlyphSource {
 
   /**
    * Sniffs the font weight out of a font family name.
+   * @internal
    */
-  _fontWeight(fontFamily: string): string | undefined {
+  private _fontWeight(fontFamily: string): string | undefined {
     // Based on the OpenType specification
     // https://learn.microsoft.com/en-us/typography/opentype/spec/os2#usweightclass
     const weightsByName = {
