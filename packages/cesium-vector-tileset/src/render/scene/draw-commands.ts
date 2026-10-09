@@ -236,17 +236,31 @@ function extrusionIdCommand(source: NativeCommand, scene: VisibleScene): NativeC
 /** Own reusable command preparation and ordering for one tileset. */
 export class DrawCommands {
   private readonly _lineVisibility = new LineVisibility();
+
   private _lineMercatorProjection = 0;
+  /**
+   * @internal
+   */
   private readonly _lineProjectionUniform = () => this._lineMercatorProjection;
+
   private readonly _records = new WeakMap<object, DrawCommandEntry>();
+
   private readonly _entries: Array<DrawCommandEntry | undefined> = [];
+
   private readonly _paint: DrawCommandEntry[] = [];
+
   private readonly _symbols: DrawCommandEntry[] = [];
+
   private readonly _paintSlots: number[] = [];
+
   private readonly _symbolSlots: number[] = [];
+
   private readonly _extrusionLayers = new Map<string, DrawCommandEntry[]>();
+
   private readonly _prepared: FrameCommand[] = [];
+
   private readonly _extrusionDepth = new ExtrusionDepthPass();
+
   private readonly _compositedLayers = new Set<string>();
 
   destroy(): void {

@@ -173,22 +173,39 @@ function captureUploadedBytes(collection: SceneCollection): void {
 export class SceneCollections {
   /** Enabled by a Scene that services idle ticks without drawing. */
   idlePreparationsEnabled = false;
+
   private readonly _root: PrimitiveCollection;
+
   private readonly _requestRender: () => void;
+
   private readonly _releaseDrapedCollection: (collection: VectorCollection) => void;
+
   private readonly _isSymbolPlaced: (tileId: string) => boolean;
+
   private readonly _preparePaint: (collection: SceneCollection, budget?: Budget) => boolean;
+
   private readonly _pendingDestroy = new Set<SceneCollection>();
+
   private readonly _firstUpdates = [new Map<SceneCollection, FirstUpdate>(), new Map<SceneCollection, FirstUpdate>()];
+
   private _resourceUploadTurn?: object;
+
   private readonly _parents = new WeakMap<SceneCollection, PrimitiveCollection>();
+
   private readonly _replacements = new Set<SceneReplacement>();
+
   private readonly _replacementForCollection = new WeakMap<SceneCollection, SceneReplacement>();
+
   private readonly _vectorVisibility = new WeakMap<SceneCollection, boolean>();
+
   private _layerVisibility: ReadonlyMap<string, boolean> = new Map();
+
   private _hiddenLayers: TileVisibility['hiddenLayers'] = new Map();
+
   private readonly _pendingRelease: Array<() => void> = [];
+
   private _pendingRaster: RasterTileUpdate = { removed: [], added: [], removedMaterials: [] };
+
   private _pendingPattern: PatternTileUpdate = { removed: [], added: [], removedMaterials: [] };
 
   constructor(
@@ -253,6 +270,9 @@ export class SceneCollections {
     }
   }
 
+  /**
+   * @internal
+   */
   private _syncDrapedCollection(collection: BufferPolygonCollection): void {
     if (!this._vectorVisibility.has(collection)) {
       this._vectorVisibility.set(collection, true);
@@ -328,15 +348,24 @@ export class SceneCollections {
     }
   }
 
+  /**
+   * @internal
+   */
   private _contains(collection: SceneCollection): boolean {
     const parent = this._parents.get(collection);
     return parent ? this._root.contains(parent) && parent.contains(collection) : this._root.contains(collection);
   }
 
+  /**
+   * @internal
+   */
   private _visible(collection: SceneCollection): boolean {
     return this._root.show && collection.show && this._parents.get(collection)?.show !== false;
   }
 
+  /**
+   * @internal
+   */
   private _applyPrimitivePublication(update: PatternTileUpdate | RasterTileUpdate): void {
     for (const [primitive, parent] of update.parents ?? []) {
       this._parents.set(primitive, parent);
@@ -382,6 +411,9 @@ export class SceneCollections {
     this.queueFirstUpdate(update.added, false);
   }
 
+  /**
+   * @internal
+   */
   private _applySymbolPublication(result: TilePublishResult): void {
     const firstUpdates = result.firstUpdateSymbols.filter(collection => !readyPrimitives(collection));
     const old = new Set<PrimitiveCollection>();
@@ -428,6 +460,9 @@ export class SceneCollections {
     this.queueFirstUpdate(firstUpdates, false);
   }
 
+  /**
+   * @internal
+   */
   private _applyVectorPublication(result: TilePublishResult): void {
     // Detail stages append to the committed generation. They must join its
     // pending handoff instead of retiring the surface the renderer still owns.
@@ -501,6 +536,9 @@ export class SceneCollections {
     this.queueFirstUpdate(result.addedVector);
   }
 
+  /**
+   * @internal
+   */
   private _beginReplacement(
     kind: SceneReplacement['kind'],
     tileId: string,
@@ -756,6 +794,9 @@ export class SceneCollections {
     return { units, renderNeeded };
   }
 
+  /**
+   * @internal
+   */
   private _hasRenderFirstUpdates(): boolean {
     for (const queue of this._firstUpdates) {
       for (const collection of queue.keys()) {
@@ -769,6 +810,9 @@ export class SceneCollections {
     return false;
   }
 
+  /**
+   * @internal
+   */
   private _requestFirstUpdateContinuation(): void {
     if (!this.idlePreparationsEnabled || this._hasRenderFirstUpdates())
       this._requestRender();
@@ -800,6 +844,9 @@ export class SceneCollections {
     return { units, renderNeeded: this._hasRenderFirstUpdates() };
   }
 
+  /**
+   * @internal
+   */
   private _removeFirstUpdate(collection: SceneCollection): void {
     for (const queue of this._firstUpdates) {
       queue.delete(collection);
@@ -1015,6 +1062,9 @@ export class SceneCollections {
     }
   }
 
+  /**
+   * @internal
+   */
   private _finishReplacement(replacement: SceneReplacement, readyToDraw?: Set<SceneCollection>, budget?: Budget): void {
     if (replacement.awaitingDetail || replacement.waiting.size > 0
       || (replacement.kind === 'symbol' && !this._isSymbolPlaced(replacement.tileId))) {
@@ -1050,6 +1100,9 @@ export class SceneCollections {
     this._requestRender();
   }
 
+  /**
+   * @internal
+   */
   private _forgetReplacement(replacement: SceneReplacement): void {
     this._replacements.delete(replacement);
     for (const collection of replacement.next) {
@@ -1060,6 +1113,9 @@ export class SceneCollections {
     }
   }
 
+  /**
+   * @internal
+   */
   private _cancelReplacement(replacement: SceneReplacement): void {
     this._forgetReplacement(replacement);
     for (const collection of replacement.old) {

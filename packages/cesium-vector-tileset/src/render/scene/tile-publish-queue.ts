@@ -13,6 +13,7 @@ import type { VectorCollection, VectorTileRenderer } from '../vector/vector-tile
 import type { Budget } from './frame-budget';
 import { Math as CesiumMath } from 'cesium';
 import { MercatorCoordinate } from '../../geo/mercator-coordinate';
+import { browser } from '../../util/browser';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
 import { paintRevision } from '../vector/feature-attributes';
 import { tileZoomOf } from '../vector/vector-tile-builder';
@@ -154,11 +155,17 @@ export interface TilePublishOptions {
 export class TilePublishQueue {
   /** The host can advance detached CPU preparation without rendering a frame. */
   idlePreparationsEnabled = false;
+
   private _minimumJob?: string;
+
   private _idleJob?: string;
+
   private _nextTrack: PublishTrack = 'surfaces';
+
   private readonly _jobs = new Map<string, PublishJob>();
+
   private readonly _patternRefreshes = new Map<string, PatternRefreshJob>();
+
   private readonly _options: TilePublishOptions;
 
   constructor(options: TilePublishOptions) {
@@ -204,6 +211,9 @@ export class TilePublishQueue {
     return { steps, ready, renderNeeded: renderNeeded || ready > 0 };
   }
 
+  /**
+   * @internal
+   */
   private _inspectBuilds(): { jobs: PublishJob[]; renderNeeded: boolean } {
     if (this.size === 0)
       return { jobs: [], renderNeeded: false };
@@ -264,6 +274,9 @@ export class TilePublishQueue {
     return { jobs, renderNeeded };
   }
 
+  /**
+   * @internal
+   */
   private _requestBuildContinuation(): void {
     if (this.size > 0 && (!this.idlePreparationsEnabled || this.inspectBuilds().renderNeeded))
       this._options.requestRender();
@@ -342,6 +355,9 @@ export class TilePublishQueue {
     }
   }
 
+  /**
+   * @internal
+   */
   private _enqueue(sourceId: string, tile: Tile, generationId?: number, progress?: TilePublicationProgress): void {
     // A structural style change reparses the worker payload. Its old buckets
     // and atlas still cover the scene, but must not publish as the new style.
@@ -504,7 +520,10 @@ export class TilePublishQueue {
     return committed;
   }
 
-  /** Spend one Scene admission quota fairly; only its first unit may start spent. */
+  /**
+   * Spend one Scene admission quota fairly; only its first unit may start spent.
+   * @internal
+   */
   private _drainMinimum(budget: Budget, maxCommits: number): number {
     const minimum = budget.takeMinimumProgress?.() ?? false;
     let committed = 0;
@@ -545,6 +564,9 @@ export class TilePublishQueue {
     return committed;
   }
 
+  /**
+   * @internal
+   */
   private _stepTrack(job: PublishJob, track: PublishTrack, budget: Budget): number {
     this._begin(job);
     if (track === 'symbols') {
@@ -579,6 +601,9 @@ export class TilePublishQueue {
     return 1;
   }
 
+  /**
+   * @internal
+   */
   private _drainPatternRefreshes(budget: Budget, viewpoint?: MercatorCoordinate): void {
     for (const [tileId, refresh] of prioritize(this._patternRefreshes, ([, job]) => job.tileID, viewpoint)) {
       if (budget.exhausted) {
@@ -598,6 +623,9 @@ export class TilePublishQueue {
     }
   }
 
+  /**
+   * @internal
+   */
   private _discard(job: PublishJob): void {
     if (job.vectorBuild)
       this._options.vector.discardTileBuild(job.vectorBuild);
@@ -609,6 +637,9 @@ export class TilePublishQueue {
     }
   }
 
+  /**
+   * @internal
+   */
   private _excludedLayers(data: TileData): Set<string> {
     const style = this._options.style();
     const excluded = new Set<string>();
@@ -621,13 +652,19 @@ export class TilePublishQueue {
     return excluded;
   }
 
+  /**
+   * @internal
+   */
   private _isCurrent(job: PublishJob): boolean {
     return job.tile.state !== 'reloading'
       && this._options.isRenderable(job.sourceId, job.data.tileID.key)
       && job.tile.tileID.key === job.data.tileID.key;
   }
 
-  /** Reserve the shared generation without advancing geometry conversion. */
+  /**
+   * Reserve the shared generation without advancing geometry conversion.
+   * @internal
+   */
   private _begin(job: PublishJob): void {
     if (job.symbols === 'pending' && !job.symbolBuild && this._options.symbolLayers(job.sourceId).length === 0) {
       job.symbols = 'done';
@@ -662,6 +699,9 @@ export class TilePublishQueue {
     job.generationId = job.vectorBuild.generationId;
   }
 
+  /**
+   * @internal
+   */
   private _buildVector(job: PublishJob, budget: Budget): SurfacePhase {
     if (!this._options.vector.advanceTileBuild(job.vectorBuild!, budget)) {
       if (job.surfaces === 'surface' && job.vectorBuild!.phase === 'details') {
@@ -678,6 +718,9 @@ export class TilePublishQueue {
     return job.surfaces;
   }
 
+  /**
+   * @internal
+   */
   private _commitVector(job: PublishJob, stage: 'surface' | 'lines' | 'vector'): void {
     const { vector } = this._options;
     const { sourceId, tileId } = job;
@@ -710,6 +753,9 @@ export class TilePublishQueue {
       job.vectorBuild = undefined;
   }
 
+  /**
+   * @internal
+   */
   private _addRaster(job: PublishJob): RasterTileUpdate {
     const source = this._options.rasterSource(job.sourceId);
     return this._options.raster.addTile(
@@ -724,6 +770,9 @@ export class TilePublishQueue {
     );
   }
 
+  /**
+   * @internal
+   */
   private _stepPattern(job: PublishJob, budget: Budget): boolean {
     const { pattern } = this._options;
     const style = this._options.style();
@@ -760,6 +809,9 @@ export class TilePublishQueue {
     return true;
   }
 
+  /**
+   * @internal
+   */
   private _stepSymbol(job: PublishJob, budget: Budget): boolean {
     if (job.symbols === 'ready')
       return true;
@@ -776,7 +828,7 @@ export class TilePublishQueue {
         layers: [...layers],
         glyphAtlasImage: job.data.glyphAtlasImage,
         iconAtlas: job.data.imageAtlas,
-        pixelRatio: typeof window !== 'undefined' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1,
+        pixelRatio: browser.devicePixelRatio,
         layerOrder: this._options.layerOrder(),
         skipLayerIds: job.excludedLayerIds,
       });
@@ -787,6 +839,9 @@ export class TilePublishQueue {
     return true;
   }
 
+  /**
+   * @internal
+   */
   private _commitSymbol(job: PublishJob): void {
     const { symbol } = this._options;
     const built = job.symbolBuild ? symbol.commitBuild(job.symbolBuild) : undefined;
@@ -802,6 +857,9 @@ export class TilePublishQueue {
     });
   }
 
+  /**
+   * @internal
+   */
   private _publish(job: PublishJob, stage: TilePublishResult['stage'], resources: Partial<TilePublishResult> = {}): void {
     if (job.surfaces === 'done' && job.symbols === 'done')
       stage = 'complete';
@@ -831,12 +889,15 @@ export class TilePublishQueue {
     });
   }
 
+  /**
+   * @internal
+   */
   private _removeUnusedSymbols(sourceId: string, tileId: string): readonly PrimitiveCollection[] {
     const style = this._options.style();
     // The visible-layer plan can be empty solely because of min/maxzoom.
     // Keep those extracted symbols cached; only removal of the source's last
     // declared symbol layer makes its old symbol resources obsolete.
-    const declared = style._getLayerOrder().some((id) => {
+    const declared = style.getLayerOrder().some((id) => {
       const layer = style.getLayer(id);
       return layer?.type === 'symbol' && layer.source === sourceId;
     });

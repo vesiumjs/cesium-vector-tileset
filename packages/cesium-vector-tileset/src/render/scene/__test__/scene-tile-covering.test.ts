@@ -1,9 +1,6 @@
-import type { Style } from '../../../style/style';
 import type { FillStyleLayer } from '../../../style/style-layer/fill-style-layer';
-import type { VectorTileRenderer } from '../../vector/vector-tile-renderer';
 import type { RenderFrameState } from '../render-frame';
-import type { StyleEvaluation } from '../style-evaluation';
-import type { TileResidency } from '../tile-residency';
+import type { TilesetRenderer } from '../tileset-renderer';
 import Point from '@mapbox/point-geometry';
 import * as Cesium from 'cesium';
 import { BoundingSphere, BufferPolygonCollection, Cartesian3, Ellipsoid, Event, GeographicTilingScheme, Intersect, Occluder, Rectangle, WebMercatorProjection, WebMercatorTilingScheme } from 'cesium';
@@ -41,12 +38,7 @@ async function coverageOwner(parent = parentID, cameraOptions?: Parameters<typeo
     },
   });
   await tileset.whenReady();
-  const { _style: style, _vectorRenderer: vector, _tileResidency: residency, _styleEvaluation: evaluation } = tileset as unknown as {
-    _style: Style;
-    _vectorRenderer: VectorTileRenderer;
-    _tileResidency: TileResidency;
-    _styleEvaluation: StyleEvaluation;
-  };
+  const { style, vector, residency, evaluation } = (tileset as unknown as { _renderer: TilesetRenderer })._renderer;
   const pyramid = style.tilePyramids.world;
   pyramid._sourceLoaded = true;
   const load = vi.spyOn(pyramid.getSource(), 'loadTile').mockImplementation(() => new Promise(() => {}));
@@ -156,7 +148,7 @@ async function loadCoverageTiles(owner: Awaited<ReturnType<typeof coverageOwner>
     tile.state = 'loaded';
   });
   for (const id of ids)
-    owner.pyramid._addTile(id);
+    owner.pyramid.addTile(id);
   // Complete the actual source load so TilePyramid invalidates its loaded
   // snapshot and the normal publication queue receives the real buckets.
   await Promise.resolve();
@@ -504,7 +496,8 @@ describe('rendered globe and cached surface coverage', () => {
 
       // Isolate the real covering owner's postRender request from unrelated
       // staged work that may have requested a frame during tileset.update.
-      const wake = vi.spyOn(owner.tileset as unknown as { _requestRender: () => void }, '_requestRender');
+      const renderer = (owner.tileset as unknown as { _renderer: TilesetRenderer })._renderer;
+      const wake = vi.spyOn(renderer.wake, 'request');
       owner.scene.postRender.raiseEvent();
       expect(wake).not.toHaveBeenCalled();
     }
@@ -776,7 +769,7 @@ describe('rendered globe and cached surface coverage', () => {
       expect(visibility).not.toHaveBeenCalled();
       expect(wake).not.toHaveBeenCalled();
       const removed = children[3];
-      owner.pyramid._removeTile(removed.key);
+      owner.pyramid.removeTile(removed.key);
       // Active-to-cache movement preserves loaded identity and the covering.
       expect(covering.covering(owner.pyramid, owner.frame, 0)).toBe(complete);
       owner.pyramid._tileCache.remove(removed);
@@ -805,7 +798,7 @@ describe('rendered globe and cached surface coverage', () => {
       owner.frame.frameNumber!++;
       owner.scene.preRender.raiseEvent();
       expect(covering.covering(owner.pyramid, owner.frame, 0)!.idealTileIDs.map(id => id.key).sort()).toEqual(children.map(id => id.key).sort());
-      owner.pyramid._removeTile(children[3].key);
+      owner.pyramid.removeTile(children[3].key);
       owner.pyramid._tileCache.remove(children[3]);
       changeHeight(owner, 3200);
       owner.scene.preRender.raiseEvent();
@@ -842,7 +835,7 @@ describe('rendered globe and cached surface coverage', () => {
       owner.scene.postRender.raiseEvent();
       await loadCoverageTiles(owner, [...mixed, overlapping]);
       for (const id of [...mixed, overlapping])
-        owner.pyramid._removeTile(id.key);
+        owner.pyramid.removeTile(id.key);
       expect(owner.pyramid.getLoadedTileIDs(14, 15)).toEqual(expect.arrayContaining(mixed));
       owner.load.mockClear();
       changeHeight(owner, height);

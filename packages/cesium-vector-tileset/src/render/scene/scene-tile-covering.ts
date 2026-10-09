@@ -65,22 +65,39 @@ function loadedChildCovering(ancestor: OverscaledTileID, loaded: readonly Oversc
 /** Observes the complete 2D camera and rendered 3D globe for source coverage. */
 export class SceneTileCovering {
   private _scene?: CoveringScene;
+
   private _mode?: SceneMode;
+
   private _globeReady = false;
+
   private _removePreRender?: () => void;
+
   private _removePostRender?: () => void;
+
   private _cameraFrame?: CameraFrameSnapshot;
+
   private _cameraPose?: object;
+
   private _observedCamera?: object;
+
   private _supplemented = false;
+
   private _deferredCovering = false;
+
   private _observedGlobe?: GlobeLike;
+
   private _observedTiles = new Set<string>();
+
   private _renderedGlobe: GlobeLike = { _surface: { _tilesToRender: [] } };
+
   private _revision = 0;
+
   private _cameraCoverings: CoveringCache = new WeakMap();
+
   private _globeCoverings = new WeakMap<object, GlobeCoveringCacheEntry>();
+
   private _tileBounds = new WeakMap<OverscaledTileID, BoundingSphere>();
+
   private readonly _requestRender: () => void;
 
   constructor(requestRender: () => void) {
@@ -295,6 +312,9 @@ export class SceneTileCovering {
     return covering;
   }
 
+  /**
+   * @internal
+   */
   private _isVisible(id: OverscaledTileID, frameState: RenderFrameState): boolean {
     let sphere = this._tileBounds.get(id);
     if (!sphere) {
@@ -326,6 +346,9 @@ export class SceneTileCovering {
     this._tileBounds = new WeakMap();
   }
 
+  /**
+   * @internal
+   */
   private _captureGlobe(): boolean {
     const globe = this._scene?.globe;
     const tiles = globe && globe.show !== false

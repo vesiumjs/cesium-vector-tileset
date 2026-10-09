@@ -40,6 +40,7 @@ const DrawCommand = (Cesium as unknown as {
 /** A submitted command owns its final paint state; Native owns the source. */
 export class DrawCommandReplay {
   readonly command: ReplayDrawCommand;
+
   private readonly _source: ReplayDrawCommand = {};
 
   constructor(source: ReplayDrawCommand) {

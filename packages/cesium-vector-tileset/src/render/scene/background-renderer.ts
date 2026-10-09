@@ -51,16 +51,15 @@ function backgroundPaint(layer: StyleLayer, style: Style): BackgroundPaint | und
 /** Owns every style background and submits them into the common paint order. */
 export class BackgroundRenderer {
   private _layers: StyleLayer[] = [];
+
   private _revision = -1;
+
   private _draws = new Map<string, BackgroundGround>();
+
   private readonly _createGround: () => BackgroundGround;
 
   constructor(createGround: () => BackgroundGround = () => new BackgroundGround()) {
     this._createGround = createGround;
-  }
-
-  reset(): void {
-    this.destroy();
   }
 
   destroy(): void {
@@ -74,7 +73,7 @@ export class BackgroundRenderer {
 
   update(style: Style, frameState: RenderFrameState, mode: SceneMode, requestRender: () => void): void {
     if (this._revision !== style.styleRevision) {
-      this._layers = style._getLayerOrder()
+      this._layers = style.getLayerOrder()
         .map(id => style.getLayer(id))
         .filter((layer): layer is StyleLayer => layer?.type === 'background');
       const ids = new Set(this._layers.map(layer => layer.id));

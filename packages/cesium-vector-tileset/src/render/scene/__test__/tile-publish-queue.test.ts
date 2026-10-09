@@ -74,7 +74,7 @@ function fixture(publish?: (result: TilePublishResult) => void) {
     styleRevision: 0,
     renderRevision: 0,
     getLayer: (id: string) => layers.get(id),
-    _getLayerOrder: () => [...layers.keys()],
+    getLayerOrder: () => [...layers.keys()],
     getRenderTransitionFlags: vi.fn(() => ({ any: false })),
   };
   const inputs = { lightRevision: 0, mode: SceneMode.SCENE3D, layerOrder: new Map([...layers.keys()].map((id, index) => [id, index])) };

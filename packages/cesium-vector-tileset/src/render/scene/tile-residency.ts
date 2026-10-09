@@ -79,29 +79,48 @@ function sameStringSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean 
 /** Owns the scene residency and replacement hold of tiles across all render tracks. */
 export class TileResidency {
   private readonly _paintFrame: () => VectorPaintFrame;
+
   private readonly _sources = new Map<string, SourceResidency>();
+
   private readonly _requiredSurfaceParents = new WeakMap<SourceResidency, readonly string[]>();
+
   private readonly _replacingSources = new Set<string>();
+
   private _sourceReplacement?: SourceReplacement;
+
   private readonly _tiles = new Map<string, SceneTile>();
+
   private readonly _pendingFeatureIndexRelease = new Set<string>();
-  /** Symbols can keep their current coverage after the surface stage retires. */
+  /**
+   * Symbols can keep their current coverage after the surface stage retires.
+   */
   private readonly _pendingSymbolRetirements = new Map<string, number>();
+
   private _visibleSymbolTiles = new Set<string>();
+
   private _drawRanks?: ReadonlyMap<string, number>;
+
   private _visibility = {
     hiddenLayers: new Map<string, ReadonlySet<string>>(),
     hiddenSymbols: new Set<string>(),
   };
 
   private _lastRetiredCapacity = -1;
+
   private _gpuMemoryBudget = new GpuMemoryBudget();
+
   private readonly _vectorRenderer: VectorTileRenderer;
+
   private readonly _rasterRenderer: RasterTileRenderer;
+
   private readonly _patternRenderer: PatternTileRenderer;
+
   private readonly _symbolRenderer: SymbolTileRenderer;
+
   private readonly _tilePublishQueue: TilePublishQueue;
+
   private readonly _sceneCollections: SceneCollections;
+
   private readonly _fadeDuration: () => number;
 
   constructor(options: TileResidencyOptions) {
@@ -214,6 +233,9 @@ export class TileResidency {
     return true;
   }
 
+  /**
+   * @internal
+   */
   private _removeSourceTile(tileId: string, sourceId: string): void {
     for (const collection of this._vectorRenderer.getTileCollections(tileId)) {
       this._sceneCollections.detachForDestruction(collection);
@@ -278,6 +300,9 @@ export class TileResidency {
     this._setFeatureIndex(result);
   }
 
+  /**
+   * @internal
+   */
   private _setFeatureIndex(result: TilePublishResult): void {
     const tile = this._tiles.get(result.tileId);
     if (tile) {
@@ -311,6 +336,9 @@ export class TileResidency {
     }
   }
 
+  /**
+   * @internal
+   */
   private _clearFeatureIndex(tileId: string): void {
     const tile = this._tiles.get(tileId);
     if (tile) {
@@ -344,11 +372,17 @@ export class TileResidency {
     }
   }
 
+  /**
+   * @internal
+   */
   private _hasDrawable(tileId: string): boolean {
     return this._sceneCollections.someDrawableCollection(tileId, 'vector', predicate => this._someSurfaces(tileId, predicate), () => true)
       || this._sceneCollections.someDrawableCollection(tileId, 'symbol', predicate => this._symbolRenderer.getTileCollections(tileId).some(predicate), () => true);
   }
 
+  /**
+   * @internal
+   */
   private _someSurfaces(tileId: string, predicate: (collection: SceneCollection) => boolean): boolean {
     return this._vectorRenderer.someTileCollection(tileId, predicate)
       || this._patternRenderer.someTilePrimitive(tileId, predicate)
@@ -475,6 +509,9 @@ export class TileResidency {
     }
   }
 
+  /**
+   * @internal
+   */
   private _syncCollections(sourceId: string, renderableIds: readonly string[], held: Set<string>, mode: SceneMode): void {
     const inView = new Set(renderableIds.map(tileId => renderTileId(sourceId, tileId)));
     const replacements = renderableIds.flatMap(key => this._tiles.get(renderTileId(sourceId, key))?.tileID ?? []);
@@ -508,6 +545,9 @@ export class TileResidency {
     this._tilePublishQueue.cancelPatternRefreshesOutside(sourceId, new Set([...inView, ...held]));
   }
 
+  /**
+   * @internal
+   */
   private _retireSymbols(): void {
     for (const [tileId, fadeDuration] of this._pendingSymbolRetirements) {
       const { retired, fading, evicted } = this._symbolRenderer.retireTile(tileId, fadeDuration);
@@ -527,6 +567,9 @@ export class TileResidency {
     return this._visibility.hiddenLayers;
   }
 
+  /**
+   * @internal
+   */
   private _surfaceLayers(tileId: string, hidden: ReadonlySet<string> | undefined): Set<string> {
     const layers = new Set<string>();
     this._sceneCollections.someDrawableCollection(tileId, 'vector', predicate => this._vectorRenderer.someTileCollection(tileId, predicate)
@@ -540,6 +583,9 @@ export class TileResidency {
     return layers;
   }
 
+  /**
+   * @internal
+   */
   private _setHiddenSurfaceLayers(tileId: string, hidden: ReadonlySet<string> | undefined): void {
     this._vectorRenderer.someTileCollection(tileId, (collection) => {
       this._sceneCollections.setVectorVisibility(collection, !allDrawLayersHidden(collection, hidden));
@@ -553,6 +599,9 @@ export class TileResidency {
     this._patternRenderer.setTileVisible(tileId, !hasPattern || visible);
   }
 
+  /**
+   * @internal
+   */
   private _setTileSymbolVisible(tileId: string, visible: boolean): void {
     this._symbolRenderer.setTilePlacementVisible(tileId, visible);
     for (const collection of this._symbolRenderer.getTileCollections(tileId)) {
@@ -560,6 +609,9 @@ export class TileResidency {
     }
   }
 
+  /**
+   * @internal
+   */
   private _renderableSurfaceParents(sourceId: string, sync: SourceResidency): readonly string[] {
     const cached = this._requiredSurfaceParents.get(sync);
     if (cached) {
@@ -729,6 +781,9 @@ export class TileResidency {
     return changed;
   }
 
+  /**
+   * @internal
+   */
   private _surfacesReady(tileId: string): boolean {
     if (this._tilePublishQueue.hasPendingSurfaces(tileId))
       return false;
@@ -740,6 +795,9 @@ export class TileResidency {
     return !pending && (hasSurface || !this._tilePublishQueue.has(tileId));
   }
 
+  /**
+   * @internal
+   */
   private _symbolsReady(tileId: string): boolean {
     const symbols = this._symbolRenderer.getTileCollections(tileId);
     return symbols.length > 0
@@ -748,6 +806,9 @@ export class TileResidency {
       : !this._tilePublishQueue.hasPendingSymbols(tileId);
   }
 
+  /**
+   * @internal
+   */
   private _hasDrawableSymbols(tileId: string): boolean {
     return this._symbolRenderer.hasTileVisibleSymbols(tileId)
       && this._sceneCollections.someDrawableCollection(tileId, 'symbol', predicate =>
@@ -813,6 +874,7 @@ export class TileResidency {
    * collections. Tiles returning from the out-of-view cache reuse their Tile
    * object without emitting a data event, so the cache-hit path would
    * otherwise leave them blank until the next reload or style change.
+   * @internal
    */
   private _syncHydratedTiles(sourceId: string, tilePyramid: {
     getTileByID: (id: string) => Tile | undefined;

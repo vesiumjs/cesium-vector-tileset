@@ -50,7 +50,9 @@ interface RenderCapture {
 /** Classification changes may remove allowance, never renew it within a tick. */
 class SceneStageBudget extends FrameBudget {
   private _end: number;
+
   private _allowance: number;
+
   private readonly _charged: (now: number) => number;
 
   constructor(allowance: number, deadline: number, charged: (now: number) => number) {
@@ -89,18 +91,31 @@ const scenes = new WeakMap<object, SceneBudget>();
 
 class SceneBudget {
   readonly participants = new Map<object, Participant>();
+
   private readonly _removeListeners: Array<() => void> = [];
+
   private readonly _samples: number[] = [];
+
   private readonly _idleSamples: number[] = [];
+
   private readonly _scene: ObservedScene;
+
   private _renderWrapper?: ObservedScene['render'];
+
   private _renderCapture?: RenderCapture;
+
   private _idleReserve?: number;
+
   private _destroyed = false;
+
   private _reserve = FRAME_CPU_TARGET_MS / 2;
+
   private _start?: number;
+
   private _frame?: FrameWork;
+
   private _sequence = 0;
+
   private _tick = 0;
 
   constructor(scene: ObservedScene) {
@@ -145,12 +160,18 @@ class SceneBudget {
     this._installRenderWrapper();
   }
 
+  /**
+   * @internal
+   */
   private _ownsRenderWrapper(): boolean {
     return this._renderWrapper !== undefined
       && Object.getOwnPropertyDescriptor(this._scene, 'render')?.value === this._renderWrapper;
   }
 
-  /** Observe the full idle call, including early listeners and afterRender. */
+  /**
+   * Observe the full idle call, including early listeners and afterRender.
+   * @internal
+   */
   private _installRenderWrapper(): void {
     const scene = this._scene;
     if (!scene.preUpdate || !scene.postRender)
@@ -192,6 +213,9 @@ class SceneBudget {
     });
   }
 
+  /**
+   * @internal
+   */
   private _observeRender(original: NonNullable<ObservedScene['render']>, receiver: ObservedScene, args: unknown[]): unknown {
     if (receiver !== this._scene || this._destroyed || !this._ownsRenderWrapper())
       return Reflect.apply(original, receiver, args);
@@ -220,6 +244,9 @@ class SceneBudget {
     }
   }
 
+  /**
+   * @internal
+   */
   private _sampleIdle(capture: RenderCapture, end: number): void {
     const state = this._scene._frameState;
     const frame = capture.frame;
@@ -331,8 +358,11 @@ class SceneBudget {
 export class SceneFrameWork {
   readonly tileBudget: FrameBudget;
   readonly placementBudget: FrameBudget;
+
   private readonly _frame: FrameWork;
+
   private readonly _participant: object;
+
   private readonly _owner: SceneBudget;
 
   constructor(frame: FrameWork, participant: object, owner: SceneBudget) {
@@ -387,6 +417,9 @@ export class SceneFrameWork {
     return new MinimumProgressBudget(Math.max(frame.continuationMs, minimumMs ?? 0));
   }
 
+  /**
+   * @internal
+   */
   private _selectedStage(runnable: RunnableStages): Stage | undefined {
     const stages = (['upload', 'build', 'paint', 'placement'] as const).filter(stage => runnable[stage]);
     return stages[this._frame.stage % stages.length];

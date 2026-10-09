@@ -17,6 +17,7 @@
  */
 export class RetiredPool<T> {
   private _entries = new Map<string, T>();
+
   private _capacity: number;
 
   constructor(capacity: number) {
@@ -77,6 +78,9 @@ export class RetiredPool<T> {
     return this._trim();
   }
 
+  /**
+   * @internal
+   */
   private _trim(): Array<{ key: string; value: T }> {
     const evicted: Array<{ key: string; value: T }> = [];
     while (this._entries.size > this._capacity) {

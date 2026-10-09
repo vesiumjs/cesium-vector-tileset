@@ -207,29 +207,53 @@ export function backgroundPatternCoordinates(
  */
 export class BackgroundGround {
   private _command?: BackgroundCommand;
+
   private _context?: BackgroundContext;
+
   private _useLogDepth = false;
+
   private _images = new Map<StyleImage, { version: number | undefined; texture: BackgroundTexture }>();
+
   private _paint: BackgroundPaint = { color: Color.TRANSPARENT, opacity: 0 };
+
   private _fromTexture?: BackgroundTexture;
+
   private _toTexture?: BackgroundTexture;
+
   private _fromCoordinates = { size: new Cartesian2(1, 1), phase: new Cartesian2() };
+
   private _toCoordinates = { size: new Cartesian2(1, 1), phase: new Cartesian2() };
+
   private _fromDimensions = new Cartesian2(1, 1);
+
   private _toDimensions = new Cartesian2(1, 1);
+
   private _depthSize = new Cartesian2();
+
   private _frameNumber?: number;
+
   private _frameLongitude = 0;
+
   private _reference = { high: new Cartesian3(), low: new Cartesian3() };
+
   private _normal = new Cartesian3();
+
   private _east = new Cartesian3();
+
   private _horizontal = new Cartesian3();
+
   private _geodetic = new Cartesian2();
+
   private _inverseRadiiSquared = new Cartesian3();
+
   private _worldScale = 0;
+
   private _planar = false;
+
   private _mercator = false;
+
   private _projectionRadius = 1;
+
   private _patterned = false;
 
   update(frame: RenderFrameState, mode: SceneMode, zoom: number, paint: BackgroundPaint): void {
@@ -346,6 +370,9 @@ export class BackgroundGround {
     this._destroyImages();
   }
 
+  /**
+   * @internal
+   */
   private _texture(image: StyleImage, context: BackgroundContext): BackgroundTexture {
     let cached = this._images.get(image);
     if (!cached || cached.version !== image.version) {
@@ -356,6 +383,9 @@ export class BackgroundGround {
     return cached.texture;
   }
 
+  /**
+   * @internal
+   */
   private _destroyImages(): void {
     for (const cached of this._images.values()) {
       cached.texture.destroy();

@@ -42,14 +42,23 @@ function reuseLayers<T extends StyleLayer>(previous: T[] | undefined, current: T
 /** The ordered style-layer view consumed by the four Cesium render tracks. */
 export class RenderLayerIndex {
   private _style: Style;
+
   private _order: ReadonlyMap<string, number> = new Map();
+
   private _rasterIds = new Map<string, string[]>();
+
   private _patternIds = new Map<string, string[]>();
+
   private _symbolIds = new Map<string, string[]>();
+
   private _allRaster: RasterStyleLayer[] = [];
+
   private _allPattern: PatternStyleLayer[] = [];
+
   private _sourceCache = new Map<string, { revision: number; layers: SourceLayers }>();
+
   private _visibilityRevision = -1;
+
   private _visibility: ReadonlyMap<string, boolean> = new Map();
 
   constructor(style: Style) {
@@ -70,7 +79,7 @@ export class RenderLayerIndex {
     this._sourceCache.clear();
     this._visibilityRevision = -1;
     const layers: StyleLayer[] = [];
-    const order = style._getLayerOrder();
+    const order = style.getLayerOrder();
     this._order = new Map(order.map((id, index) => [id, index]));
     for (const id of order) {
       const layer = style.getLayer(id);
@@ -115,7 +124,7 @@ export class RenderLayerIndex {
     if (this._visibilityRevision !== this._style.renderRevision) {
       const next = new Map<string, boolean>();
       let changed = false;
-      for (const id of this._style._getLayerOrder()) {
+      for (const id of this._style.getLayerOrder()) {
         const layer = this._style.getLayer(id);
         const visible = !!layer && !layer.isHidden(this._style.z);
         next.set(id, visible);
@@ -129,6 +138,9 @@ export class RenderLayerIndex {
     return this._visibility;
   }
 
+  /**
+   * @internal
+   */
   private _sourceLayers(sourceId: string): SourceLayers {
     const revision = this._style.renderRevision;
     const cached = this._sourceCache.get(sourceId);

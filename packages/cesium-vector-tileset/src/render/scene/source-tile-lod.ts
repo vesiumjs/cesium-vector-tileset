@@ -100,15 +100,23 @@ function integralCos(power: number, from: number, to: number): number {
  */
 export class SourceTileLod {
   private readonly _pitchBehavior: number;
+
   private readonly _zoomAdjustment: number;
+
   private readonly _camera: SourceLodCamera | undefined;
+
   private readonly _centerZoom: number;
+
   private readonly _minZoom: number;
+
   private readonly _maxZoom: number;
+
   private readonly _round: boolean;
+
   private readonly _reparse: boolean;
   // A LOD instance belongs to one frozen camera/source selection. Separate
   // worlds and levels keep the numeric x + y * world keys exact through z25.
+
   private readonly _desiredZoomByWrap = new Map<number, Map<number, number>[]>();
 
   get maxZoom(): number {
@@ -182,6 +190,9 @@ export class SourceTileLod {
     return this.select(id)?.equals(id) ?? false;
   }
 
+  /**
+   * @internal
+   */
   private _desiredZoom(zoom: number, tileX: number, tileY: number, wrap: number): number {
     const camera = this._camera;
     let desired = this._centerZoom;

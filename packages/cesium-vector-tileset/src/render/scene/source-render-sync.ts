@@ -50,9 +50,13 @@ export interface SourceRenderSyncOptions {
 /** Applies source selection and preparation to its raster, pattern and resident scene tracks. */
 export class SourceRenderSync {
   private readonly _states = new Map<string, SourceRenderState>();
+
   private readonly _rasterRenderer: RasterTileRenderer;
+
   private readonly _tilePublishQueue: TilePublishQueue;
+
   private readonly _residency: TileResidency;
+
   private readonly _sceneCollections: SceneCollections;
 
   constructor(options: SourceRenderSyncOptions) {
@@ -115,6 +119,9 @@ export class SourceRenderSync {
     return { renderableCount: renderableIds.length, changed: !sameRenderableSet || residentChanged, memoryChanged, featureStateChanged };
   }
 
+  /**
+   * @internal
+   */
   private _syncRaster(
     sourceId: string,
     tilePyramid: TilePyramid,
@@ -158,6 +165,9 @@ export class SourceRenderSync {
     return { ready, memoryChanged };
   }
 
+  /**
+   * @internal
+   */
   private _syncPattern(
     sourceId: string,
     tilePyramid: TilePyramid,

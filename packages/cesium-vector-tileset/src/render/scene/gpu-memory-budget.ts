@@ -36,8 +36,11 @@ interface TrackedEntry {
 
 export class GpuMemoryBudget {
   private _maxBytes: number;
+
   private _entries = new Map<string, TrackedEntry>();
+
   private _sequence = 0;
+
   private _evictions = 0;
 
   constructor(maxBytes: number = DEFAULT_GPU_MEMORY_BUDGET_BYTES) {

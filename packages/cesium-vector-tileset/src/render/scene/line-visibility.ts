@@ -10,13 +10,21 @@ export interface LineVisibilityScene {
 /** A side-plane test only: Native retains near clipping, depth and occlusion. */
 export class LineVisibility {
   private readonly _volume = new CullingVolume(Array.from({ length: 4 }, () => new Cartesian4()));
+
   private readonly _sphere = new BoundingSphere();
+
   private readonly _position = new Cartesian3();
+
   private readonly _direction = new Cartesian3();
+
   private readonly _pixelSize = new Cartesian2();
+
   private _enabled = false;
+
   private _perspective = false;
+
   private _near = 0;
+
   private _pixelRatio = 0;
 
   prepare(frame: RenderFrameState, mode: SceneMode, scene?: LineVisibilityScene): void {

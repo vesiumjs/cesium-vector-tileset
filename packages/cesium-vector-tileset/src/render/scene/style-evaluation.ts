@@ -44,13 +44,21 @@ function diffVisibility(previous: ReadonlyMap<string, boolean>, current: Readonl
 /** Owns the style values and invalidation revisions consumed by one scene frame. */
 export class StyleEvaluation {
   private _style: Style;
+
   private _layers: RenderLayerIndex;
+
   private _zoom = 0;
+
   private _previousZoom = 0;
+
   private _visibility: ReadonlyMap<string, boolean> = new Map();
+
   private _lighting?: ExtrusionLighting;
+
   private _lightRevision = 0;
+
   private _retiredStyleRevision = -1;
+
   private _evaluationId = 0;
 
   constructor(style: Style, layers: RenderLayerIndex) {
