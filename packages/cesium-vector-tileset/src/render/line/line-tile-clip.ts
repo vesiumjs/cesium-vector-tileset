@@ -75,24 +75,43 @@ type UniformMap = Readonly<Record<string, () => Matrix4>>;
 export class LineTileClip {
   readonly uniforms: UniformMap;
   readonly centerLongitude: number;
+
   private readonly _west: number;
+
   private readonly _east: number;
+
   private readonly _south: number;
+
   private readonly _north: number;
+
   private readonly _planes: Cartesian4[];
+
   private readonly _planarPlanes: Cartesian4[];
+
   private readonly _eyePlanes: Cartesian4[];
+
   private readonly _origins: Cartesian3[];
+
   private readonly _eyeOrigins: Cartesian3[];
+
   private readonly _shapes: Cartesian4[];
+
   private readonly _packedPlanes = new Matrix4();
+
   private readonly _packedLatitudes = new Matrix4();
+
   private readonly _packedPlanar = new Matrix4();
+
   private readonly _originColumn = new Cartesian4();
+
   private readonly _view = new Matrix4();
+
   private _hasView = false;
+
   private _uniformState!: ClipUniformState;
+
   private _projection?: MapProjection;
+
   private _projectedWith?: MapProjection;
 
   constructor(tileID: CanonicalTileID | OverscaledTileID) {
@@ -141,6 +160,9 @@ export class LineTileClip {
     return this.uniforms;
   }
 
+  /**
+   * @internal
+   */
   private _longitudePlane(edge: number, dimension: number): Cartesian4 {
     const index = edge % dimension;
     // Canonical edges share one angle, including +/-pi. Quadrants use exact
@@ -157,6 +179,9 @@ export class LineTileClip {
     return new Cartesian4(-Math.sin(longitude), Math.cos(longitude), 0, 0);
   }
 
+  /**
+   * @internal
+   */
   private _updateView(): void {
     if (this._projectedWith !== this._projection) {
       const projection = this._projection!;

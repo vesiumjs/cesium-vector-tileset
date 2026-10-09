@@ -159,8 +159,11 @@ export function dashRowsForFeature(
 /** One Style's SDF material, retained with its active and retired line collections. */
 export class DashMaterial {
   private _material?: Material;
+
   private _revision = -1;
+
   private _source?: HTMLCanvasElement | OffscreenCanvas;
+
   private _needsUpload = false;
 
   readonly atlas: DashAtlas;

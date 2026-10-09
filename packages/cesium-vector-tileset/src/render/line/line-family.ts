@@ -165,14 +165,23 @@ function setColor(table: BatchTable, instance: number, attribute: number, color:
 export class LineFamilyChunk {
   show = true;
   readonly primitive: Primitive;
+
   private readonly _layers: LayerPaint[];
+
   private readonly _ids: InstanceId[];
+
   private readonly _tileId: string;
+
   private readonly _generationId: number;
+
   private readonly _clones = new Map<ReplayDrawCommand, CommandClone[]>();
+
   private _zoom: number;
+
   private _initialized = false;
+
   private readonly _maximumMiterLimit?: number;
+
   private _destroyed = false;
 
   constructor(
@@ -329,6 +338,9 @@ export class LineFamilyChunk {
     this._clones.clear();
   }
 
+  /**
+   * @internal
+   */
   private _initialize(frame: LineFrame): void {
     const base = (this.primitive as Primitive & { _batchTable?: BatchTable })._batchTable;
     if (!base || !frame.context) {
@@ -373,6 +385,9 @@ export class LineFamilyChunk {
     this._initialized = true;
   }
 
+  /**
+   * @internal
+   */
   private _instancePaint(paint: LayerPaint): ReadonlyMap<number, LineFeatureStyle> {
     if (paint.heldInstances)
       return paint.heldInstances;
@@ -384,6 +399,9 @@ export class LineFamilyChunk {
     return styles;
   }
 
+  /**
+   * @internal
+   */
   private _writePaint(paint: LayerPaint, committed?: ReadonlyMap<number, LineFeatureStyle>): void {
     const table = paint.table!;
     const layer = paint.layer;
@@ -418,6 +436,9 @@ export class LineFamilyChunk {
     paint.committedInstances = styles;
   }
 
+  /**
+   * @internal
+   */
   private _writeUniform(paint: LayerPaint): void {
     paint.uniforms.metersPerPixel = lineGroundScale(this._zoom);
     if (paint.layer.paintMode !== 'uniform')

@@ -1,10 +1,7 @@
 import type { Primitive } from 'cesium';
-import type { LinePositionRecords, PreparedLinePositionTexture } from '../geometry/line-position-packing';
+import type { PreparedLinePositionTexture } from '../geometry/line-position-packing';
 import * as Cesium from 'cesium';
 import { PixelDatatype, PixelFormat } from 'cesium';
-import { compileLinePositionTexture as packLinePositions } from '../geometry/line-position-packing';
-
-export type { LinePositionRecords, PreparedLinePositionTexture } from '../geometry/line-position-packing';
 
 type PrimitiveOptions = NonNullable<ConstructorParameters<typeof Primitive>[0]>;
 type LineAppearance = NonNullable<PrimitiveOptions['appearance']> & { uniforms: Record<string, unknown> };
@@ -18,16 +15,14 @@ interface NativeTexture {
   isDestroyed: () => boolean;
 }
 
-// Texture, Sampler and ContextLimits are runtime exports omitted from Native's
+// Texture and Sampler are runtime exports omitted from Native's
 // declarations. Keep the same local integration slice as atlas-sharing.ts.
 interface CesiumRuntime {
   Texture: new (options: unknown) => NativeTexture;
   Sampler: { readonly NEAREST: object };
-  ContextLimits: { readonly maximumTextureSize: number };
 }
 
 const Texture = (Cesium as unknown as CesiumRuntime).Texture;
-const ContextLimits = (Cesium as unknown as CesiumRuntime).ContextLimits;
 const nearestSampler = (Cesium as unknown as CesiumRuntime).Sampler.NEAREST;
 
 function positionShader(source: string): string {
@@ -107,28 +102,12 @@ ${[`position${track}High`, `position${track}Low`, `prevOffset${track}`, `nextOff
 `)}`;
 }
 
-/** CPU layout and packing use the capability of the current Native context. */
-export function* compileLinePositionTexture(records: LinePositionRecords): Generator<void, PreparedLinePositionTexture> {
-  return yield* packLinePositions(records, ContextLimits.maximumTextureSize);
-}
-
 /** Immutable source positions. Native vertices retain their shared record IDs. */
 export class LinePositionTexture {
   readonly texture: NativeTexture;
   readonly appearance: LineAppearance;
-  private _values?: Uint32Array;
 
-  static create(records: LinePositionRecords, appearance: PrimitiveOptions['appearance'], context: object): LinePositionTexture {
-    const compiler = compileLinePositionTexture(records);
-    let step = compiler.next();
-    while (!step.done) step = compiler.next();
-    const positions = new LinePositionTexture(step.value, appearance, context);
-    const upload = positions.upload();
-    while (!upload.next().done) {
-      // Synchronous callers explicitly finish the bounded uploader.
-    }
-    return positions;
-  }
+  private _values?: Uint32Array;
 
   constructor(prepared: PreparedLinePositionTexture, appearance: PrimitiveOptions['appearance'], context: object) {
     if (!appearance)

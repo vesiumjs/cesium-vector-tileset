@@ -53,6 +53,7 @@ export function lineLayoutKey(options: LineGeometryOptions): string {
 /** Shares Geometry only within one publication build; source arrays stay immutable. */
 export class LineGeometryCache {
   private readonly _geometries = new WeakMap<Float64Array, WeakMap<Float64Array, Map<string, Geometry>>>();
+
   private readonly _tileID: CanonicalTileID;
 
   constructor(tileID: CanonicalTileID | OverscaledTileID) {

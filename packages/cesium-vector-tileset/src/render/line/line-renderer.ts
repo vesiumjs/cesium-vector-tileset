@@ -35,7 +35,7 @@ import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { lineInputs } from '../geometry/line-input';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
 import { registerDrawBatch, registerLinePaint } from '../scene/draw-batch';
-import { MAX_LINE_INSTANCES, UNBOUNDED_BUDGET } from '../scene/frame-budget';
+import { MAX_LINE_INSTANCES } from '../scene/frame-budget';
 import { constantValue, fillStyleForFeature, layerFor, lineStyleForFeature } from '../vector/feature-attributes';
 import { dashRowsForFeature } from './dash-material';
 import { freezeLineCameraPaint } from './frozen-line-paint';
@@ -674,22 +674,6 @@ function lineGeometryKey(bucket: Bucket | undefined, layerId: string, featureInd
 
 function lineLayout(bucket: Bucket | undefined, featureIndex: number): Pick<LineGeometryOptions, 'join' | 'cap' | 'miterLimit' | 'roundLimit'> | undefined {
   return bucket instanceof LineBucket ? bucket.featureLineJoinCaps[featureIndex] ?? bucket.lineJoinCap : undefined;
-}
-
-/** Build lines at continuous style zoom; pixel ratio is a shader uniform. */
-export function buildLineCollection(
-  sources: LinePrimitiveSourceList,
-  buckets: { [layerId: string]: Bucket },
-  tileId: string,
-  tileID: CanonicalTileID | OverscaledTileID,
-  generationId: number,
-  zoom: number,
-  planar = false,
-  dash?: LineDashResources,
-): PrimitiveCollection | undefined {
-  const state = beginLineBuild(sources, buckets, tileId, tileID, generationId, zoom, planar, dash);
-  stepLineBuild(state, UNBOUNDED_BUDGET);
-  return commitLineBuild(state);
 }
 
 /**
