@@ -1,10 +1,24 @@
-import type { MapProjection, SceneMode } from 'cesium';
-import * as Cesium from 'cesium';
-import { BoundingSphere, buildModuleUrl, Cartesian3, Cartographic, Math as CesiumMath, ComponentDatatype, GeographicProjection, Geometry, GeometryAttribute, GeometryInstance, GeometryPipeline, Matrix4, Primitive, TaskProcessor, WebMercatorProjection } from 'cesium';
+import type { Appearance, MapProjection, SceneMode } from 'cesium';
+import type { PreparedLinePositionTexture } from '../line/line-position-texture';
+import type { Budget } from '../scene/frame-budget';
+import type { ExtrusionAppearance } from './extrusion-appearance';
+import type { GeometryPacket } from './geometry-packet';
+import type { GeometryLayout, GeometryPrepareRequest, GeometryPrepareResult } from './geometry-preparation';
+import type { LineIndexRange, LineVertexArray } from './line-geometry-upload';
+import type { CombinedGeometry } from './primitive-pipeline';
+import { BoundingSphere, GeographicProjection, Geometry, GeometryInstance, GeometryPipeline, Matrix4, Primitive, WebMercatorProjection } from 'cesium';
 import { LinePositionTexture } from '../line/line-position-texture';
+import { drawBatchForOwner, linePaintForOwner } from '../scene/draw-batch';
+import { DrawCommandReplay } from '../scene/draw-command-replay';
+import { createGeometryPacket, geometryPacketEnd } from './geometry-packet';
+import { GeometryPrepareWorker } from './geometry-prepare-worker';
+import { LineGeometryUpload } from './line-geometry-upload';
+import { lineInputs } from './line-input';
+import { geometryContextLimits, primitivePipeline, primitiveState } from './primitive-pipeline';
 import { packSurfacePositions } from './surface-position';
 
 interface GeometryFrame {
+  frameNumber?: number;
   mode: SceneMode;
   mapProjection: MapProjection;
   scene3DOnly: boolean;
@@ -14,360 +28,64 @@ interface GeometryFrame {
   commandList?: Array<{ boundingVolume?: BoundingSphere }>;
 }
 
-interface CreatedGeometry {
-  packedData: Float64Array;
+export type GeometryAppearanceForMode = (appearance: Appearance, mode: SceneMode) => Appearance;
+
+const geometryFrameBudgets = new WeakMap<object, Budget>();
+const geometryResourceAdmissions = new WeakMap<object, { turn?: object; deferred: boolean }>();
+
+/** Only the upload queue may admit Native's cold preparation and upload. */
+export function updateGeometryWithBudget(frameState: object, budget: Budget, update: () => void, resources?: { turn?: object; deferred: boolean }): void {
+  const previous = geometryFrameBudgets.get(frameState);
+  const previousResources = geometryResourceAdmissions.get(frameState);
+  if (resources)
+    geometryResourceAdmissions.set(frameState, resources);
+  geometryFrameBudgets.set(frameState, budget);
+  try {
+    update();
+  }
+  finally {
+    if (previous)
+      geometryFrameBudgets.set(frameState, previous);
+    else geometryFrameBudgets.delete(frameState);
+    if (previousResources)
+      geometryResourceAdmissions.set(frameState, previousResources);
+    else geometryResourceAdmissions.delete(frameState);
+  }
 }
 
-interface PackedCombineParameters {
-  createGeometryResults: CreatedGeometry[];
-}
-
-interface CombineParameters {
-  createGeometryResults: CreatedGeometry[];
-  instances: GeometryInstance[];
-  ellipsoid: MapProjection['ellipsoid'];
-  projection: MapProjection;
-  elementIndexUintSupported: boolean;
-  scene3DOnly: boolean;
-  vertexCacheOptimize: boolean;
-  compressVertices: boolean;
-  modelMatrix: Matrix4;
-  createPickOffsets?: boolean;
-}
-
-interface CombinedGeometry extends Geometry {
-  boundingSphereCV?: BoundingSphere;
-}
-
-interface CombineResult {
-  geometries: CombinedGeometry[];
-  modelMatrix: Matrix4;
-  pickOffsets: unknown;
-  offsetInstanceExtend: unknown;
-  boundingSpheres: Array<BoundingSphere | undefined>;
-  boundingSpheresCV: Array<BoundingSphere | undefined>;
-}
-
-// Cesium 1.146 exports these pipeline contracts at runtime, but omits them
-// from its declarations. Keep the private integration inside this adapter.
-interface CesiumRuntime {
-  EncodedCartesian3: { encode: (value: number, result: { high: number; low: number }) => { high: number; low: number } };
-  PrimitivePipeline: {
-    packCombineGeometryParameters: (parameters: CombineParameters, transferableObjects: object[]) => PackedCombineParameters;
-    unpackCombineGeometryResults: (result: object) => CombineResult;
-  };
-  PrimitiveState: { COMBINING: number; COMBINED: number; FAILED: number };
-}
-
-const PrimitivePipeline = (Cesium as unknown as CesiumRuntime).PrimitivePipeline;
-const PrimitiveState = (Cesium as unknown as CesiumRuntime).PrimitiveState;
-const EncodedCartesian3 = (Cesium as unknown as CesiumRuntime).EncodedCartesian3;
-const attributeDatatypes = ComponentDatatype as typeof ComponentDatatype & {
-  getSizeInBytes: (datatype: ComponentDatatype) => number;
-};
-
-const maximumActiveTasks = 2;
 const maximumCreateBytes = 512 * 1024;
 const maximumCreateInstances = 512;
-type GeometryLayout = 'native' | 'line' | 'surface-planar' | 'surface-morph';
-type GeometryStage = 'createGeometry' | 'combineGeometry';
-interface GeometryProcessor {
-  processor: TaskProcessor;
-  worker?: Worker;
-  bootstrapUrl?: string;
-}
-interface GeometryOwner {
-  context: GeometryFrame['context'];
-  references: number;
-  pending: Set<(error: unknown) => void>;
-  processors: Partial<Record<GeometryStage, GeometryProcessor>>;
-  error?: unknown;
-  onError: (event: ErrorEvent) => void;
-  onMessageError: () => void;
-}
-const geometryOwners = new WeakMap<GeometryFrame['context'], GeometryOwner>();
-
-function acquireOwner(context: GeometryFrame['context']): GeometryOwner {
-  let owner = geometryOwners.get(context);
-  if (!owner) {
-    const created: GeometryOwner = {
-      context,
-      references: 0,
-      pending: new Set(),
-      processors: {},
-      onError: event => failOwner(created, event.error instanceof Error ? event.error : new Error(`Cesium geometry worker failed: ${event.message}`)),
-      onMessageError: () => failOwner(created, new Error('Cesium geometry worker could not deserialize a message')),
-    };
-    owner = created;
-    geometryOwners.set(context, owner);
-  }
-  owner.references++;
-  return owner;
+/** Worker replies wake Scene; only executable continuations need another frame. */
+export function hasRunnableGeometryUpdate(primitive: Primitive): boolean {
+  if (primitive.ready)
+    return false;
+  if (primitive instanceof GeometryPrimitive)
+    return primitive.hasRunnableUpdate;
+  const state = (primitive as Primitive & { _state: number })._state;
+  return state !== primitiveState.CREATING && state !== primitiveState.COMBINING;
 }
 
-function disposeWorkers(owner: GeometryOwner): void {
-  for (const stage of ['createGeometry', 'combineGeometry'] as const) {
-    const entry = owner.processors[stage];
-    if (!entry)
-      continue;
-    delete owner.processors[stage];
-    entry.worker?.removeEventListener('error', owner.onError);
-    entry.worker?.removeEventListener('messageerror', owner.onMessageError);
-    entry.processor.destroy();
-    if (entry.bootstrapUrl)
-      URL.revokeObjectURL(entry.bootstrapUrl);
-  }
-}
-
-function failOwner(owner: GeometryOwner, error: unknown): void {
-  owner.error ??= error;
-  const pending = [...owner.pending.values()];
-  owner.pending.clear();
-  disposeWorkers(owner);
-  for (const reject of pending) reject(owner.error);
-}
-
-function releaseOwner(owner: GeometryOwner): void {
-  if (--owner.references !== 0)
-    return;
-  geometryOwners.delete(owner.context);
-  failOwner(owner, new Error('Cesium geometry workers were destroyed'));
-}
-
-function nativeTask(owner: GeometryOwner, stage: GeometryStage, parameters: object, transfers: object[]): Promise<object> {
-  if (owner.error)
-    throw owner.error;
-  try {
-    let entry = owner.processors[stage];
-    if (!entry) {
-      const workerUrl = buildModuleUrl(`Workers/${stage}.js`);
-      entry = owner.processors[stage] = { processor: new TaskProcessor(workerUrl) };
-      if (new URL(workerUrl, window.location.href).origin !== window.location.origin) {
-        // Native treats even local blob URLs as cross-origin and does not
-        // revoke its shim. Own this CDN Worker URL, then let TaskProcessor
-        // schedule and destroy the Worker through its existing runtime slot.
-        entry.bootstrapUrl = URL.createObjectURL(new Blob([`import ${JSON.stringify(workerUrl)};`], { type: 'application/javascript' }));
-        (entry.processor as TaskProcessor & { _worker: Worker })._worker = new Worker(entry.bootstrapUrl, { type: 'module' });
-      }
-    }
-    const task = entry.processor.scheduleTask(parameters, transfers);
-    if (!entry.worker) {
-      // Native owns message IDs, transfer negotiation and serialized errors.
-      // Its runtime Worker is only observed for fatal browser failures, which
-      // TaskProcessor otherwise leaves pending indefinitely.
-      entry.worker = (entry.processor as TaskProcessor & { _worker: Worker })._worker;
-      entry.worker.addEventListener('error', owner.onError);
-      entry.worker.addEventListener('messageerror', owner.onMessageError);
-    }
-    return task;
-  }
-  catch (error) {
-    failOwner(owner, error);
-    throw error;
-  }
-}
-
-function createChunk(geometries: Geometry[], start: number): Array<{ geometry: Geometry }> {
-  const subTasks: Array<{ geometry: Geometry }> = [];
+function createChunk(geometries: Geometry[], start: number, layout: GeometryLayout): { geometries: Geometry[]; bytes: number } {
+  const subTasks: Geometry[] = [];
   let bytes = 0;
   while (start + subTasks.length < geometries.length && subTasks.length < maximumCreateInstances) {
     const geometry = geometries[start + subTasks.length];
-    const indices = geometry.indices as unknown as Uint16Array | Uint32Array | undefined;
-    let geometryBytes = indices?.byteLength ?? 0;
-    for (const attribute of Object.values(geometry.attributes)) {
-      if (attribute?.values)
-        geometryBytes += attribute.values.length * attributeDatatypes.getSizeInBytes(attribute.componentDatatype);
-    }
+    const end = geometryPacketEnd(geometry, bytes, layout === 'line' ? lineInputs.get(geometry) : undefined);
     // Keep indivisible Geometry intact, including Native indices and bounds.
-    // Later pieces are sent only after the original create Worker replies.
-    if (subTasks.length > 0 && bytes + geometryBytes > maximumCreateBytes)
+    // Each packet later receives one independent owner before Native transfer.
+    if (subTasks.length > 0 && end > maximumCreateBytes)
       break;
-    subTasks.push({ geometry });
-    bytes += geometryBytes;
+    subTasks.push(geometry);
+    bytes = end;
   }
-  return subTasks;
-}
-
-async function combineGeometry(owner: GeometryOwner, geometries: Geometry[], parameters: PackedCombineParameters, transfers: object[], cancelled: () => boolean): Promise<object> {
-  for (let start = 0; start < geometries.length;) {
-    const subTasks = createChunk(geometries, start);
-    const result = await nativeTask(owner, 'createGeometry', { subTasks }, []) as CreatedGeometry;
-    if (cancelled())
-      return undefined;
-    parameters.createGeometryResults.push(result);
-    transfers.push(result.packedData.buffer);
-    start += subTasks.length;
-  }
-  // Only independent Native outputs transfer. The shared source arrays stay
-  // intact; no main-thread create serializer or synchronous fallback exists.
-  return nativeTask(owner, 'combineGeometry', parameters, transfers);
-}
-
-function scheduleGeometry(owner: GeometryOwner, geometries: Geometry[], parameters: PackedCombineParameters, transfers: object[], cancelled: () => boolean): Promise<object> {
-  return new Promise<object>((resolve, reject) => {
-    owner.pending.add(reject);
-    void combineGeometry(owner, geometries, parameters, transfers, cancelled).then((result) => {
-      owner.pending.delete(reject);
-      resolve(result);
-    }, (error) => {
-      owner.pending.delete(reject);
-      reject(error);
-    });
-  });
-}
-
-/** Source topology stays local; Native only receives the prepared attributes. */
-export interface LineInput {
-  positions: Float64Array;
-  vertices: Uint32Array;
-  closed: boolean;
-}
-export interface CanonicalLineInput extends LineInput {
-  longitudes: Float64Array;
-}
-export const lineInputs = new WeakMap<Geometry, CanonicalLineInput | LineInput>();
-
-function projectedSourceLine(input: LineInput | CanonicalLineInput, projection: MapProjection, records: Float32Array, recordOffset: number, transformed: boolean): Float64Array {
-  const count = input.positions.length / 3;
-  // Each final record has 48 bytes. Its first 24 bytes temporarily hold
-  // DOUBLE xyz; the last 24 already hold the final FLOAT neighbour offsets.
-  const source = new Float64Array(records.buffer, records.byteOffset + recordOffset * 48, input.positions.length * 2);
-  const position = new Cartesian3();
-  const cartographic = new Cartographic();
-  const projected = new Cartesian3();
-  for (let index = 0; index < count; index++) {
-    Cartesian3.unpack(input.positions as unknown as number[], index * 3, position);
-    const point = projection.ellipsoid.cartesianToCartographic(position, cartographic);
-    if (!point)
-      throw new TypeError('source line position cannot be projected to cartographic coordinates');
-    if ('longitudes' in input) {
-      const longitude = input.longitudes[index];
-      point.longitude = transformed ? longitude + CesiumMath.negativePiToPi(point.longitude - longitude) : longitude;
-    }
-    projection.project(point, projected);
-    Cartesian3.pack(projected, source as unknown as number[], index * 6);
-  }
-  for (let point = 0; point < count; point++) {
-    const prior = input.closed ? (point + count - 1) % count : Math.max(0, point - 1);
-    const following = input.closed ? (point + 1) % count : Math.min(count - 1, point + 1);
-    for (let component = 0; component < 3; component++) {
-      const center = source[point * 6 + component];
-      const offset = (recordOffset + point) * 12 + component;
-      // The missing endpoint neighbour is mirrored after scene projection.
-      // It has no original ECEF or source coordinate to inverse-project.
-      records[offset + 6] = !input.closed && point === 0
-        ? center - source[following * 6 + component]
-        : source[prior * 6 + component] - center;
-      records[offset + 9] = !input.closed && point === count - 1
-        ? center - source[prior * 6 + component]
-        : source[following * 6 + component] - center;
-    }
-  }
-  return source;
-}
-
-function lineInstance(instance: GeometryInstance, projection: MapProjection, records: { spatial: Float32Array; planar?: Float32Array }, recordOffset: number): GeometryInstance {
-  const source = instance.geometry;
-  const input = lineInputs.get(source);
-  if (!input)
-    throw new TypeError('line geometry requires source coordinates');
-  let positions = input.positions;
-  let sphere = source.boundingSphere;
-  const transformed = !Matrix4.equals(instance.modelMatrix, Matrix4.IDENTITY);
-  if (transformed) {
-    // Native's multi-mode contract uses world coordinates. Transform only
-    // owned source storage; the cached Geometry and caller's matrix survive.
-    const geometry = new Geometry({
-      attributes: { position: new GeometryAttribute({ componentDatatype: ComponentDatatype.DOUBLE, componentsPerAttribute: 3, values: positions.slice() }) } as Geometry['attributes'],
-      boundingSphere: BoundingSphere.clone(sphere),
-    });
-    const world = new GeometryInstance({ geometry, modelMatrix: Matrix4.clone(instance.modelMatrix) });
-    (GeometryPipeline as typeof GeometryPipeline & { transformToWorldCoordinates: (instance: GeometryInstance) => GeometryInstance }).transformToWorldCoordinates(world);
-    positions = geometry.attributes.position.values as Float64Array;
-    sphere = geometry.boundingSphere;
-  }
-  const pointCount = positions.length / 3;
-  const projected = records.planar ? projectedSourceLine({ ...input, positions }, projection, records.planar, recordOffset, transformed) : undefined;
-  const sphereCV = projected ? BoundingSphere.fromVertices(projected as unknown as number[], Cartesian3.ZERO, 6) : undefined;
-  const centers = transformed || !source.attributes.position
-    ? new Float64Array(input.vertices.length * 3)
-    : source.attributes.position.values as Float64Array;
-  const ids = new Float32Array(input.vertices.length);
-  for (let vertex = 0; vertex < input.vertices.length; vertex++) {
-    const point = input.vertices[vertex];
-    ids[vertex] = recordOffset + point;
-    if (transformed || !source.attributes.position) {
-      for (let component = 0; component < 3; component++) centers[vertex * 3 + component] = positions[point * 3 + component];
-    }
-  }
-  const encoded = { high: 0, low: 0 };
-  let maximumProjectionErrorSquared = 0;
-  for (let point = 0; point < pointCount; point++) {
-    const record = recordOffset + point;
-    if (Math.fround(record) !== record)
-      throw new RangeError('line position record ID exceeds exact FLOAT integer representation');
-    const prior = input.closed ? (point + pointCount - 1) % pointCount : Math.max(0, point - 1);
-    const following = input.closed ? (point + 1) % pointCount : Math.min(pointCount - 1, point + 1);
-    // Read the DOUBLE planar scratch before overwriting it with final words.
-    const planarX = projected?.[point * 6];
-    const planarY = projected?.[point * 6 + 1];
-    const planarZ = projected?.[point * 6 + 2];
-    let projectionErrorSquared = 0;
-    for (let component = 0; component < 3; component++) {
-      const output = record * 12 + component;
-      const center = positions[point * 3 + component];
-      EncodedCartesian3.encode(center, encoded);
-      records.spatial[output] = encoded.high === 0 ? 0 : encoded.high / 65536;
-      records.spatial[output + 3] = encoded.low;
-      const previous = !input.closed && point === 0 ? center + (center - positions[following * 3 + component]) : positions[prior * 3 + component];
-      const next = !input.closed && point === pointCount - 1 ? center + (center - positions[prior * 3 + component]) : positions[following * 3 + component];
-      records.spatial[output + 6] = previous - center;
-      records.spatial[output + 9] = next - center;
-      if (records.planar) {
-        EncodedCartesian3.encode(component === 0 ? planarX : component === 1 ? planarY : planarZ, encoded);
-        records.planar[output] = encoded.high === 0 ? 0 : encoded.high / 65536;
-        records.planar[output + 3] = encoded.low;
-        const delta = records.planar[output] * 65536 + records.planar[output + 3] - (component === 0 ? planarX : component === 1 ? planarY : planarZ);
-        projectionErrorSquared += delta * delta;
-      }
-    }
-    maximumProjectionErrorSquared = Math.max(maximumProjectionErrorSquared, projectionErrorSquared);
-  }
-  if (sphereCV)
-    sphereCV.radius += Math.sqrt(maximumProjectionErrorSquared);
-  const attributes = {
-    ...source.attributes,
-    position: new GeometryAttribute({ componentDatatype: ComponentDatatype.DOUBLE, componentsPerAttribute: 3, values: centers }),
-    a_lineRecord: new GeometryAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 1, values: ids }),
-  };
-  const geometry = Object.assign(new Geometry({ attributes: attributes as Geometry['attributes'] }), source, { attributes, boundingSphere: sphere, boundingSphereCV: sphereCV });
-  return Object.assign(new GeometryInstance({ geometry }), instance, { geometry, modelMatrix: Matrix4.clone(Matrix4.IDENTITY) });
-}
-
-/** Pack only the attributes consumed by the layout's explicit position shader. */
-function packAttributes(geometry: Geometry, layout: GeometryLayout): void {
-  if (layout === 'native')
-    return;
-  const attributes = geometry.attributes as unknown as Record<string, GeometryAttribute>;
-  // Native assigns each vertex its original instance index, including both
-  // date-line halves. The constructor bounds those indices to 16 bits.
-  attributes.batchId = new GeometryAttribute({
-    componentDatatype: ComponentDatatype.UNSIGNED_SHORT,
-    componentsPerAttribute: 1,
-    values: new Uint16Array(attributes.batchId.values),
-  });
-  if (layout === 'line') {
-    // Native needed the centres for batch IDs, cache reordering and bounds.
-    // Rendering now reads immutable source records through a_lineRecord.
-    for (const name of ['position3DHigh', 'position3DLow', 'position2DHigh', 'position2DLow'])
-      delete attributes[name];
-  }
+  return { geometries: subTasks, bytes };
 }
 
 /**
  * One Native assembly path for solid meshes, line strips and flat surfaces.
- * Solid meshes keep Native attributes and appearance. Line centres
- * are projected once before encode-only combine, preserving discrete roles.
+ * Solid meshes retain Native projection and position encoding; extrusion
+ * High values and normals use exact SHORT storage. Line centres are projected
+ * once before encode-only combine, preserving discrete roles.
  * Surfaces retain Native date-line splitting and both position tracks;
  * each layout packs its active attributes before Native uploads the VA.
  * Planar line neighbours are projected only when the scene is available.
@@ -375,25 +93,46 @@ function packAttributes(geometry: Geometry, layout: GeometryLayout): void {
  */
 export class GeometryPrimitive extends Primitive {
   private _started = false;
-  private _geometryOwner?: GeometryOwner;
+  private _preparation?: Generator<void>;
+  private _waitingForSlot?: GeometryPrepareWorker;
+  private _waitingBytes = 0;
+  private _combinedResult?: GeometryPrepareResult;
+  private _preparedLinePositions?: PreparedLinePositionTexture;
+  private _geometryOwner?: GeometryPrepareWorker;
   private readonly _layout: GeometryLayout;
   private _inputInstances?: Map<unknown, GeometryInstance>;
+  private _inputAttributeCache?: Map<unknown, ReturnType<Primitive['getGeometryInstanceAttributes']>>;
   private _linePositions?: LinePositionTexture;
-  private _linePositionData?: { spatial: Float32Array; planar?: Float32Array };
   private readonly _lineOffsetMeters: number;
   private _lineBoundingSpheres?: WeakMap<BoundingSphere, BoundingSphere>;
+  private _expandedCommands?: WeakMap<object, DrawCommandReplay>;
+  private _lineUpload?: LineGeometryUpload;
+  private _lineUploadSteps?: Generator<void>;
+  private _lineUploadPending = false;
+  private _lineUploadAdopted = false;
+  private _lineUploadFrame?: number;
+  private _lineUploadTurn?: object;
+  private _lineResourcesComplete = false;
+  private _deferLineResources = false;
+  private _lineDrawCounts: number[] = [];
+  private _lineResourceEnvironment?: Pick<GeometryFrame, 'context' | 'mode' | 'mapProjection' | 'scene3DOnly'>;
+  private _lineFailurePending = false;
+  private readonly _sourceAppearance?: Appearance;
+  private readonly _appearanceForMode?: GeometryAppearanceForMode;
 
-  constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices'>, layout: GeometryLayout, lineOffsetMeters = 0) {
-    if (layout !== 'native' && Array.isArray(options.geometryInstances) && options.geometryInstances.length > 65536) {
+  constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices'>, layout: GeometryLayout, lineOffsetMeters = 0, appearanceForMode?: GeometryAppearanceForMode) {
+    if (layout !== 'native' && layout !== 'extrusion' && Array.isArray(options.geometryInstances) && options.geometryInstances.length > 65536) {
       throw new RangeError('geometry instance IDs exceed unsigned 16-bit range');
     }
     // A centreline sphere cannot enclose arbitrary window-space widths/caps.
     // MVT covering owns tile visibility; Native retains depth testing, frustum
     // depth partitioning and shader near clipping, but must not reject the
     // expanded strip against that sphere (especially in the narrow pick view).
-    super({ ...options, allowPicking: true, asynchronous: true, releaseGeometryInstances: true, cull: layout === 'native' || layout === 'surface-planar' || layout === 'surface-morph' });
+    super({ ...options, allowPicking: true, asynchronous: true, releaseGeometryInstances: true, cull: layout === 'native' || layout === 'extrusion' || layout === 'surface-planar' || layout === 'surface-morph' });
     this._layout = layout;
     this._lineOffsetMeters = Math.abs(lineOffsetMeters);
+    this._sourceAppearance = options.appearance;
+    this._appearanceForMode = appearanceForMode;
   }
 
   /** Immutable geometry storage, shared by every layer replaying this owner. */
@@ -401,11 +140,153 @@ export class GeometryPrimitive extends Primitive {
     return this._linePositions?.texture;
   }
 
+  /** A drawable index prefix can coexist with unfinished page uploads. */
+  get hasPendingUpload(): boolean {
+    return this._lineUploadPending;
+  }
+
+  get hasDrawableGeometry(): boolean {
+    return this.ready || this._lineUpload?.counts.some(count => count > 0) === true;
+  }
+
+  /** Resource writes have no Native update, command or readiness side effects. */
+  get hasRunnableResourceUpload(): boolean {
+    if (this.isDestroyed() || this.ready || this._layout !== 'line' || this._lineResourcesComplete)
+      return false;
+    const state = (this as unknown as { _state: number })._state;
+    return state !== primitiveState.FAILED
+      && !!(this as GeometryPrimitive & { _batchTable?: object })._batchTable
+      && (state === primitiveState.COMBINED || this._lineUploadPending);
+  }
+
+  private get _linePresentationNeeded(): boolean {
+    const native = this as unknown as { _geometries?: Geometry[] };
+    return this._lineResourcesComplete || (!!this._lineUpload
+      && (this._lineUploadAdopted || this._lineUpload.vertexArrays.length === native._geometries?.length)
+      && this._lineUpload.counts.some((count, index) => count > (this._lineDrawCounts[index] ?? 0)));
+  }
+
+  /** Called only at a safe scene boundary, once per shared physical tick. */
+  advanceResourceUpload(frameState: GeometryFrame, budget: Budget, turn: object): boolean {
+    if (!this.hasRunnableResourceUpload || this._lineUploadTurn === turn)
+      return false;
+    const environment = this._lineResourceEnvironment;
+    if (!environment || environment.context !== frameState.context
+      || (this._geometryOwner && this._geometryOwner.context !== frameState.context)
+      || environment.mode !== frameState.mode || environment.mapProjection !== frameState.mapProjection || environment.scene3DOnly !== frameState.scene3DOnly) {
+      return true;
+    }
+    this._lineUploadTurn = turn;
+    return this._advanceLineResources(frameState, budget, true);
+  }
+
+  private _advanceLineResources(frameState: GeometryFrame, budget: Budget, detached: boolean): boolean {
+    try {
+      this._lineUploadPending = true;
+      this._lineUploadSteps ??= this._uploadLine(frameState);
+      do {
+        if (this._lineUploadSteps.next().done) {
+          this._lineUploadSteps = undefined;
+          this._lineResourcesComplete = true;
+          break;
+        }
+      } while (!budget.exhausted);
+    }
+    catch (error) {
+      this._fail(frameState, error, detached);
+      return true;
+    }
+    return this._linePresentationNeeded;
+  }
+
+  /** CPU continuation admitted with paint by an earlier real render. */
+  get hasRunnableIdlePreparation(): boolean {
+    if (this.ready || this.isDestroyed()
+      || (this as unknown as { _state: number })._state === primitiveState.FAILED) {
+      return false;
+    }
+    if (this._preparation) {
+      const owner = this._waitingForSlot;
+      return !owner || owner.error !== undefined || owner.queue.error !== undefined || owner.queue.canSchedule(this._waitingBytes);
+    }
+    return !!this._combinedResult;
+  }
+
+  /** Native initialization, prefix presentation and readiness require a real render. */
+  get needsRenderUpdate(): boolean {
+    if (this.isDestroyed())
+      return false;
+    if (this.ready)
+      return true;
+    if (this._deferLineResources && this.hasRunnableResourceUpload)
+      return this._linePresentationNeeded;
+    if (this._lineUploadPending)
+      return true;
+    const state = (this as unknown as { _state: number })._state;
+    if (state === primitiveState.FAILED)
+      return true;
+    if (this._preparation || this._combinedResult)
+      return false;
+    if (!this._started)
+      return true;
+    if (!(this as GeometryPrimitive & { _batchTable?: object })._batchTable)
+      return true;
+    return state !== primitiveState.CREATING && state !== primitiveState.COMBINING;
+  }
+
+  /** Advances owned CPU copies, Worker posting or replies without Native/GPU work. */
+  advancePreparation(frameState: GeometryFrame, budget: Budget): void {
+    if (!this.hasRunnableIdlePreparation)
+      return;
+    this._preparation ??= this._prepareCombined(frameState);
+    try {
+      do {
+        if (this._preparation.next().done) {
+          this._preparation = undefined;
+          break;
+        }
+        // Occupied dispatch slots do not block a replied owner's CPU restore.
+      } while (!budget.exhausted && !this._waitingForSlot);
+    }
+    catch (error) {
+      this._preparation = undefined;
+      this._fail(frameState, error);
+    }
+  }
+
+  /** Cold CPU work, Native batch-table creation and upload can advance now. */
+  get hasRunnableUpdate(): boolean {
+    if (this.ready || this.isDestroyed())
+      return false;
+    if (this._lineUploadPending)
+      return true;
+    if (this._preparation) {
+      const owner = this._waitingForSlot;
+      return !owner || owner.error !== undefined || owner.queue.error !== undefined || owner.queue.canSchedule(this._waitingBytes);
+    }
+    if (this._combinedResult || !this._started)
+      return true;
+    // Solid preparation yields before Native gets its first update. Its
+    // batch table still needs that frame while custom combine runs remotely.
+    if (!(this as GeometryPrimitive & { _batchTable?: object })._batchTable)
+      return true;
+    const state = (this as unknown as { _state: number })._state;
+    return state !== primitiveState.CREATING && state !== primitiveState.COMBINING;
+  }
+
   // Native's accessor works as soon as its batch table exists, before ready.
   // Before the first update, write the same mutable construction attributes.
   getGeometryInstanceAttributes(id: unknown): ReturnType<Primitive['getGeometryInstanceAttributes']> {
-    if ((this as GeometryPrimitive & { _batchTable?: object })._batchTable)
+    if ((this as GeometryPrimitive & { _batchTable?: object })._batchTable) {
+      this._inputInstances = undefined;
+      this._inputAttributeCache = undefined;
       return super.getGeometryInstanceAttributes(id);
+    }
+    if (id === undefined || id === null || !this.geometryInstances)
+      return super.getGeometryInstanceAttributes(id);
+    const cached = this._inputAttributeCache?.get(id);
+    if (cached)
+      return cached;
     if (!this._inputInstances) {
       const instances = this.geometryInstances;
       this._inputInstances = new Map((Array.isArray(instances) ? instances : [instances]).map(instance => [instance.id, instance]));
@@ -420,7 +301,9 @@ export class GeometryPrimitive extends Primitive {
         for (let i = 0; i < attribute.value.length; i++) attribute.value[i] = value[i];
       },
     }]));
-    return Object.defineProperties({}, descriptors);
+    const attributes = Object.defineProperties({}, descriptors);
+    (this._inputAttributeCache ??= new Map()).set(id, attributes);
+    return attributes;
   }
 
   // Cesium's declaration omits the runtime frame parameter entirely. The
@@ -432,131 +315,126 @@ export class GeometryPrimitive extends Primitive {
       Reflect.apply(Primitive.prototype.update, this, [frameState]);
       return;
     }
-    if (!this._started) {
-      const projection = frameState.mapProjection;
-      if (!(projection instanceof GeographicProjection) && !(projection instanceof WebMercatorProjection)) {
-        throw new TypeError('Native asynchronous combine requires GeographicProjection or WebMercatorProjection');
-      }
-      const owner = this._geometryOwner ??= acquireOwner(frameState.context);
-      if (owner.error) {
-        this._fail(frameState, owner.error);
-        Reflect.apply(Primitive.prototype.update, this, [frameState]);
+    const nativeState = (this as unknown as { _state: number })._state;
+    const rendering = !frameState?.passes || (frameState.passes.render && !frameState.passes.pick);
+    const resourceAdmission = geometryResourceAdmissions.get(frameState);
+    if (resourceAdmission)
+      this._deferLineResources = resourceAdmission.deferred;
+    if (this._lineFailurePending && frameState?.passes?.render && !frameState.passes.pick) {
+      this._lineFailurePending = false;
+      frameState.afterRender?.push(() => {
+        if (!this.isDestroyed())
+          Object.assign(this, { _ready: true });
+        return true;
+      });
+    }
+    // Family geometry also carries its primary paint, so only standalone
+    // dash owners can skip Native without hiding a visible replay layer.
+    if (this.ready && nativeState === primitiveState.COMPLETE && drawBatchForOwner(this)?.kind === 'dash') {
+      const paint = linePaintForOwner(this);
+      const batchTable = (this as GeometryPrimitive & { _batchTable?: { _batchValuesDirty: boolean } })._batchTable;
+      if (paint && (paint.width <= 0 || paint.color.alpha <= 0) && !batchTable?._batchValuesDirty)
         return;
-      }
-      // Admission precedes neighbour projection and the raw Geometry clone.
-      // A full owner leaves READY untouched; the tileset retries next frame.
-      if (owner.pending.size >= maximumActiveTasks)
+    }
+    const cold = nativeState !== primitiveState.COMPLETE && nativeState !== primitiveState.FAILED;
+    const budget = geometryFrameBudgets.get(frameState);
+    // Ordinary scene traversal draws uploaded owners; it never starts cold CPU
+    // preparation, Native batch-table creation, or a newly combined upload.
+    if (cold && !this._lineUploadPending && (!budget || !this.hasRunnableUpdate))
+      return;
+    if (nativeState !== primitiveState.FAILED && (!this._started || this._combinedResult || this._preparation)) {
+      this._preparation ??= this._combinedResult ? this._prepareCombined(frameState) : this._prepare(frameState);
+      this.advancePreparation(frameState, budget);
+      if (this._preparation || budget.exhausted)
         return;
-      const instances = this.geometryInstances;
-      const source = Array.isArray(instances) ? instances : [instances];
-      let task: Promise<object> | undefined;
-      let lineSpheresCV: BoundingSphere[] | undefined;
-      try {
-        let prepared = source;
-        if (this._layout === 'line') {
-          // A full-mode Scene owns both position tracks for its lifetime.
-          // Only Native's immutable scene3DOnly capability omits projection.
-          const recordCount = source.reduce((count, instance) => {
-            const input = lineInputs.get(instance.geometry);
-            if (!input)
-              throw new TypeError('line geometry requires source coordinates');
-            return count + input.positions.length / 3;
-          }, 0);
-          const records = this._linePositionData = { spatial: new Float32Array(recordCount * 12), planar: frameState.scene3DOnly ? undefined : new Float32Array(recordCount * 12) };
-          let recordOffset = 0;
-          prepared = source.map((instance) => {
-            const result = lineInstance(instance, projection, records, recordOffset);
-            recordOffset += lineInputs.get(instance.geometry).positions.length / 3;
-            return result;
-          });
-          if (records.planar)
-            lineSpheresCV = prepared.map(instance => (instance.geometry as CombinedGeometry).boundingSphereCV);
-        }
-        const transferableObjects: object[] = [];
-        const parameters = PrimitivePipeline.packCombineGeometryParameters({
-          createGeometryResults: [],
-          instances: prepared,
-          ellipsoid: projection.ellipsoid,
-          projection,
-          elementIndexUintSupported: frameState.context.elementIndexUint,
-          scene3DOnly: this._layout === 'line' || frameState.scene3DOnly,
-          vertexCacheOptimize: this.vertexCacheOptimize,
-          compressVertices: this.compressVertices,
-          modelMatrix: Matrix4.clone(this.modelMatrix),
-          createPickOffsets: (this as Primitive & { _createPickOffsets?: boolean })._createPickOffsets,
-        }, transferableObjects);
-        task = scheduleGeometry(owner, prepared.map(instance => instance.geometry), parameters, transferableObjects, () => this.isDestroyed());
-        Object.assign(this, {
-          geometryInstances: Array.isArray(instances) ? prepared : prepared[0],
-          _numberOfInstances: prepared.length,
-          _instanceIds: prepared.map(instance => instance.id),
-          _state: PrimitiveState.COMBINING,
-        });
-        this._started = true;
-      }
-      catch (error) {
-        this._fail(frameState, error);
-      }
-      if (task) {
-        void task.then((packedResult) => {
-          if (this.isDestroyed())
-            return;
-          const combined = PrimitivePipeline.unpackCombineGeometryResults(packedResult);
-          if (!combined.geometries?.length) {
-            this._fail(frameState, undefined);
-            return;
-          }
-          if (lineSpheresCV) {
-            // Native packs instance bounds into FLOAT during Worker transport.
-            // Keep the prepared DOUBLE projection bounds for narrow frusta.
-            combined.boundingSpheresCV = lineSpheresCV;
-            const sphere = BoundingSphere.fromBoundingSpheres(lineSpheresCV);
-            for (const geometry of combined.geometries) geometry.boundingSphereCV = BoundingSphere.clone(sphere);
-          }
-          combined.geometries.forEach(geometry => packAttributes(geometry, this._layout));
-          if (this._layout === 'surface-planar' || this._layout === 'surface-morph')
-            this.appearance = packSurfacePositions(combined.geometries, this.appearance, this._layout === 'surface-morph');
-          Object.assign(this, {
-            _geometries: combined.geometries,
-            _attributeLocations: GeometryPipeline.createAttributeLocations(combined.geometries[0]),
-            modelMatrix: Matrix4.clone(combined.modelMatrix, this.modelMatrix),
-            _pickOffsets: combined.pickOffsets,
-            _offsetInstanceExtend: combined.offsetInstanceExtend,
-            _instanceBoundingSpheres: combined.boundingSpheres,
-            _instanceBoundingSpheresCV: combined.boundingSpheresCV,
-            _recomputeBoundingSpheres: true,
-            _state: PrimitiveState.COMBINED,
-          });
-        }).catch((error) => {
-          if (!this.isDestroyed())
-            this._fail(frameState, error);
-        });
-        // Raw cloning and Native batch-table creation both consume main-thread
-        // time. Give solid meshes a separate update for the latter.
-        if (this._layout === 'native')
-          return;
+      // Native mesh cloning and its batch-table creation retain separate
+      // admissions; a line's already-budgeted encoding uses the same path.
+      if ((this._layout === 'native' || this._layout === 'extrusion') && nativeState !== primitiveState.COMBINING
+        && (this as unknown as { _state: number })._state === primitiveState.COMBINING) {
+        return;
       }
     }
     const native = this as unknown as { _state: number; _geometries: Geometry[]; _attributeLocations: Record<string, number> };
-    if (native._state === PrimitiveState.COMBINED && this.appearance && !this._linePositions
-      && this._layout === 'line') {
+    if (this._layout === 'line' && (native._state === primitiveState.COMBINED || this._lineUploadPending)) {
       try {
-        this._linePositions = new LinePositionTexture(this._linePositionData, this.appearance, frameState.context);
-        this._linePositionData = undefined;
-        this.appearance = this._linePositions.appearance;
+        if (rendering)
+          this._lineResourceEnvironment = { context: frameState.context, mode: frameState.mode, mapProjection: frameState.mapProjection, scene3DOnly: frameState.scene3DOnly };
+        if (!(this as GeometryPrimitive & { _batchTable?: object })._batchTable) {
+          if (!budget || (frameState.passes && (!frameState.passes.render || frameState.passes.pick)))
+            return;
+          // Native initializes its own table; COMBINING prevents an atomic VA upload.
+          native._state = primitiveState.COMBINING;
+          try {
+            Reflect.apply(Primitive.prototype.update, this, [frameState]);
+          }
+          finally {
+            native._state = primitiveState.COMBINED;
+          }
+          if (frameState.frameNumber !== undefined)
+            this._lineUploadFrame = frameState.frameNumber;
+          if (resourceAdmission)
+            this._lineUploadTurn = resourceAdmission.turn;
+          if (budget.exhausted)
+            return;
+        }
+        this._lineUploadPending = true;
+        if (!this._deferLineResources && !this._lineResourcesComplete && budget
+          && (!frameState.passes || (frameState.passes.render && !frameState.passes.pick))
+          && (resourceAdmission?.turn
+            ? this._lineUploadTurn !== resourceAdmission.turn
+            : frameState.frameNumber === undefined || this._lineUploadFrame !== frameState.frameNumber)) {
+          this._lineUploadFrame = frameState.frameNumber;
+          this._lineUploadTurn = resourceAdmission?.turn;
+          this._advanceLineResources(frameState, budget, false);
+        }
+        if (rendering)
+          this._adoptLineUpload(frameState);
       }
       catch (error) {
         this._fail(frameState, error);
       }
+      if (!this._lineUploadAdopted || !this._lineUpload?.counts.some(count => count > 0))
+        return;
     }
     const commands = frameState.commandList;
     const firstCommand = commands?.length ?? 0;
+    if (this._appearanceForMode) {
+      // Packing adds record-load guards and binds this owner's position
+      // texture. Always specialize that complete original, never a variant.
+      const source = this._linePositions?.appearance ?? this._sourceAppearance;
+      if (source)
+        this.appearance = this._appearanceForMode(source, frameState.mode);
+    }
     Reflect.apply(Primitive.prototype.update, this, [frameState]);
+    if (this._lineUpload && commands) {
+      for (let index = firstCommand; index < commands.length; index++) {
+        const command = commands[index] as { count: number; vertexArray: unknown };
+        const count = this._lineUpload.count(command.vertexArray);
+        const presented = this._lineDrawCounts[this._lineUpload.vertexArrays.indexOf(command.vertexArray as LineVertexArray)] ?? 0;
+        command.count = rendering ? count : Math.min(count, presented);
+      }
+    }
+    if (this._lineUpload && rendering) {
+      this._lineDrawCounts = [...this._lineUpload.counts];
+      if (this._lineResourcesComplete && this._lineUploadPending) {
+        this._lineUploadPending = false;
+        Object.assign(this, { _geometries: undefined, geometryInstances: undefined });
+        frameState.afterRender?.push(() => {
+          if (!this.isDestroyed()) {
+            this._lineUploadTurn = undefined;
+            this._lineResourceEnvironment = undefined;
+            Object.assign(this, { _ready: true });
+          }
+          return true;
+        });
+      }
+    }
     // Native still partitions depth with its world sphere when cull=false.
     // Enclose every layer's shader height without mutating Native's raw bounds
     // or applying the model matrix's scale to a displacement in world metres.
     if (this._lineOffsetMeters > 0 && commands) {
       const bounds = this._lineBoundingSpheres ??= new WeakMap<BoundingSphere, BoundingSphere>();
+      const replays = this._expandedCommands ??= new WeakMap<object, DrawCommandReplay>();
       for (let index = firstCommand; index < commands.length; index++) {
         const command = commands[index];
         const source = command.boundingVolume;
@@ -569,35 +447,301 @@ export class GeometryPrimitive extends Primitive {
         }
         BoundingSphere.clone(source, sphere);
         sphere.radius += this._lineOffsetMeters;
-        command.boundingVolume = sphere;
+        let replay = replays.get(command);
+        if (!replay) {
+          replay = new DrawCommandReplay(command);
+          replays.set(command, replay);
+        }
+        commands[index] = replay.update(command, sphere);
       }
     }
-    if ((this as GeometryPrimitive & { _batchTable?: object })._batchTable)
+    if ((this as GeometryPrimitive & { _batchTable?: object })._batchTable) {
       this._inputInstances = undefined;
+      this._inputAttributeCache = undefined;
+    }
+  }
+
+  private* _uploadLine(frameState: GeometryFrame): Generator<void> {
+    const native = this as unknown as GeometryPrimitive & {
+      _geometries: CombinedGeometry[];
+      _attributeLocations: Record<string, number>;
+      _pickOffsets: LineIndexRange[];
+      _instanceIds: Array<{ featureIndex?: number }>;
+      _va: unknown[];
+    };
+    const geometries = native._geometries;
+    this._linePositions = new LinePositionTexture(this._preparedLinePositions, this._sourceAppearance, frameState.context);
+    this._preparedLinePositions = undefined;
+    yield* this._linePositions.upload();
+    const ranges: LineIndexRange[] = [];
+    for (const [index, range] of native._pickOffsets.entries()) {
+      const feature = native._instanceIds[index]?.featureIndex;
+      const previous = ranges.at(-1);
+      if (feature !== undefined && feature === native._instanceIds[index - 1]?.featureIndex
+        && previous?.index === range.index && previous.offset + previous.count === range.offset) {
+        previous.count += range.count;
+      }
+      else {
+        ranges.push({ ...range });
+      }
+    }
+    const upload = this._lineUpload = new LineGeometryUpload(geometries, native._attributeLocations, ranges, frameState.context);
+    while (!upload.complete) {
+      upload.advance();
+      if (!upload.complete)
+        yield;
+    }
+  }
+
+  private _adoptLineUpload(frameState: GeometryFrame): void {
+    const upload = this._lineUpload;
+    const geometries = (this as unknown as { _geometries?: CombinedGeometry[] })._geometries;
+    if (!upload || !geometries || this._lineUploadAdopted || upload.vertexArrays.length !== geometries.length)
+      return;
+    this.appearance = this._linePositions.appearance;
+    // Line instances have no Native offset/distance-display attributes.
+    // Own only Native's VA completion contract; its tables, shaders,
+    // command creation, projection, picking and destruction stay Native.
+    Object.assign(this, {
+      _va: upload.vertexArrays,
+      _primitiveType: geometries[0].primitiveType,
+      _boundingSpheres: geometries.map(geometry => BoundingSphere.clone(geometry.boundingSphere)),
+      _boundingSphereWC: geometries.map(() => new BoundingSphere()),
+      _boundingSphereCV: frameState.scene3DOnly
+        ? []
+        : geometries.map((geometry) => {
+            const sphere = BoundingSphere.clone(geometry.boundingSphereCV);
+            const { x, y, z } = sphere.center;
+            sphere.center.x = z;
+            sphere.center.y = x;
+            sphere.center.z = y;
+            return sphere;
+          }),
+      _boundingSphere2D: frameState.scene3DOnly ? [] : geometries.map(() => new BoundingSphere()),
+      _boundingSphereMorph: frameState.scene3DOnly ? [] : geometries.map(() => new BoundingSphere()),
+      _state: primitiveState.COMPLETE,
+    });
+    // Force Native's first WC/2D/morph transformation even for identity.
+    Reflect.apply((Primitive as unknown as { _updateBoundingVolumes: (...args: unknown[]) => void })._updateBoundingVolumes, Primitive, [this, frameState, this.modelMatrix, true]);
+    this._lineUploadAdopted = true;
+  }
+
+  private* _prepare(frameState: GeometryFrame): Generator<void> {
+    const projection = frameState.mapProjection;
+    if (!(projection instanceof GeographicProjection) && !(projection instanceof WebMercatorProjection)) {
+      throw new TypeError('Native asynchronous combine requires GeographicProjection or WebMercatorProjection');
+    }
+    this._lineResourceEnvironment = { context: frameState.context, mode: frameState.mode, mapProjection: frameState.mapProjection, scene3DOnly: frameState.scene3DOnly };
+    const owner = this._geometryOwner ??= GeometryPrepareWorker.acquire(frameState.context);
+    if (owner.error !== undefined) {
+      this._fail(frameState, owner.error);
+      return;
+    }
+    const instances = this.geometryInstances;
+    const source = Array.isArray(instances) ? instances : [instances];
+    let task: Promise<GeometryPrepareResult> | undefined;
+    try {
+      // Do not allocate Native metadata while both dispatch slots are busy.
+      this._waitingBytes = 1;
+      while (!owner.queue.hasCapacity) {
+        if (owner.queue.error !== undefined)
+          throw owner.queue.error;
+        this._waitingForSlot = owner;
+        yield;
+      }
+      this._waitingForSlot = undefined;
+      const transferableObjects: ArrayBuffer[] = [];
+      const parameters = primitivePipeline.packCombineGeometryParameters({
+        createGeometryResults: [],
+        instances: source,
+        ellipsoid: projection.ellipsoid,
+        projection,
+        elementIndexUintSupported: frameState.context.elementIndexUint,
+        scene3DOnly: this._layout === 'line' || frameState.scene3DOnly,
+        vertexCacheOptimize: this.vertexCacheOptimize,
+        compressVertices: this.compressVertices,
+        modelMatrix: Matrix4.clone(this.modelMatrix),
+        createPickOffsets: this._layout === 'line' || (this as Primitive & { _createPickOffsets?: boolean })._createPickOffsets,
+      }, transferableObjects);
+      const geometries = source.map(instance => instance.geometry);
+      const chunks: Array<ReturnType<typeof createChunk>> = [];
+      let bytes = transferableObjects.reduce((total, buffer) => total + buffer.byteLength, 0);
+      for (let start = 0; start < geometries.length;) {
+        const chunk = createChunk(geometries, start, this._layout);
+        chunks.push(chunk);
+        bytes += chunk.bytes;
+        start += chunk.geometries.length;
+        if (start < geometries.length)
+          yield;
+      }
+      // Count exact aligned packet and Native metadata bytes before copying.
+      // A queued batch can accept another small request even with two slots
+      // occupied; a larger request must wait without allocating raw clones.
+      this._waitingBytes = bytes;
+      while (!owner.queue.canSchedule(bytes)) {
+        if (owner.queue.error !== undefined)
+          throw owner.queue.error;
+        this._waitingForSlot = owner;
+        yield;
+      }
+      this._waitingForSlot = undefined;
+      const packets: GeometryPacket[] = [];
+      for (const chunk of chunks)
+        packets.push(yield* createGeometryPacket(chunk.geometries, this._layout === 'line' ? lineInputs : undefined));
+      const request: GeometryPrepareRequest = {
+        parameters,
+        geometries: packets.flatMap(packet => packet.subTasks.map(task => task.geometry)),
+        layout: this._layout,
+        lineInputs: this._layout === 'line' ? packets.flatMap(packet => packet.lineInputs) : undefined,
+        scene3DOnly: frameState.scene3DOnly,
+        maximumTextureSize: geometryContextLimits.maximumTextureSize,
+      };
+      for (const packet of packets) transferableObjects.push(...packet.transfers);
+      // Keep the owned packet across yields if another owner filled the batch
+      // while its CPU copy was advancing; source geometry is never recopied.
+      task = owner.queue.schedule(request, transferableObjects, () => this.isDestroyed());
+      while (!task) {
+        this._waitingForSlot = owner;
+        yield;
+        task = owner.queue.schedule(request, transferableObjects, () => this.isDestroyed());
+      }
+      this._waitingForSlot = undefined;
+      Object.assign(this, {
+        _numberOfInstances: source.length,
+        _instanceIds: source.map(instance => instance.id),
+        _state: primitiveState.COMBINING,
+      });
+      this._started = true;
+    }
+    catch (error) {
+      this._fail(frameState, error);
+    }
+    if (task) {
+      void task.then((packedResult) => {
+        if (this.isDestroyed())
+          return;
+        this._combinedResult = packedResult;
+      }).catch((error) => {
+        if (!this.isDestroyed())
+          this._fail(frameState, error);
+      });
+      // Raw cloning and Native batch-table creation both consume main-thread
+      // time. Give solid meshes a separate update for the latter.
+    }
+  }
+
+  private* _prepareCombined(frameState: GeometryFrame): Generator<void> {
+    const result = this._combinedResult;
+    this._combinedResult = undefined;
+    const combined = primitivePipeline.unpackCombineGeometryResults(result.combined);
+    if (!combined.geometries?.length) {
+      this._fail(frameState, undefined);
+      return;
+    }
+    if (result.lineBoundsCV) {
+      const spheres: BoundingSphere[] = [];
+      for (let offset = 0; offset < result.lineBoundsCV.length; offset += 4) {
+        spheres.push(BoundingSphere.unpack(result.lineBoundsCV as unknown as number[], offset));
+        if (spheres.length % 32 === 0 && offset + 4 < result.lineBoundsCV.length)
+          yield;
+      }
+      combined.boundingSpheresCV = spheres;
+    }
+    this._preparedLinePositions = result.linePositions;
+    if (this._layout === 'extrusion')
+      (this.appearance as ExtrusionAppearance).configurePositions(combined.geometries[0]);
+    if (this._layout === 'surface-planar' || this._layout === 'surface-morph')
+      this.appearance = packSurfacePositions(combined.geometries, this.appearance, this._layout === 'surface-morph');
+    Object.assign(this, {
+      _geometries: combined.geometries,
+      _attributeLocations: GeometryPipeline.createAttributeLocations(combined.geometries[0]),
+      modelMatrix: Matrix4.clone(combined.modelMatrix, this.modelMatrix),
+      _pickOffsets: combined.pickOffsets,
+      _offsetInstanceExtend: combined.offsetInstanceExtend,
+      _instanceBoundingSpheres: combined.boundingSpheres,
+      _instanceBoundingSpheresCV: combined.boundingSpheresCV,
+      _recomputeBoundingSpheres: true,
+      _state: primitiveState.COMBINED,
+    });
   }
 
   destroy(): void {
     const owner = this._geometryOwner;
     this._geometryOwner = undefined;
     this._inputInstances = undefined;
+    this._inputAttributeCache = undefined;
+    this._preparation?.return(undefined);
+    this._preparation = undefined;
+    this._waitingForSlot = undefined;
+    this._combinedResult = undefined;
+    this._preparedLinePositions = undefined;
+    this._lineUploadSteps?.return(undefined);
+    this._lineUploadSteps = undefined;
+    this._lineUploadPending = false;
+    this._lineUploadAdopted = false;
+    this._lineUploadTurn = undefined;
+    this._lineResourceEnvironment = undefined;
+    this._lineResourcesComplete = false;
+    this._lineDrawCounts = [];
+    this._lineFailurePending = false;
+    this._lineUpload?.destroy();
+    if (this._lineUpload)
+      Object.assign(this, { _va: [] });
+    this._lineUpload = undefined;
     this._linePositions?.destroy();
     this._linePositions = undefined;
-    this._linePositionData = undefined;
     this._lineBoundingSpheres = undefined;
+    this._expandedCommands = undefined;
     Object.assign(this, { geometryInstances: undefined, _geometries: undefined, _createGeometryResults: undefined });
     super.destroy();
     if (owner)
-      releaseOwner(owner);
+      owner.release();
   }
 
-  private _fail(frameState: GeometryFrame, error: unknown): void {
+  private _fail(frameState: GeometryFrame, error: unknown, detached = false): void {
     this._started = true;
-    this._linePositionData = undefined;
-    Object.assign(this, { _error: error, _state: PrimitiveState.FAILED });
-    frameState.afterRender?.push(() => {
-      if (!this.isDestroyed())
-        Object.assign(this, { _ready: true });
-      return true;
-    });
+    this._preparation = undefined;
+    this._waitingForSlot = undefined;
+    this._combinedResult = undefined;
+    this._preparedLinePositions = undefined;
+    this._lineUploadSteps?.return(undefined);
+    this._lineUploadSteps = undefined;
+    this._lineUploadPending = false;
+    this._lineUploadAdopted = false;
+    this._lineUploadTurn = undefined;
+    this._lineResourceEnvironment = undefined;
+    this._lineResourcesComplete = false;
+    this._lineDrawCounts = [];
+    this._lineFailurePending = false;
+    this._lineUpload?.destroy();
+    if (this._lineUpload)
+      Object.assign(this, { _va: [] });
+    this._lineUpload = undefined;
+    this._linePositions?.destroy();
+    this._linePositions = undefined;
+    // Native checks the instance envelope before propagating a failure.
+    // Preserve IDs, matrices and mutable paint attributes, but release the
+    // mesh storage that a failed owner can never upload. Shared source and
+    // cached Geometry objects remain untouched.
+    const instances = this.geometryInstances;
+    if (instances) {
+      const metadata = (Array.isArray(instances) ? instances : [instances]).map(instance => new GeometryInstance({
+        ...instance,
+        geometry: new Geometry({ attributes: {} as Geometry['attributes'], boundingSphere: instance.geometry.boundingSphere, primitiveType: instance.geometry.primitiveType }),
+      }));
+      Object.assign(this, { geometryInstances: Array.isArray(instances) ? metadata : metadata[0] });
+      this._inputInstances = this._inputInstances && new Map(metadata.map(instance => [instance.id, instance]));
+    }
+    Object.assign(this, { _geometries: undefined, _createGeometryResults: undefined, _error: error, _state: primitiveState.FAILED });
+    if (detached) {
+      this._lineFailurePending = true;
+    }
+    else {
+      frameState.afterRender?.push(() => {
+        if (!this.isDestroyed())
+          Object.assign(this, { _ready: true });
+        return true;
+      });
+    }
   }
 }

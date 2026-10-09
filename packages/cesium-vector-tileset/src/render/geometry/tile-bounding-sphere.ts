@@ -11,12 +11,11 @@ const DEG_TO_RAD = Math.PI / 180;
  *
  * Passing this as the Buffer*Collection `boundingVolume` constructor option
  * disables Cesium's per-update `BoundingSphere.fromVertices` scan over every
- * vertex (see `_updateBoundingVolume`). Tile geometry always sits on the
- * ellipsoid surface inside its own rectangle (circle radii and baked offsets
- * included), so the rectangle sphere contains it by construction.
+ * vertex (see `_updateBoundingVolume`). This bounds the canonical rectangle
+ * on the ellipsoid, rather than arbitrary content or screen-space expansion.
  *
- * The 0.1% + 1m padding covers float error and screen-space line widths,
- * which are negligible in world units but must never cause edge pop-out.
+ * The 0.1% + 1m padding provides a small numerical margin. Callers must
+ * separately account for heights, buffered geometry and pixel-sized symbols.
  */
 export function tileBoundingSphere(tileID: TileID): BoundingSphere {
   // ECEF positions are wrap-invariant (tileLocalToMercatorFraction shifts
