@@ -52,7 +52,7 @@ export const test = base.extend<{ cpuThrottle: void }, { renderUrl: string }>({
         optimizeDeps: {
           entries: [
             'index.html',
-            'packages/cesium-vector-tileset/src/worker/worker-entry.ts',
+            'packages/cesium-vector-tileset/src/worker/tile.worker.ts',
             'e2e/fixtures/*.html',
           ],
         },

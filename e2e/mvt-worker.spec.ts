@@ -39,7 +39,7 @@ test('a real failed MVT Worker rejects all shared clients while the healthy Work
   let requested = 0;
   let release: () => void;
   const held = new Promise<void>(resolve => release = resolve);
-  await page.route('**/worker-entry.ts*', async (route) => {
+  await page.route('**/tile.worker.ts*', async (route) => {
     requested++;
     if (requested === 1) {
       heldRequest = route.request().url();

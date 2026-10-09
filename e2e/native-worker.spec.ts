@@ -108,7 +108,7 @@ for (const scenario of ['normal', 'cdn', 'missing-entry', 'messageerror'] as con
           const workerUrl = String(url);
           this.observation = {
             url: workerUrl,
-            stage: workerUrl.includes('geometry-worker-entry') ? 'geometry' : undefined,
+            stage: workerUrl.includes('geometry.worker') ? 'geometry' : undefined,
             tasks: [],
             errors: [],
             terminated: 0,
@@ -213,7 +213,7 @@ for (const scenario of ['normal', 'cdn', 'missing-entry', 'messageerror'] as con
       query.set('cesiumBaseUrl', baseUrl.href);
       // Change the actual resolved entry asset origin. Cesium's asset base
       // alone affects only its transfer probe, not the production entry URL.
-      await page.context().route(/\/geometry-worker-entry\.ts\?worker&url(?:&|$)/, (route) => {
+      await page.context().route(/\/geometry\.worker\.ts\?worker&url(?:&|$)/, (route) => {
         const entryUrl = new URL(route.request().url());
         entryUrl.hostname = 'localhost';
         entryUrl.search = '?worker_file&type=module';
@@ -221,7 +221,7 @@ for (const scenario of ['normal', 'cdn', 'missing-entry', 'messageerror'] as con
       });
     }
     if (scenario === 'missing-entry') {
-      await page.context().route(/\/geometry-worker-entry\.ts\?worker_file(?:&|$)/, route => route.fulfill({
+      await page.context().route(/\/geometry\.worker\.ts\?worker_file(?:&|$)/, route => route.fulfill({
         status: 404,
         contentType: 'text/javascript',
         body: 'Missing production geometry Worker entry',
@@ -310,7 +310,7 @@ for (const scenario of ['normal', 'cdn', 'missing-entry', 'messageerror'] as con
         assert.equal(worker.errors.length, 1);
         assert.ok(worker.tasks.every(task => task.state === 'aborted'), 'fatal queue left an observed task pending');
         if (scenario === 'missing-entry')
-          assert.ok(responses.some(response => response.url.includes('geometry-worker-entry.ts?worker_file') && response.status === 404));
+          assert.ok(responses.some(response => response.url.includes('geometry.worker.ts?worker_file') && response.status === 404));
         else
           assert.equal(worker.errors[0].type, 'messageerror');
       }
@@ -341,7 +341,7 @@ for (const scenario of ['normal', 'cdn', 'missing-entry', 'messageerror'] as con
         assert.equal(geometryBlobs.length, 1);
         assert.equal(geometryBlobs[0].revoked, false);
         assert.ok(responses.some(response => new URL(response.url).hostname === 'localhost'
-          && response.url.includes('geometry-worker-entry.ts?worker_file') && response.status === 200));
+          && response.url.includes('geometry.worker.ts?worker_file') && response.status === 200));
       }
       else {
         assert.equal(geometryBlobs.length, 0);
