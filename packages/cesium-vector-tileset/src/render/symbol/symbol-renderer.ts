@@ -7,8 +7,8 @@ import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { SymbolPrimitiveGeometry, SymbolTileGeometry } from './symbol-geometry';
-import type { PlacementView } from './symbol-placement';
-import type { SymbolPlacementBatch } from './symbol-placement-pass';
+import type { PlacementView, SymbolTileSelection } from './symbol-placement';
+import type { SymbolPlacementBatch, SymbolPlacementGeneration, SymbolPlacementPass } from './symbol-placement-pass';
 import {
   BoundingSphere,
   Cartesian2,
@@ -33,14 +33,18 @@ import {
 import { SymbolBucket } from '../../data/bucket-runtime';
 import { geometryBytes } from '../geometry/geometry-bytes';
 import { registerDrawBatch } from '../scene/draw-batch';
-import { FrameBudget } from '../scene/frame-budget';
 import { RetiredPool } from '../scene/retired-pool';
+import { MinimumProgressBudget } from '../scene/scene-frame-budget';
 import { constantValue, straightAlphaColor } from '../vector/feature-attributes';
 import { symbolBucketGeometry } from './symbol-geometry';
-import { INVALID_LINE_ANGLE, sameViewProjection, updateLineSymbolGeometry } from './symbol-placement';
-import { SymbolPlacementPass } from './symbol-placement-pass';
+import { symbolMercatorDelta, symbolMercatorPosition } from './symbol-perspective';
+import { INVALID_LINE_ANGLE, SymbolCollisionIndex, SymbolProjectionContext, updateLineSymbolGeometry } from './symbol-placement';
+import { copyPlacementView, samePlacementView, SymbolPlacementScope } from './symbol-placement-pass';
 
 type TileID = CanonicalTileID | OverscaledTileID;
+
+/** Run deferred collision work after the renderer's mandatory camera and Native work. */
+export type SymbolPlacementWork = (operation: (budget: Budget) => void) => void;
 
 /** The evaluated value of a constant symbol paint colour. */
 function symbolColor(layer: SymbolStyleLayer, property: string): Color {
@@ -71,15 +75,12 @@ function symbolHalo(layer: SymbolStyleLayer, part: 'text' | 'icon' = 'text'): Te
   };
 }
 
-/**
- * Symbol vertex shader: every vertex carries the ECEF anchor of its label and
- * a quad corner measured in pixels, so a label keeps a constant on-screen size
- * at any camera distance. The corner is applied after projection in window
- * space, which is the same thing MapLibre's tile-space symbol matrix achieves
- * on a flat map.
- */
+/** Project symbol corners in their actual viewport or Mercator label plane. */
 export const SYMBOL_VERTEX_SHADER = `
 uniform float u_camera_zoom;
+uniform float u_symbol_camera_distance;
+uniform float u_symbol_orthographic;
+uniform float u_symbol_mercator_projection;
 in vec3 position3DHigh;
 in vec3 position3DLow;
 in vec2 a_offset;
@@ -87,8 +88,8 @@ in vec2 a_pxoffset;
 in vec2 a_minfontscale;
 in vec2 a_tex;
 in float a_size;
-in float a_size_max;
-in vec2 a_size_zoom;
+in vec4 a_size_max;
+in vec3 a_size_zoom;
 in vec4 a_color;
 in vec4 a_halo_color;
 in float a_opacity;
@@ -109,6 +110,49 @@ out vec4 v_halo_color;
 out vec3 v_positionEC;
 out vec3 v_normalEC;
 out vec2 v_st;
+
+// Exact WGS84 displacement of a ground point by east/south Mercator metres.
+// Difference formulas retain small corner offsets beside a 6-million-metre
+// ECEF anchor, and work with scene3DOnly without projected attributes.
+vec3 symbolGroundDeltaEC(vec2 metres)
+{
+    vec3 world = position3DHigh + position3DLow;
+    vec3 normal = czm_geodeticSurfaceNormal(world, vec3(0.0),
+        vec3(2.458172257647332e-14, 2.458172257647332e-14, 2.4747391015697002e-14));
+    float cosine = length(normal.xy);
+    vec3 radial = vec3(normal.xy / max(cosine, 1.0e-12), 0.0);
+    vec3 east = vec3(-radial.y, radial.x, 0.0);
+    float t = tanh(-metres.y / 6378137.0);
+    float root = sqrt(max(0.0, 1.0 - t * t));
+    float denominator = 1.0 + normal.z * t;
+    float deltaSin = cosine * cosine * t / denominator;
+    float deltaCos = cosine * (-t * t / (root + 1.0) - normal.z * t) / denominator;
+    float newSin = normal.z + deltaSin;
+    float newCos = cosine + deltaCos;
+    float eccentricitySquared = 0.0066943799901413165;
+    float oldDenominator = 1.0 - eccentricitySquared * normal.z * normal.z;
+    float newDenominator = 1.0 - eccentricitySquared * newSin * newSin;
+    float oldRoot = sqrt(oldDenominator);
+    float newRoot = sqrt(newDenominator);
+    float primeVertical = 6378137.0 / newRoot;
+    float deltaPrimeVertical = 6378137.0 * eccentricitySquared
+        * (2.0 * normal.z * deltaSin + deltaSin * deltaSin)
+        / (oldRoot * newRoot * (oldRoot + newRoot));
+    float radius = primeVertical * newCos;
+    float deltaRadius = deltaPrimeVertical * cosine + primeVertical * deltaCos;
+    float longitudeDelta = metres.x / 6378137.0;
+    float halfSin = sin(longitudeDelta * 0.5);
+    vec3 delta = radial * (deltaRadius - radius * 2.0 * halfSin * halfSin)
+        + east * radius * sin(longitudeDelta)
+        + vec3(0.0, 0.0, (1.0 - eccentricitySquared)
+            * (deltaPrimeVertical * normal.z + primeVertical * deltaSin));
+    vec3 delta3DEC = (czm_modelViewRelativeToEye * vec4(delta, 0.0)).xyz;
+    float latitudeDelta = atan(deltaSin * cosine - deltaCos * normal.z,
+        newSin * normal.z + newCos * cosine);
+    float north = u_symbol_mercator_projection > 0.5 ? -metres.y : latitudeDelta * 6378137.0;
+    vec3 delta2DEC = (czm_modelViewRelativeToEye * vec4(0.0, metres.x, north, 0.0)).xyz;
+    return mix(delta2DEC, delta3DEC, czm_morphTime);
+}
 
 void main()
 {
@@ -158,7 +202,21 @@ void main()
     float zoomT = a_size_zoom.y > a_size_zoom.x
         ? clamp((u_camera_zoom - a_size_zoom.x) / (a_size_zoom.y - a_size_zoom.x), 0.0, 1.0)
         : 0.0;
-    float size = mix(sizeMin, max(a_size_max, sizeMin), zoomT) / 128.0;
+    float size = mix(sizeMin, max(a_size_max.x, sizeMin), zoomT) / 128.0;
+    bool mapPitch = a_size_zoom.z == 2.0 || a_size_zoom.z == 4.0;
+    vec4 workerClip = clip;
+    if (any(notEqual(a_size_max.yz, vec2(0.0)))) {
+        workerClip += czm_projection * vec4(symbolGroundDeltaEC(a_size_max.yz), 0.0);
+    }
+    if (a_size_zoom.z > 0.5 && a_size_zoom.z < 2.5 && u_symbol_orthographic < 0.5) {
+        if (!(u_symbol_camera_distance > 0.0) || !(workerClip.w > 0.0)) {
+            gl_Position = vec4(-2.0, -2.0, -2.0, 1.0);
+            return;
+        }
+        float distanceRatio = mapPitch ? workerClip.w / u_symbol_camera_distance
+            : u_symbol_camera_distance / workerClip.w;
+        size *= clamp(0.5 + 0.5 * distanceRatio, 0.0, 4.0);
+    }
 
     // Collision writes per-vertex visibility into a_opacity; the tile fade
     // scales it per instance, so a leaving tile's symbols ramp out together
@@ -195,10 +253,43 @@ void main()
     offsetPx = mat2(angleCos, -angleSin, angleSin, angleCos) * offsetPx;
 
     gl_Position = clip;
-    gl_Position.xy += ((offsetPx + vec2(a_dynamic.x, -a_dynamic.y)) / czm_viewport.zw) * clip.w * 2.0;
+    if (mapPitch) {
+        float metresPerPixel = 40075016.68557849 / (512.0 * exp2(u_camera_zoom));
+        vec2 metres = a_dynamic.xy + vec2(offsetPx.x, -offsetPx.y) / czm_pixelRatio * metresPerPixel;
+        if (a_size_max.w == 1.0) {
+            // Inverse ground-to-eye XY columns, independently normalized as
+            // MapLibre's viewport-rotated, map-pitched label plane requires.
+            vec3 eastEC = symbolGroundDeltaEC(vec2(1.0, 0.0));
+            vec3 southEC = symbolGroundDeltaEC(vec2(0.0, 1.0));
+            vec2 east = vec2(-southEC.y, eastEC.y);
+            vec2 south = vec2(-southEC.x, eastEC.x);
+            float eastLength = length(east);
+            float southLength = length(south);
+            east = eastLength < 1.0e-9 ? vec2(0.0) : east / eastLength;
+            south = southLength < 1.0e-9 ? vec2(0.0) : south / southLength;
+            metres = east * metres.x + south * metres.y;
+        }
+        gl_Position += czm_projection * vec4(symbolGroundDeltaEC(metres), 0.0);
+    } else {
+        gl_Position.xy += ((offsetPx + vec2(a_dynamic.x, -a_dynamic.y)) / czm_viewport.zw) * clip.w * 2.0;
+    }
 
     v_tex = a_tex;
-    v_data = vec3(clip.w, size, effectiveOpacity);
+    // MapLibre's SDF gamma is final clip W divided by cos(pitch)*D.
+    // The ordinary viewport coordinate matrix has W=1. Native's clip units
+    // differ, so normalize only the map label plane in matching world units.
+    float gammaScale = 1.0;
+    if (mapPitch && u_symbol_orthographic < 0.5) {
+        vec3 cameraNormal = czm_geodeticSurfaceNormal(czm_viewerPositionWC, vec3(0.0),
+            vec3(2.458172257647332e-14, 2.458172257647332e-14, 2.4747391015697002e-14));
+        float cosine3D = abs((czm_viewRotation * cameraNormal).z);
+        float cosine2D = abs((czm_modelViewRelativeToEye * vec4(1.0, 0.0, 0.0, 0.0)).z);
+        float gammaDistance = mix(cosine2D, cosine3D, czm_morphTime) * u_symbol_camera_distance;
+        // At an exactly horizontal direction the mathematical gamma limit
+        // is infinite. Encode that limit rather than generate NaN coverage.
+        gammaScale = gammaDistance > 0.0 ? gl_Position.w / gammaDistance : -1.0;
+    }
+    v_data = vec3(gammaScale, size, effectiveOpacity);
     v_is_sdf = isSdf;
     v_color = a_color;
     v_halo_color = a_halo_color;
@@ -260,10 +351,10 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
     {
         float EDGE_GAMMA = 0.105 / u_device_pixel_ratio;
         float fontScale = u_is_text ? size / 24.0 : size;
-        float gamma = EDGE_GAMMA / (fontScale * gammaScale);
+        float gamma = EDGE_GAMMA / fontScale;
         float innerEdge = (256.0 - 64.0) / 256.0;
         float gammaScaled = gamma * gammaScale;
-        alpha = smoothstep(innerEdge - gammaScaled, innerEdge + gammaScaled, sampled);
+        alpha = gammaScale < 0.0 ? 0.5 : smoothstep(innerEdge - gammaScaled, innerEdge + gammaScaled, sampled);
 
         // MapLibre's symbol_sdf halo: an annulus reaching halo_width pixels
         // beyond the glyph edge, composited under the fill in one pass
@@ -271,12 +362,12 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
         if (u_halo_width > 0.0)
         {
             float SDF_PX = 8.0;
-            float gammaHalo = (u_halo_blur * 1.19 / SDF_PX + EDGE_GAMMA) / (fontScale * gammaScale);
+            float gammaHalo = (u_halo_blur * 1.19 / SDF_PX + EDGE_GAMMA) / fontScale;
             float innerEdgeHalo = innerEdge + gammaHalo * gammaScale;
             float gammaScaledHalo = gammaHalo * gammaScale;
             float alphaHalo = smoothstep(innerEdgeHalo - gammaScaledHalo, innerEdgeHalo + gammaScaledHalo, sampled);
             float haloEdge = (6.0 - u_halo_width / fontScale) / SDF_PX;
-            alphaHalo = min(smoothstep(haloEdge - gammaScaledHalo, haloEdge + gammaScaledHalo, sampled), 1.0 - alphaHalo);
+            alphaHalo = gammaScale < 0.0 ? 0.5 : min(smoothstep(haloEdge - gammaScaledHalo, haloEdge + gammaScaledHalo, sampled), 1.0 - alphaHalo);
 
             vec3 fillRgb = fillColor.rgb * (alpha * opacity * fillColor.a);
             float fillA = alpha * opacity * fillColor.a;
@@ -307,8 +398,10 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
         {
             icon = texture(u_texture, tex);
         }
-        material.diffuse = icon.rgb;
-        material.alpha = icon.a * opacity;
+        // Atlas filtering operates on premultiplied pixels, as in MapLibre.
+        // Native material blending expects straight RGB and applies alpha.
+        material.diffuse = icon.a > 0.0 ? icon.rgb / icon.a : vec3(0.0);
+        material.alpha = icon.a * opacity * fillColor.a;
         return material;
     }
 
@@ -474,6 +567,13 @@ function symbolMaterial(
   // The camera zoom is used only by our vertex shader, so give Primitive's
   // command uniform map the exact vertex uniform name instead.
   material.uniforms.u_camera_zoom = 0;
+  material.uniforms.u_symbol_camera_distance = 0;
+  material.uniforms.u_symbol_orthographic = 0;
+  material.uniforms.u_symbol_mercator_projection = 0;
+  const liveUniforms = (material as Material & { _uniforms: Record<string, () => unknown> })._uniforms;
+  liveUniforms.u_symbol_camera_distance = () => material.uniforms.u_symbol_camera_distance;
+  liveUniforms.u_symbol_orthographic = () => material.uniforms.u_symbol_orthographic;
+  liveUniforms.u_symbol_mercator_projection = () => material.uniforms.u_symbol_mercator_projection;
   (material as Material & { _uniforms: Record<string, () => unknown> })._uniforms.u_camera_zoom
     = () => material.uniforms.u_camera_zoom;
   return material;
@@ -534,6 +634,36 @@ function symbolGeometry(geometry: SymbolPrimitiveGeometry, indices: Uint32Array)
     return undefined;
   }
   const sphere = paddedBounds(geometry);
+  // Native adds four position attributes and batchId. Keep the complete
+  // shader within WebGL's 16 slots by sharing the zoom attribute's free lane.
+  const sizeZooms = new Float32Array(geometry.positions.length);
+  for (let index = 0; index < geometry.positions.length / 3; index++) {
+    sizeZooms[index * 3] = geometry.sizeZooms[index * 2];
+    sizeZooms[index * 3 + 1] = geometry.sizeZooms[index * 2 + 1];
+    sizeZooms[index * 3 + 2] = geometry.mapPitch ? (geometry.sizePerspective ? 2 : 4) : geometry.viewportPerspective ? (geometry.sizePerspective ? 1 : 3) : 0;
+  }
+  // The ratio belongs to the worker label anchor, not each baked glyph.
+  // Store its label-plane delta in the size attribute's unused lanes.
+  const sizeAnchors = new Float32Array(geometry.sizesMax.length * 4);
+  for (let index = 0; index < geometry.sizesMax.length; index++) {
+    sizeAnchors[index * 4] = geometry.sizesMax[index];
+    sizeAnchors[index * 4 + 3] = geometry.pointMapRotation === 'viewport' ? 1 : 0;
+  }
+  for (const instance of geometry.instances) {
+    if (!instance.line || (!geometry.viewportPerspective && !geometry.mapPitch))
+      continue;
+    const worker = symbolMercatorPosition(instance.line.anchorECEF.x, instance.line.anchorECEF.y, instance.line.anchorECEF.z);
+    if (!worker)
+      continue;
+    for (let index = instance.vertexStart; index < instance.vertexStart + instance.vertexCount; index++) {
+      const position = index * 3;
+      const glyph = symbolMercatorPosition(geometry.positions[position], geometry.positions[position + 1], geometry.positions[position + 2]);
+      if (glyph) {
+        sizeAnchors[index * 4 + 1] = symbolMercatorDelta(worker.x, glyph.x);
+        sizeAnchors[index * 4 + 2] = worker.y - glyph.y;
+      }
+    }
+  }
   return new Geometry({
     attributes: {
       // Emitted DOUBLE on purpose: Cesium's pipeline encodes it into the
@@ -570,13 +700,13 @@ function symbolGeometry(geometry: SymbolPrimitiveGeometry, indices: Uint32Array)
       }),
       a_size_max: new GeometryAttribute({
         componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 1,
-        values: geometry.sizesMax,
+        componentsPerAttribute: 4,
+        values: sizeAnchors,
       }),
       a_size_zoom: new GeometryAttribute({
         componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
-        values: geometry.sizeZooms,
+        componentsPerAttribute: 3,
+        values: sizeZooms,
       }),
       a_color: new GeometryAttribute({
         componentDatatype: ComponentDatatype.FLOAT,
@@ -689,7 +819,33 @@ export interface MergedSymbolCollections {
 
 /** Keep Cesium's point-anchor pipeline and draw the shader-expanded quads. */
 class SymbolPrimitive extends Primitive {
+  private readonly _halves: SymbolHalf[] = [];
+  private readonly _halfVisibility = new Map<SymbolHalf, boolean>();
+  private _visibleHalves = 0;
+
+  addHalf(half: SymbolHalf): void {
+    this._halves.push(half);
+    this.syncHalfVisibility(half);
+  }
+
+  /** Only dirty opacity synchronization observes instance-sized CPU arrays. */
+  syncHalfVisibility(half: SymbolHalf): void {
+    const visible = !half.opacity || half.opacity.geometry.opacities.some(opacity => opacity > 0);
+    const previous = this._halfVisibility.get(half) ?? false;
+    if (visible !== previous) {
+      this._visibleHalves += visible ? 1 : -1;
+    }
+    this._halfVisibility.set(half, visible);
+  }
+
   update(frameState?: { commandList: Array<{ owner?: object; primitiveType: number }> }): void {
+    // Empty owners still prepare their VA and settle Native ready/afterRender.
+    // Dirty streams and fade setters retain the ordinary Native update path.
+    const batchTable = (this as Primitive & { _batchTable?: { _batchValuesDirty: boolean } })._batchTable;
+    if (this.ready && this._visibleHalves === 0 && !batchTable?._batchValuesDirty
+      && !this._halves.some(half => half.opacity?.geometry.opacityDirty || half.dynamic?.dirty)) {
+      return;
+    }
     const first = frameState.commandList.length;
     Reflect.apply(Primitive.prototype.update, this, [frameState]);
     for (let i = first; i < frameState.commandList.length; i++) {
@@ -764,6 +920,7 @@ export function mergeSymbolHalves(tileId: string, halves: readonly SymbolHalf[])
       collection.add(primitive);
       primitives.push({ primitive, instanceIds: group.instances.map(instance => instance.id) });
       for (const { half, vertexStart } of group.halves) {
+        primitive.addHalf(half);
         if (half.opacity) {
           half.opacity.target = { primitive, vertexStart };
         }
@@ -817,7 +974,11 @@ export function syncHalfOpacity(half: SymbolHalf): void {
   }
   const geometry = opacity.geometry;
   if (geometry.opacityDirty && opacity.target) {
-    geometry.opacityDirty = !uploadSymbolAttribute(opacity.target.primitive, 'a_opacity', geometry.opacities, opacity.target.vertexStart, 1);
+    const uploaded = uploadSymbolAttribute(opacity.target.primitive, 'a_opacity', geometry.opacities, opacity.target.vertexStart, 1);
+    if (uploaded && opacity.target.primitive instanceof SymbolPrimitive) {
+      opacity.target.primitive.syncHalfVisibility(half);
+    }
+    geometry.opacityDirty = !uploaded;
   }
 }
 
@@ -1026,23 +1187,34 @@ interface OrderedSymbolBatch extends SymbolPlacementBatch {
   halves: SymbolHalf[];
 }
 
-function copyPlacementView(view: PlacementView): PlacementView {
-  return { ...view, viewProjection: new Float64Array(view.viewProjection), viewport: view.viewport && { ...view.viewport } };
+type SymbolPlacementPlanKind = 'target' | 'visible' | 'prospective';
+interface SymbolPlacementPlan {
+  revision: number;
+  entries: ReadonlyMap<string, SymbolTileEntry>;
+  owners: ReadonlySet<string>;
+  batches: readonly OrderedSymbolBatch[];
 }
 
-function samePlacementParameters(a: PlacementView, b: PlacementView): boolean {
-  return a.width === b.width && a.height === b.height && a.pixelRatio === b.pixelRatio
-    && a.cameraZoom === b.cameraZoom && !!a.projectPosition === !!b.projectPosition
-    && !!a.isPointVisible === !!b.isPointVisible
-    && a.viewport?.x === b.viewport?.x && a.viewport?.y === b.viewport?.y
-    && a.viewport?.width === b.viewport?.width && a.viewport?.height === b.viewport?.height;
+interface SymbolPlacementEntryIndex {
+  layers: ReadonlyMap<string, SymbolStyleLayer>;
+  halves: ReadonlyMap<string, SymbolHalf[]>;
 }
 
-function samePlacementView(a: PlacementView | undefined, b: PlacementView): boolean {
-  if (!a || !samePlacementParameters(a, b)) {
+function sameTileSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) {
     return false;
   }
-  return sameViewProjection(a.viewProjection, b.viewProjection);
+  for (const tileId of a) {
+    if (!b.has(tileId)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameSymbolBatch(a: OrderedSymbolBatch, b: OrderedSymbolBatch): boolean {
+  return a.entry === b.entry && a.index === b.index
+    && a.options.textOptional === b.options.textOptional && a.options.iconOptional === b.options.iconOptional;
 }
 
 /** Resumable per-layer symbol extraction state (see stepBuild). */
@@ -1056,6 +1228,8 @@ export interface SymbolBuildState {
   key: string;
   layerIndex: number;
   entry?: SymbolTileEntry;
+  retainedMaterials: Set<Material>;
+  resourceOwner: 'build' | 'entry' | 'released';
 }
 
 export function beginSymbolBuild(
@@ -1072,6 +1246,8 @@ export function beginSymbolBuild(
     halves: [],
     key: '',
     layerIndex: 0,
+    retainedMaterials: new Set(),
+    resourceOwner: 'build',
   };
 }
 
@@ -1087,27 +1263,35 @@ const EMPTY_SYMBOL_COLLECTIONS: readonly PrimitiveCollection[] = [];
  */
 export class SymbolTileRenderer {
   private _tiles: Map<string, SymbolTileEntry> = new Map();
+  /** The currently drawn generation may precede the tile's latest prepared entry. */
+  private _visibleEntries: Map<string, SymbolTileEntry> = new Map();
   private _imageUpdateRevision = -1;
   private _pendingImageEntries = new Set<SymbolTileEntry>();
   private _held = new Map<number, SymbolTileEntry>();
   private _nextHeldId = 0;
-  private _orderedBatches: OrderedSymbolBatch[] = [];
-  private _placementBatches: readonly OrderedSymbolBatch[] = [];
-  private _placementRevision = 0;
-  private _activePlacementRevision = 0;
   private _excludedPlacementTiles = new Set<string>();
-  private _placementEligibilityRevision = 0;
-  private _activePlacementEligibilityRevision = 0;
-  private _placement: SymbolPlacementPass | undefined;
-  private _placementView: PlacementView | undefined;
   private _lineView: PlacementView | undefined;
-  private _placementDirty = false;
-  private _placementUrgent = false;
-  private _lastPlacementMs = Number.NEGATIVE_INFINITY;
+  private _liveSelectionView: PlacementView | undefined;
+  private readonly _liveCollision = new SymbolCollisionIndex();
+  private _liveSelections = new WeakMap<SymbolTileGeometry, { selection: SymbolTileSelection; origin: object; order: number; fresh: boolean }>();
+  private _liveSelectionRevision = 0;
+  private _appliedLiveSelectionRevision = -1;
+  private _liveSelectionPlanRevision = -1;
+  /** Scene visibility and replacement readiness are different collision scopes. */
+  private _hiddenPlacementTiles = new Set<string>();
+  private _visibleInputsDirty = false;
+  private _placementLayerInputs = new WeakMap<SymbolTileEntry, readonly boolean[]>();
+  private _placementPlanRevision = 0;
+  private _placementPlans = new Map<SymbolPlacementPlanKind, SymbolPlacementPlan>();
+  private _placementEntryIndexes = new WeakMap<SymbolTileEntry, SymbolPlacementEntryIndex>();
   /** MapLibre keeps a completed placement recent for its 300ms fade interval. */
   static readonly PLACEMENT_RECENCY_MS = 300;
   static readonly PLACEMENT_BUDGET_MS = 2;
-  static readonly PLACEMENT_MAX_INSTANCES = 128;
+  private _placementScopeTurn = 0;
+  private readonly _targetPlacement = new SymbolPlacementScope<OrderedSymbolBatch>(sameSymbolBatch, SymbolTileRenderer.PLACEMENT_RECENCY_MS);
+  private readonly _visiblePlacement = new SymbolPlacementScope<OrderedSymbolBatch>(sameSymbolBatch, SymbolTileRenderer.PLACEMENT_RECENCY_MS);
+  private readonly _handoffPlacement = new SymbolPlacementScope<OrderedSymbolBatch>(sameSymbolBatch, SymbolTileRenderer.PLACEMENT_RECENCY_MS);
+  private _prospectiveVisibleTiles: ReadonlySet<string> | undefined;
   /**
    * A removal leaves ghost boxes in an active generation, so the next
    * generation must rebuild its occupancy from the latest tile content.
@@ -1135,8 +1319,7 @@ export class SymbolTileRenderer {
    * at tile boundaries.
    */
   cameraZoom = 0;
-  private _appliedCameraZoom = Number.NaN;
-  private _shared = new SharedAtlasTextures();
+  private _shared = new SharedAtlasTextures({ premultiplyAlpha: true });
   private _payloadIds = new WeakMap<object, number>();
   private _payloadNextId = 1;
 
@@ -1159,7 +1342,143 @@ export class SymbolTileRenderer {
     return this._tiles.get(tileId)?.placed === true;
   }
 
-  /** Held coverage draws its previous layout while the target cover places. */
+  /** Scene handoff may switch collections only after their layout became active. */
+  isTilePlacementActive(tileId: string): boolean {
+    const entry = this._tiles.get(tileId);
+    return !!entry && entry.placed && this._visibleEntries.get(tileId) === entry;
+  }
+
+  /** Geometry already extracted for a layer, including currently hidden layers. */
+  hasTileLayer(tileId: string, layerId: string): boolean {
+    return this._tiles.get(tileId)?.layerIds.includes(layerId) === true;
+  }
+
+  /** Whether this tile can supply symbol coverage at the current style zoom. */
+  hasTileVisibleSymbols(tileId: string): boolean {
+    const entry = this._visibleEntries.get(tileId) ?? this._tiles.get(tileId);
+    if (!entry || !entry.collections.some(collection => !collection.isDestroyed())) {
+      return false;
+    }
+    const metadata = this._placementEntryIndexFor(entry);
+    return entry.batches.some((batch, index) => {
+      const layerId = entry.layerIds[index];
+      const layer = metadata.layers.get(layerId);
+      if (layer?.isHidden(this.cameraZoom)) {
+        return false;
+      }
+      const drawableParts = (['text', 'icon'] as const).filter(part => (batch[part]?.instances.length ?? 0) > 0);
+      return !!layer && metadata.halves.get(layerId)?.some(half =>
+        drawableParts.includes(half.part) && !half.material.isDestroyed()) === true;
+    });
+  }
+
+  /** The scene's current symbol owner, independent of future replacement input. */
+  setTilePlacementVisible(tileId: string, visible: boolean): void {
+    if (this._hiddenPlacementTiles.has(tileId) === !visible) {
+      return;
+    }
+    if (visible) {
+      this._hiddenPlacementTiles.delete(tileId);
+    }
+    else {
+      this._hiddenPlacementTiles.add(tileId);
+    }
+    this._visibleInputsDirty = true;
+    this._liveSelectionView = undefined;
+  }
+
+  /** Prepare a whole prospective owner set before the scene changes its draw cover. */
+  prepareVisiblePlacement(tileIds: ReadonlySet<string>): boolean {
+    this._prospectiveVisibleTiles = new Set(tileIds);
+    const prospective = this._placementPlanFor('prospective', this._lineView?.cameraZoom ?? this.cameraZoom, tileIds);
+    const prepared = this._preparedForOwners(prospective);
+    if (prepared) {
+      this._prospectiveVisibleTiles = undefined;
+      if (prepared !== this._handoffPlacement.complete) {
+        this._handoffPlacement.clear();
+      }
+      return true;
+    }
+    if (prospective.length === 0) {
+      this._handoffPlacement.completeEmpty(this._lineView ?? {
+        viewProjection: new Float64Array(16),
+        width: 0,
+        height: 0,
+        pixelRatio: 1,
+        cameraZoom: this.cameraZoom,
+        cameraToCenterDistance: undefined,
+        orthographic: false,
+        mercatorProjection: false,
+      });
+      this._prospectiveVisibleTiles = undefined;
+      return true;
+    }
+    this._handoffPlacement.prepare(prospective);
+    return false;
+  }
+
+  /** Atomically apply a complete layout to exactly the scene's new owners. */
+  activatePreparedPlacement(): boolean {
+    const owners = new Set([...this._tiles.keys()].filter(tileId => !this._hiddenPlacementTiles.has(tileId)));
+    const visible = this._placementPlanFor('prospective', this._lineView?.cameraZoom ?? this.cameraZoom, owners);
+    const prepared = this._preparedForOwners(visible);
+    if (!prepared || (this._visiblePlacement.complete?.pass === prepared.pass && !this._visibleInputsDirty)) {
+      return false;
+    }
+    const projections = new SymbolProjectionContext();
+    this._commitPlacement(prepared.pass, prepared.batches, () => true, projections, this._lineView);
+    let generationsChanged = false;
+    for (const [tileId, entry] of this._tiles) {
+      generationsChanged ||= this._visibleEntries.get(tileId) !== entry;
+      this._visibleEntries.set(tileId, entry);
+    }
+    if (generationsChanged) {
+      this._placementPlanRevision++;
+    }
+    this._visiblePlacement.prepare(visible);
+    this._visiblePlacement.activate(prepared, this._lineView ?? prepared.view);
+    this._visibleInputsDirty = false;
+    this._prospectiveVisibleTiles = undefined;
+    this._handoffPlacement.clear();
+    if (this._lineView) {
+      this._filterVisibleSelection(this._lineView, projections);
+    }
+    return true;
+  }
+
+  private _preparedForOwners(batches: readonly OrderedSymbolBatch[]): SymbolPlacementGeneration<OrderedSymbolBatch> | undefined {
+    for (const scope of [this._targetPlacement, this._handoffPlacement, this._visiblePlacement]) {
+      const prepared = scope.complete;
+      if (prepared && prepared.batches.length === batches.length
+        && prepared.batches.every((batch, index) => sameSymbolBatch(batch, batches[index]) && this._tiles.get(batch.tileId) === batch.entry)
+        && this._canActivatePlacement(prepared)) {
+        return prepared;
+      }
+    }
+    return undefined;
+  }
+
+  private _canActivatePlacement(prepared: SymbolPlacementGeneration<OrderedSymbolBatch>): boolean {
+    if (!this._lineView || samePlacementView(prepared.view, this._lineView)) {
+      return true;
+    }
+    // An unaffected nonempty entry cannot make an empty successor safe. Its
+    // selected-only live filter has no candidates to recover in the new view.
+    const selected = new Map<SymbolTileEntry, boolean>();
+    for (const [index, batch] of prepared.batches.entries()) {
+      selected.set(batch.entry, selected.get(batch.entry) === true || prepared.pass.hasSelectedCandidates(index));
+    }
+    const emptySuccessor = prepared.batches.some(batch => (this._hiddenPlacementTiles.has(batch.tileId) || this._visibleEntries.get(batch.tileId) !== batch.entry) && !selected.get(batch.entry));
+    if (!emptySuccessor) {
+      return true;
+    }
+    // Keep the old complete cover until a current-view pass can confirm the
+    // successor's empty result. A first load has no prior cover to preserve.
+    return ![...this._visibleEntries].some(([tileId, entry]) => !this._hiddenPlacementTiles.has(tileId)
+      && !selected.has(entry) && entry.batches.some(batch => this._liveSelections.get(batch)?.selection.hasCandidates));
+  }
+
+  /** Future replacement input, independently of the scene's current owners. */
   setTilePlacementEligible(tileId: string, eligible: boolean): void {
     if (this._excludedPlacementTiles.has(tileId) === !eligible) {
       return;
@@ -1170,8 +1489,7 @@ export class SymbolTileRenderer {
     else {
       this._excludedPlacementTiles.add(tileId);
     }
-    this._placementEligibilityRevision++;
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
   }
 
   /**
@@ -1223,6 +1541,9 @@ export class SymbolTileRenderer {
     removed: PrimitiveCollection[];
     retained?: { collections: PrimitiveCollection[]; release: () => void };
   } {
+    if (state.resourceOwner !== 'build') {
+      throw new Error('commitBuild called after symbol build ownership ended');
+    }
     if (!state.entry) {
       throw new Error('commitBuild called on an unfinished symbol build');
     }
@@ -1232,8 +1553,10 @@ export class SymbolTileRenderer {
       this.releaseBuild(state);
       return { added: [], removed: this.removeTile(state.input.tileId) };
     }
-    this._retainEntryMaterials(state.entry);
+    this._retainBuildMaterials(state, state.entry.materials);
+    state.resourceOwner = 'entry';
     const previous = this._tiles.get(state.input.tileId);
+    const current = this._visibleEntries.get(state.input.tileId);
     const heldId = previous ? ++this._nextHeldId : undefined;
     if (previous) {
       // SceneCollections keeps these primitives visible until the replacement
@@ -1247,11 +1570,16 @@ export class SymbolTileRenderer {
     // Eligibility belongs to the logical tile's current cover, so a content
     // replacement preserves it while explicit removal clears it.
     const excluded = this._excludedPlacementTiles.has(state.input.tileId);
+    const hidden = this._hiddenPlacementTiles.has(state.input.tileId);
     const removed = this.removeTile(state.input.tileId);
     if (excluded) {
       this._excludedPlacementTiles.add(state.input.tileId);
     }
+    if (hidden) {
+      this._hiddenPlacementTiles.add(state.input.tileId);
+    }
     this._tiles.set(state.input.tileId, state.entry);
+    this._visibleEntries.set(state.input.tileId, current ?? state.entry);
     if (state.entry.input.iconAtlas) {
       this._pendingImageEntries.add(state.entry);
     }
@@ -1269,7 +1597,7 @@ export class SymbolTileRenderer {
     for (const half of state.entry.halves) {
       this._syncOpacity(half);
     }
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
     return {
       added: state.entry.collections.filter((collection): collection is PrimitiveCollection => !!collection),
       removed,
@@ -1409,7 +1737,24 @@ export class SymbolTileRenderer {
   }
 
   private _retainMaterial(material: Material): void {
+    // Tile extraction can finish after this frame's camera update. A new
+    // atlas material must already use the current units on its first paint.
+    material.uniforms.u_camera_zoom = this.cameraZoom;
+    if (this._lineView) {
+      material.uniforms.u_symbol_camera_distance = this._lineView.cameraToCenterDistance ?? 0;
+      material.uniforms.u_symbol_orthographic = this._lineView.orthographic ? 1 : 0;
+      material.uniforms.u_symbol_mercator_projection = this._lineView.mercatorProjection ? 1 : 0;
+    }
     this._materialRefs.set(material, (this._materialRefs.get(material) ?? 0) + 1);
+  }
+
+  private _retainBuildMaterials(state: SymbolBuildState, materials: Iterable<Material>): void {
+    for (const material of materials) {
+      if (!state.retainedMaterials.has(material)) {
+        state.retainedMaterials.add(material);
+        this._retainMaterial(material);
+      }
+    }
   }
 
   private _releaseMaterial(material: Material): void {
@@ -1443,6 +1788,12 @@ export class SymbolTileRenderer {
    * materials only - never re-retain the holds.
    */
   private _releaseEntry(entry: SymbolTileEntry): void {
+    const tileId = entry.input.tileId;
+    if (this._visibleEntries.get(tileId) === entry && this._tiles.get(tileId) !== entry) {
+      this._visibleEntries.delete(tileId);
+      this._placementPlanRevision++;
+      this._visibleInputsDirty = true;
+    }
     this._pendingImageEntries.delete(entry);
     for (const half of entry.halves) {
       this._pendingDynamicHalves.delete(half);
@@ -1506,11 +1857,20 @@ export class SymbolTileRenderer {
   }
 
   /**
-   * Release an unfinished build's shared atlas holds (job abandoned
-   * mid-publish). Committed entries own their holds instead: removeTile
-   * releases them.
+   * Release a cancelled build's detached collections, materials and atlas
+   * holds. Committed entries own these resources instead.
    */
   releaseBuild(state: SymbolBuildState): void {
+    if (state.resourceOwner !== 'build')
+      return;
+    state.resourceOwner = 'released';
+    for (const collection of state.entry?.collections ?? []) {
+      if (!collection.isDestroyed())
+        collection.destroy();
+    }
+    for (const material of state.retainedMaterials)
+      this._releaseMaterial(material);
+    state.retainedMaterials.clear();
     if (state.glyphSource) {
       this._shared.release(state.glyphSource.shareKey);
     }
@@ -1521,6 +1881,8 @@ export class SymbolTileRenderer {
 
   stepBuild(state: SymbolBuildState, budget: Budget): boolean {
     const { input } = state;
+    if (state.layerIndex === 0)
+      this._retainBuildMaterials(state, state.halves.map(half => half.material));
     // Always finish at least one layer per call to prevent livelock.
     let first = true;
     while (state.layerIndex < input.layers.length) {
@@ -1543,6 +1905,7 @@ export class SymbolTileRenderer {
       state.batches.push(batch);
       state.layerIds.push(layer.id);
       const halves = this._buildLayer(input, layer, batch, state.glyphSource, state.iconSource);
+      this._retainBuildMaterials(state, halves.map(half => half.material));
       if (halves.length > 0) {
         state.key += `${layer.id}/${input.tileKey}/${input.pixelRatio};`;
         state.halves.push(...halves);
@@ -1602,19 +1965,29 @@ export class SymbolTileRenderer {
     }
   }
 
-  /** Reproject every line glyph before collision and stream one VBO per layer part. */
-  private _updateLineLabels(view: PlacementView, entries: Iterable<SymbolTileEntry>): void {
+  /** Reproject recoverable candidates, preserving each held/fading generation. */
+  private _updateLineLabels(view: PlacementView, entries: Iterable<SymbolTileEntry>, projections: SymbolProjectionContext): void {
     for (const entry of entries) {
-      for (const half of entry.halves) {
-        const dynamic = half.dynamic;
-        if (!dynamic) {
-          continue;
-        }
-        if (updateLineSymbolGeometry(dynamic.geometry, view)) {
-          dynamic.dirty = true;
-        }
-        this._syncDynamic(half);
+      const metadata = this._placementEntryIndexFor(entry);
+      for (let index = 0; index < entry.batches.length; index++) {
+        const geometry = entry.batches[index];
+        const baseline = this._liveSelections.get(geometry);
+        this._updateSelectedLineBatch(view, geometry, metadata.halves.get(entry.layerIds[index]) ?? [], baseline?.selection, projections);
       }
+    }
+  }
+
+  /** Camera movement and new selections publish through the same current view. */
+  private _updateSelectedLineBatch(view: PlacementView, geometry: SymbolTileGeometry, halves: readonly SymbolHalf[], selection: SymbolTileSelection | undefined, projections: SymbolProjectionContext): void {
+    for (const half of halves) {
+      const dynamic = half.dynamic;
+      if (!dynamic || dynamic.geometry !== geometry[half.part]) {
+        continue;
+      }
+      if (selection && updateLineSymbolGeometry(dynamic.geometry, view, selection.instanceIndices(half.part), projections)) {
+        dynamic.dirty = true;
+      }
+      this._syncDynamic(half);
     }
   }
 
@@ -1673,6 +2046,9 @@ export class SymbolTileRenderer {
         () => symbolMaterial(source, paint, isText, uniforms.u_device_pixel_ratio as number, halo, icon),
       );
       material.uniforms.u_camera_zoom = uniforms.u_camera_zoom;
+      material.uniforms.u_symbol_camera_distance = uniforms.u_symbol_camera_distance;
+      material.uniforms.u_symbol_orthographic = uniforms.u_symbol_orthographic;
+      material.uniforms.u_symbol_mercator_projection = uniforms.u_symbol_mercator_projection;
       this._shared.track(source.shareKey, material, 'u_texture');
       this._shared.track(iconKey, material, 'u_texture_icon');
       this._retainMaterial(material);
@@ -1701,16 +2077,47 @@ export class SymbolTileRenderer {
     return true;
   }
 
-  /** Prepare stable order, optional flags and draw halves once per tile generation. */
-  private _preparePlacementBatches(): void {
+  private _invalidatePlacementInputs(): void {
+    this._placementPlanRevision++;
+    this._fullReplaceNeeded = true;
+  }
+
+  private _placementEntryIndexFor(entry: SymbolTileEntry): SymbolPlacementEntryIndex {
+    let metadata = this._placementEntryIndexes.get(entry);
+    if (!metadata) {
+      const halves = new Map<string, SymbolHalf[]>();
+      for (const half of entry.halves) {
+        let group = halves.get(half.layerId);
+        if (!group) {
+          group = [];
+          halves.set(half.layerId, group);
+        }
+        group.push(half);
+      }
+      metadata = { layers: new Map(entry.input.layers.map(layer => [layer.id, layer])), halves };
+      this._placementEntryIndexes.set(entry, metadata);
+    }
+    return metadata;
+  }
+
+  /** Cache ordering and metadata independently from the moving collision view. */
+  private _placementPlanFor(kind: SymbolPlacementPlanKind, cameraZoom: number, owners: ReadonlySet<string>, entries: ReadonlyMap<string, SymbolTileEntry> = this._tiles): readonly OrderedSymbolBatch[] {
+    const cached = this._placementPlans.get(kind);
+    if (cached && cached.revision === this._placementPlanRevision && cached.entries === entries && sameTileSet(cached.owners, owners)) {
+      return cached.batches;
+    }
     const ordered: OrderedSymbolBatch[] = [];
-    for (const [tileId, entry] of this._tiles) {
-      if (this._excludedPlacementTiles.has(tileId)) {
+    for (const [tileId, entry] of entries) {
+      if (!owners.has(tileId)) {
         continue;
       }
+      const metadata = this._placementEntryIndexFor(entry);
       for (let index = 0; index < entry.batches.length; index++) {
         const layerId = entry.layerIds[index];
-        const layer = entry.input.layers.find(candidate => candidate.id === layerId);
+        const layer = metadata.layers.get(layerId);
+        if (layer?.isHidden(cameraZoom)) {
+          continue;
+        }
         const layout = layer?.layout as unknown as { get?: (name: string) => unknown } | undefined;
         ordered.push({
           tileId,
@@ -1723,115 +2130,262 @@ export class SymbolTileRenderer {
             textOptional: layout?.get?.('text-optional') === true,
             iconOptional: layout?.get?.('icon-optional') === true,
           },
-          halves: entry.halves.filter(half => half.layerId === layerId),
+          halves: metadata.halves.get(layerId) ?? [],
         });
       }
     }
     ordered.sort((a, b) => b.order - a.order
       || (a.tileId < b.tileId ? -1 : a.tileId > b.tileId ? 1 : 0)
       || a.index - b.index);
-    this._orderedBatches = ordered;
+    this._placementPlans.set(kind, { revision: this._placementPlanRevision, entries, owners: new Set(owners), batches: ordered });
+    return ordered;
+  }
+
+  private _commitPlacement(pass: SymbolPlacementPass, batches: readonly OrderedSymbolBatch[], include: (batchIndex: number) => boolean, projections: SymbolProjectionContext, view: PlacementView | undefined): void {
+    const origin = {};
+    pass.commit((batchIndex, selection) => {
+      if (!include(batchIndex)) {
+        return false;
+      }
+      const batch = batches[batchIndex];
+      // Finished old-view work must not erase a current owner's recoverable
+      // selection. New and hidden prepared owners still finish their handoff.
+      return !this._lineView || samePlacementView(selection.view, this._lineView)
+        || !this._liveSelections.has(batch.geometry)
+        || this._visibleEntries.get(batch.tileId) !== batch.entry
+        || this._hiddenPlacementTiles.has(batch.tileId);
+    }, (batchIndex) => {
+      for (const half of batches[batchIndex].halves) {
+        this._syncOpacity(half);
+      }
+    }, (batchIndex, selection) => {
+      const batch = batches[batchIndex];
+      this._liveSelections.set(batch.geometry, { selection, origin, order: batch.order, fresh: true });
+      if (view) {
+        this._updateSelectedLineBatch(view, batch.geometry, batch.halves, selection, projections);
+      }
+      if (this._visibleEntries.get(batch.tileId) === batch.entry && !this._hiddenPlacementTiles.has(batch.tileId)) {
+        this._liveSelectionRevision++;
+      }
+    });
+  }
+
+  /** Keep the completed candidates collision-safe in the current visible view. */
+  private _filterVisibleSelection(view: PlacementView, projections: SymbolProjectionContext): void {
+    if (this._appliedLiveSelectionRevision === this._liveSelectionRevision
+      && this._liveSelectionPlanRevision === this._placementPlanRevision
+      && samePlacementView(this._liveSelectionView, view)) {
+      return;
+    }
+    const owners = new Set([...this._visibleEntries.keys()].filter(tileId => !this._hiddenPlacementTiles.has(tileId)));
+    const batches = this._placementPlanFor('visible', view.cameraZoom, owners, this._visibleEntries);
+    const selected = batches.flatMap((batch) => {
+      const baseline = this._liveSelections.get(batch.geometry);
+      return baseline ? [{ batch, baseline }] : [];
+    });
+    // A just-published complete pass already made these exact-view decisions.
+    const origin = selected[0]?.baseline.origin;
+    if (!selected.every(({ batch, baseline }) => baseline.fresh && baseline.origin === origin && baseline.order === batch.order
+      && baseline.selection.matchesOptions(batch.options) && samePlacementView(baseline.selection.view, view))) {
+      this._liveCollision.clear();
+      for (const { batch, baseline } of selected) {
+        if (baseline.selection.filter(view, this._liveCollision, batch.options, projections)) {
+          for (const half of batch.halves) {
+            this._syncOpacity(half);
+          }
+        }
+        baseline.fresh = false;
+      }
+    }
+    this._liveSelectionView = copyPlacementView(view);
+    this._appliedLiveSelectionRevision = this._liveSelectionRevision;
+    this._liveSelectionPlanRevision = this._placementPlanRevision;
   }
 
   /**
    * Update live line projection independently from collision placement. A
    * completed visibility generation remains drawable while a frozen-view
-   * collision job advances under clock AND instance budgets. Camera movement
+   * collision job advances under a cooperative clock budget. Camera movement
    * marks that job stale without throwing away its progress; a subsequent
    * layout catches up after MapLibre's placement-recency interval. Tile/style
    * content changes prepare the next ordered input without discarding
-   * progress. Excluded held coverage retains its last drawable opacity.
+   * progress. Held coverage participates in the separate visible-owner scope.
    */
-  update(view: PlacementView, viewChanged: boolean, context?: unknown): void {
+  update(
+    view: PlacementView,
+    viewChanged: boolean,
+    context?: unknown,
+    placementWork: SymbolPlacementWork = operation => operation(new MinimumProgressBudget(SymbolTileRenderer.PLACEMENT_BUDGET_MS)),
+  ): void {
+    const projections = new SymbolProjectionContext();
     this._shared.adopt(context as { [key: string]: unknown } | undefined);
-    if (this._appliedCameraZoom !== this.cameraZoom) {
-      this._appliedCameraZoom = this.cameraZoom;
-      for (const material of this._materials.values()) {
-        const uniforms = material.uniforms as Record<string, unknown> | undefined;
-        if (uniforms && 'u_camera_zoom' in uniforms) {
-          uniforms.u_camera_zoom = this.cameraZoom;
-        }
-      }
+    for (const material of this._materialRefs.keys()) {
+      material.uniforms.u_camera_zoom = this.cameraZoom;
+      material.uniforms.u_symbol_camera_distance = view.cameraToCenterDistance ?? 0;
+      material.uniforms.u_symbol_orthographic = view.orthographic ? 1 : 0;
+      material.uniforms.u_symbol_mercator_projection = view.mercatorProjection ? 1 : 0;
     }
     this._drainPendingAttributes();
+    let placementInputsChanged = false;
+    for (const entry of new Set([...this._tiles.values(), ...this._visibleEntries.values()])) {
+      const previous = this._placementLayerInputs.get(entry);
+      const evaluated = entry.input.layers.flatMap(layer => [
+        !layer.isHidden(view.cameraZoom),
+        layer.layout?.get('text-optional') === true,
+        layer.layout?.get('icon-optional') === true,
+      ]);
+      placementInputsChanged ||= !previous || previous.length !== evaluated.length || evaluated.some((value, index) => value !== previous[index]);
+      this._placementLayerInputs.set(entry, evaluated);
+    }
+    if (placementInputsChanged) {
+      this._invalidatePlacementInputs();
+    }
     if (this._fullReplaceNeeded || !samePlacementView(this._lineView, view)) {
-      this._updateLineLabels(view, this._drawableLineEntries());
+      this._updateLineLabels(view, this._drawableLineEntries(), projections);
       this._lineView = copyPlacementView(view);
     }
     if (this._fullReplaceNeeded) {
-      this._preparePlacementBatches();
-      this._placementRevision++;
-      // Keep the active generation's immutable batch references. Streaming
-      // content must not restart a dense first batch before it can commit.
-      this._placementDirty = true;
-      this._placementUrgent = true;
+      const owners = new Set([...this._tiles.keys()].filter(tileId => !this._excludedPlacementTiles.has(tileId)));
+      this._targetPlacement.prepare(this._placementPlanFor('target', view.cameraZoom, owners));
       this._fullReplaceNeeded = false;
+      this._visibleInputsDirty = true;
     }
-    if (viewChanged || !samePlacementView(this._placementView, view)) {
-      this._placementDirty = true;
-      if (this._placementView && !samePlacementParameters(this._placementView, view)) {
-        // Zoom, viewport and projection changes bypass the recency delay.
-        // Finish an active job first so continuous zoom cannot starve it.
-        this._placementUrgent = true;
+    if (this._visibleInputsDirty) {
+      const owners = new Set([...this._visibleEntries.keys()].filter(tileId => !this._hiddenPlacementTiles.has(tileId)));
+      this._visiblePlacement.prepare(this._placementPlanFor('visible', view.cameraZoom, owners, this._visibleEntries));
+      this._visibleInputsDirty = false;
+    }
+    if (this._prospectiveVisibleTiles) {
+      this._handoffPlacement.prepare(this._placementPlanFor('prospective', view.cameraZoom, this._prospectiveVisibleTiles));
+    }
+    const separateVisibleScope = !this._visiblePlacement.matches(this._targetPlacement.batches);
+    const separateHandoffScope = this._hasSeparateHandoffScope;
+    const advancePlacement = (frameBudget: Budget): void => {
+      const minimumProgress = frameBudget.takeMinimumProgress?.() ?? false;
+      let target: ReturnType<SymbolPlacementScope<OrderedSymbolBatch>['advance']>;
+      const scopes: Array<(minimum: boolean) => void> = [];
+      if (separateVisibleScope) {
+        scopes.push((minimum) => {
+          const visible = this._visiblePlacement.advance(view, frameBudget, projections, viewChanged, minimum);
+          if (visible && this._visiblePlacement.isCurrent(visible)
+            && visible.batches.every(batch => this._visibleEntries.get(batch.tileId) === batch.entry && !this._hiddenPlacementTiles.has(batch.tileId))) {
+            this._commitPlacement(visible.pass, visible.batches, () => true, projections, view);
+          }
+        });
       }
-    }
-    if (!this._orderedBatches.length) {
-      this._placement = undefined;
-      this._placementBatches = [];
-      this._placementDirty = false;
-      this._placementUrgent = false;
-      return;
-    }
-    if (!this._placement && this._placementDirty
-      && (this._placementUrgent || performance.now() - this._lastPlacementMs >= SymbolTileRenderer.PLACEMENT_RECENCY_MS)) {
-      this._placementView = copyPlacementView(view);
-      this._placementBatches = this._orderedBatches;
-      this._activePlacementRevision = this._placementRevision;
-      this._activePlacementEligibilityRevision = this._placementEligibilityRevision;
-      this._placement = new SymbolPlacementPass(this._placementBatches, this._placementView);
-      this._placementDirty = false;
-      this._placementUrgent = false;
-    }
-    if (this._placement?.advance(new FrameBudget(SymbolTileRenderer.PLACEMENT_BUDGET_MS), SymbolTileRenderer.PLACEMENT_MAX_INSTANCES)) {
-      const eligibleView = this._activePlacementEligibilityRevision === this._placementEligibilityRevision;
-      const currentBatch = (batchIndex: number): boolean => {
-        const batch = this._placementBatches[batchIndex];
-        // Stale coverage eligibility can hide every target child behind an
-        // excluded parent; retain the complete old layout until the next job.
-        // Removed/superseded generations must never reach CPU or GPU commit.
-        return eligibleView && this._tiles.get(batch.tileId) === batch.entry
-          && !this._excludedPlacementTiles.has(batch.tileId);
-      };
-      this._placement.commit(currentBatch, (batchIndex) => {
-        const batch = this._placementBatches[batchIndex];
-        for (const half of batch.halves) {
-          this._syncOpacity(half);
-        }
+      if (separateHandoffScope) {
+        scopes.push((minimum) => {
+          // Prospective results stay unpublished until the scene owner switch.
+          this._handoffPlacement.advance(view, frameBudget, projections, viewChanged, minimum);
+        });
+      }
+      scopes.push((minimum) => {
+        target = this._targetPlacement.advance(view, frameBudget, projections, viewChanged, minimum);
       });
-      for (let index = 0; index < this._placementBatches.length; index++) {
-        const batch = this._placementBatches[index];
-        if (currentBatch(index)) {
+      // One exhausted-budget pair per participant turn, rotating visible,
+      // prospective and target scopes so an expensive scope cannot starve others.
+      const first = this._placementScopeTurn % scopes.length;
+      if (minimumProgress || !frameBudget.exhausted)
+        this._placementScopeTurn++;
+      for (let index = 0; index < scopes.length; index++) {
+        scopes[(first + index) % scopes.length](minimumProgress && index === 0);
+      }
+      const currentBatches = new Map<SymbolTileEntry, Map<number, OrderedSymbolBatch>>();
+      if (target) {
+        for (const batch of this._targetPlacement.batches) {
+          let indexes = currentBatches.get(batch.entry);
+          if (!indexes) {
+            indexes = new Map();
+            currentBatches.set(batch.entry, indexes);
+          }
+          indexes.set(batch.index, batch);
+        }
+      }
+      if (target && target.batches.every((batch) => {
+        const current = currentBatches.get(batch.entry)?.get(batch.index);
+        return this._tiles.get(batch.tileId) === batch.entry && !!current && sameSymbolBatch(batch, current);
+      })) {
+        this._commitPlacement(target.pass, target.batches, index =>
+          !separateVisibleScope || this._hiddenPlacementTiles.has(target.batches[index].tileId)
+          || this._visibleEntries.get(target.batches[index].tileId) !== target.batches[index].entry, projections, view);
+        for (const batch of target.batches) {
           batch.entry.placed = true;
         }
+        if (!separateVisibleScope && this._targetPlacement.isCurrent(target)) {
+          this._visiblePlacement.activate(target, view);
+        }
+        if (this._targetPlacement.isCurrent(target)) {
+          for (const [tileId, entry] of this._tiles) {
+            if (!this._excludedPlacementTiles.has(tileId) && !currentBatches.has(entry)) {
+              entry.placed = true;
+            }
+          }
+        }
       }
-      this._placement = undefined;
-      this._lastPlacementMs = performance.now();
-      const contentChanged = this._activePlacementRevision !== this._placementRevision;
-      this._placementDirty = contentChanged || !samePlacementView(this._placementView, view);
-      this._placementUrgent = contentChanged || (!!this._placementView && !samePlacementParameters(this._placementView, view));
-    }
+    };
+    this._filterVisibleSelection(view, projections);
+    placementWork(advancePlacement);
+    this._filterVisibleSelection(view, projections);
   }
 
-  /** Request-render hosts keep ticking until collision and first uploads settle. */
+  /** Completion includes recency waits and writes awaiting their Native VBO. */
   get hasPendingWork(): boolean {
-    return !!this._placement || this._placementDirty
+    return this._pendingDynamicHalves.size > 0 || this._pendingOpacityHalves.size > 0
+      || this._targetPlacement.pending || this._visiblePlacement.pending
+      || (this._hasSeparateHandoffScope && this._handoffPlacement.pending)
+      || this.hasRunnableWork;
+  }
+
+  private get _hasSeparateHandoffScope(): boolean {
+    return this._prospectiveVisibleTiles !== undefined
+      && !this._targetPlacement.matches(this._handoffPlacement.batches)
+      && !this._visiblePlacement.matches(this._handoffPlacement.batches);
+  }
+
+  /** Observe stopped zoom between demand renders without projecting symbols. */
+  observeIdlePlacement(): boolean {
+    let changed = this._targetPlacement.observeIdle();
+    changed = this._visiblePlacement.observeIdle() || changed;
+    if (this._hasSeparateHandoffScope)
+      changed = this._handoffPlacement.observeIdle() || changed;
+    return changed;
+  }
+
+  /** Recency-only work needs one deadline wake instead of continuous draws. */
+  get nextPlacementTime(): number | undefined {
+    const time = Math.min(
+      this._targetPlacement.nextPlacementTime ?? Number.POSITIVE_INFINITY,
+      this._visiblePlacement.nextPlacementTime ?? Number.POSITIVE_INFINITY,
+      (this._hasSeparateHandoffScope ? this._handoffPlacement.nextPlacementTime : undefined) ?? Number.POSITIVE_INFINITY,
+    );
+    return Number.isFinite(time) ? time : undefined;
+  }
+
+  /** Recency and Native-only waits do not continue request-render frames. */
+  get hasRunnableWork(): boolean {
+    if (this._targetPlacement.runnable || this._visiblePlacement.runnable
+      || (this._hasSeparateHandoffScope && this._handoffPlacement.runnable) || this._visibleInputsDirty
       || (this._fullReplaceNeeded && this._tiles.size > 0)
-      || this._pendingImageEntries.size > 0
-      || this._pendingDynamicHalves.size > 0 || this._pendingOpacityHalves.size > 0;
+      || this._pendingImageEntries.size > 0) {
+      return true;
+    }
+    for (const half of this._pendingOpacityHalves) {
+      const primitive = half.opacity?.target?.primitive;
+      if (primitive && (primitive as Primitive & { _va: unknown[] })._va?.length > 0)
+        return true;
+    }
+    for (const half of this._pendingDynamicHalves) {
+      const primitive = half.dynamic?.target?.primitive;
+      if (primitive && (primitive as Primitive & { _va: unknown[] })._va?.length > 0)
+        return true;
+    }
+    return false;
   }
 
   removeTile(tileId: string): PrimitiveCollection[] {
     this._excludedPlacementTiles.delete(tileId);
+    this._hiddenPlacementTiles.delete(tileId);
+    this._visibleEntries.delete(tileId);
     const entry = this._tiles.get(tileId);
     if (entry) {
       for (const half of entry.halves) {
@@ -1855,7 +2409,7 @@ export class SymbolTileRenderer {
     }
     this._releaseEntry(entry);
     this._tiles.delete(tileId);
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
     return [...entry.collections.filter((collection): collection is PrimitiveCollection => !!collection), ...gone];
   }
 
@@ -1950,6 +2504,8 @@ export class SymbolTileRenderer {
    */
   retireTile(tileId: string, fadeMs: number = SymbolTileRenderer.SYMBOL_FADE_MS): SymbolTileRetire {
     this._excludedPlacementTiles.delete(tileId);
+    this._hiddenPlacementTiles.delete(tileId);
+    this._visibleEntries.delete(tileId);
     const entry = this._tiles.get(tileId);
     if (!entry) {
       // No live entry: a leftover retired entry is gone for good - release
@@ -1962,7 +2518,7 @@ export class SymbolTileRenderer {
       this._pendingOpacityHalves.delete(half);
     }
     this._tiles.delete(tileId);
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
     const targets = fadeMs > 0 ? this._fadeTargets(entry) : undefined;
     if (targets && targets.length > 0) {
       this._fading.set(tileId, { entry, startedMs: performance.now(), durationMs: fadeMs, targets });
@@ -2030,10 +2586,11 @@ export class SymbolTileRenderer {
     }
     entry.placed = false;
     this._tiles.set(tileId, entry);
+    this._visibleEntries.set(tileId, entry);
     if (entry.input.iconAtlas) {
       this._pendingImageEntries.add(entry);
     }
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
     return { collections: liveCollectionsOf(entry), live: true };
   }
 
@@ -2062,10 +2619,11 @@ export class SymbolTileRenderer {
     }
     entry.placed = false;
     this._tiles.set(tileId, entry);
+    this._visibleEntries.set(tileId, entry);
     if (entry.input.iconAtlas) {
       this._pendingImageEntries.add(entry);
     }
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
     return entry.collections;
   }
 
@@ -2128,14 +2686,21 @@ export class SymbolTileRenderer {
   removeAll(): PrimitiveCollection[] {
     const all = [...this._tiles.values()].flatMap(entry => entry.collections.filter((collection): collection is PrimitiveCollection => !!collection));
     this._tiles.clear();
-    this._orderedBatches = [];
-    this._placementBatches = [];
+    this._visibleEntries.clear();
     this._excludedPlacementTiles.clear();
-    this._placement = undefined;
-    this._placementView = undefined;
     this._lineView = undefined;
-    this._placementDirty = false;
-    this._placementUrgent = false;
+    this._liveSelectionView = undefined;
+    this._liveSelections = new WeakMap();
+    this._liveCollision.clear();
+    this._hiddenPlacementTiles.clear();
+    this._targetPlacement.clear();
+    this._visiblePlacement.clear();
+    this._handoffPlacement.clear();
+    this._visibleInputsDirty = false;
+    this._prospectiveVisibleTiles = undefined;
+    this._placementLayerInputs = new WeakMap();
+    this._placementPlans.clear();
+    this._placementEntryIndexes = new WeakMap();
     this._held.clear();
     for (const fading of this._fading.values()) {
       all.push(...fading.entry.collections);
@@ -2149,7 +2714,7 @@ export class SymbolTileRenderer {
     this._pendingDynamicHalves.clear();
     this._pendingOpacityHalves.clear();
     this._pendingImageEntries.clear();
-    this._fullReplaceNeeded = true;
+    this._invalidatePlacementInputs();
     this._destroyAllMaterials();
     return all;
   }

@@ -12,11 +12,19 @@ type TileID = CanonicalTileID | OverscaledTileID;
 
 /**
  * One draw batch of symbol quads. Every vertex carries the ECEF anchor of the
- * symbol it belongs to; the quad corner itself is a window-space offset, so
- * labels keep a constant on-screen size at any camera distance - the same
- * contract MapLibre's symbol vertex shader implements with a tile matrix.
+ * symbol it belongs to; point viewport quad corners are window offsets
+ * scaled by the live MapLibre perspective ratio. Other alignment paths
+ * preserve their existing geometry and live line projection.
  */
 export interface SymbolPrimitiveGeometry {
+  /** Viewport pitch alignment uses the shared worker-anchor perspective ratio. */
+  viewportPerspective: boolean;
+  /** Map-pitched quads use Mercator label space before world projection. */
+  mapPitch: boolean;
+  /** Ground point label-plane axes; along-line geometry owns its own glyph angles. */
+  pointMapRotation?: 'map' | 'viewport';
+  /** MapLibre disables GPU size perspective when this layer explicitly sets icon-offset. */
+  sizePerspective: boolean;
   /** ECEF anchor per vertex, 3 doubles per vertex. */
   positions: Float64Array;
   /** Quad corner offset in pixels at text-size 24, 2 floats per vertex. */
@@ -54,7 +62,7 @@ export interface SymbolPrimitiveGeometry {
    * constant halo colors and for icon batches (whose material has no halo).
    */
   halos: Float32Array;
-  /** Screen displacement (device pixels) and angle (radians), three floats per vertex. */
+  /** Live glyph displacement and angle: device pixels for viewport, Mercator metres for map lines. */
   dynamics: Float32Array;
   /** The bucket's overlap mode, checked against previously placed symbols. */
   overlapMode: OverlapMode;
@@ -88,6 +96,8 @@ export interface SymbolInstance {
   maxY: number;
   /** Worker placement box in CSS pixels at the bucket's layout size. */
   collisionBox?: { x1: number; y1: number; x2: number; y2: number; layoutSize: number };
+  /** Worker line-text collision diameter in CSS pixels, plus runtime padding. */
+  collisionCircles?: { diameter: number; padding: number };
   /** Present for line-placed labels: the per-frame view state. */
   line?: LineLabelView;
 }
@@ -100,6 +110,9 @@ export interface LineLabelView {
   segment: number;
   glyphOffsets: Float32Array;
   lineOffsetX: number;
+  lineOffsetY: number;
+  keepUpright: boolean;
+  rotateToLine: boolean;
   writingMode: number;
 }
 
@@ -136,6 +149,8 @@ interface SymbolInstanceRow {
   textBoxEndIndex: number;
   iconBoxStartIndex: number;
   iconBoxEndIndex: number;
+  useRuntimeCollisionCircles: number;
+  collisionCircleDiameter: number;
 }
 
 interface PlacedSymbolView {
@@ -148,11 +163,14 @@ interface PlacedSymbolView {
     lineLength: number;
     segment: number;
     lineOffsetX: number;
+    lineOffsetY: number;
     writingMode: number;
   };
 }
 
 interface LineDataView {
+  keepUpright: boolean;
+  rotateToLine: boolean;
   placed: PlacedSymbolView;
   glyphOffsetX: (index: number) => number;
   linePointX: (index: number) => number;
@@ -162,25 +180,29 @@ interface LineDataView {
 /** Components of the symbol layout vertex (a_pos_offset, a_data, a_pixeloffset). */
 const LAYOUT_COMPONENTS = 12;
 
-/** WritingMode.vertical from symbol/shaping (kept numeric to avoid the import). */
-const WRITING_MODE_VERTICAL = 2;
-
 interface LineGlyphPlacement {
-  /** Tile-local position per glyph, in glyph order. */
+  /** Position per glyph, in the supplied label plane and glyph order. */
   points: Array<{ x: number; y: number }>;
-  /** Tile-space segment angle per glyph, keep-upright flipped per label. */
+  /** Segment angle per glyph, with the caller's reading direction. */
   angles: number[];
-  /** The keep-upright flip applied (tile space, decided from end order). */
+  /** Worker polyline between the first and last glyph, in the same label plane. */
+  path: Array<{ x: number; y: number }>;
+  /** The caller's keep-upright flip after screen projection. */
   flipped: boolean;
 }
 
 /**
- * Project glyphs onto their line in tile units, following upstream MapLibre's
- * placeGlyphAlongLine (fontScale * glyphOffset walked from the anchor along
- * the line vertices, first/last glyph deciding the keep-upright flip).
- * Returns undefined when a glyph does not fit on the line: upstream drops
- * the whole label in that case.
+ * A caller supplies label-plane projection only when its vertices must be
+ * projected lazily; a map-plane walk reads the cached worker coordinates.
  */
+export interface LineGlyphOptions {
+  flip: boolean;
+  lineOffsetY: number;
+  rotateToLine: boolean;
+  project?: (index: number, previous: { x: number; y: number }, direction: 1 | -1, travelled: number, required: number) => { x: number; y: number } | undefined;
+}
+
+/** Walk only glyph-required legs, including intersections of Y-offset legs. */
 export function projectGlyphsAlongLine(
   lineX: (index: number) => number,
   lineY: (index: number) => number,
@@ -190,99 +212,106 @@ export function projectGlyphsAlongLine(
   anchorY: number,
   anchorSegment: number,
   glyphDistances: readonly number[],
-  writingMode: number,
+  lineOffset: number,
+  options: LineGlyphOptions,
 ): LineGlyphPlacement | undefined {
+  if (glyphDistances.length === 0)
+    return undefined;
   const end = lineStartIndex + lineLength;
   interface Leg { x: number; y: number; dx: number; dy: number; start: number; end: number; angle: number }
-  const buildLegs = (direction: 1 | -1): Leg[] => {
+  const makeLegs = (direction: 1 | -1) => {
     const legs: Leg[] = [];
-    let x = anchorX;
-    let y = anchorY;
+    let previous = { x: anchorX, y: anchorY };
+    let offsetPrevious: { x: number; y: number } | undefined;
+    let index = lineStartIndex + anchorSegment + (direction > 0 ? 1 : 0);
     let distance = 0;
-    for (let v = lineStartIndex + anchorSegment + (direction > 0 ? 1 : 0);
-      direction > 0 ? v < end : v >= lineStartIndex;
-      v += direction) {
-      const nextX = lineX(v);
-      const nextY = lineY(v);
-      const dx = nextX - x;
-      const dy = nextY - y;
-      const length = Math.hypot(dx, dy);
-      if (length > 0) {
-        legs.push({ x, y, dx, dy, start: distance, end: distance + length, angle: Math.atan2(dy, dx) });
-        distance += length;
+    const inRange = (index: number) => index >= lineStartIndex && index < end;
+    const point = (index: number, required: number) => options.project
+      ? options.project(index, previous, direction, distance, required)
+      : { x: lineX(index), y: lineY(index) };
+    const ensure = (required: number): Leg[] | undefined => {
+      while ((legs.length === 0 || distance <= required) && inRange(index)) {
+        const current = point(index, required);
+        if (!current || !Number.isFinite(current.x) || !Number.isFinite(current.y))
+          return undefined;
+        const dx = current.x - previous.x;
+        const dy = current.y - previous.y;
+        const length = Math.hypot(dx, dy);
+        if (length === 0) {
+          previous = current;
+          index += direction;
+          continue;
+        }
+        const normal = { x: -dy / length * options.lineOffsetY * direction, y: dx / length * options.lineOffsetY * direction };
+        const from = offsetPrevious ?? { x: previous.x + normal.x, y: previous.y + normal.y };
+        let to = { x: current.x + normal.x, y: current.y + normal.y };
+        if (options.lineOffsetY !== 0 && inRange(index + direction)) {
+          const next = point(index + direction, required);
+          if (!next)
+            return undefined;
+          const nx = next.x - current.x;
+          const ny = next.y - current.y;
+          const nextLength = Math.hypot(nx, ny);
+          if (nextLength > 0) {
+            const nextNormal = { x: -ny / nextLength * options.lineOffsetY * direction, y: nx / nextLength * options.lineOffsetY * direction };
+            const bx = current.x + nextNormal.x;
+            const by = current.y + nextNormal.y;
+            const ax = to.x - from.x;
+            const ay = to.y - from.y;
+            const denominator = ax * ny - ay * nx;
+            if (denominator !== 0) {
+              const t = ((bx - from.x) * ny - (by - from.y) * nx) / denominator;
+              to = { x: from.x + ax * t, y: from.y + ay * t };
+            }
+          }
+        }
+        const lx = to.x - from.x;
+        const ly = to.y - from.y;
+        const segmentLength = Math.hypot(lx, ly);
+        if (segmentLength > 0) {
+          legs.push({ x: from.x, y: from.y, dx: lx, dy: ly, start: distance, end: distance + segmentLength, angle: Math.atan2(dy, dx) });
+          distance += segmentLength;
+        }
+        previous = current;
+        offsetPrevious = to;
+        index += direction;
       }
-      x = nextX;
-      y = nextY;
+      return legs;
+    };
+    return { legs, ensure };
+  };
+  const forward = makeLegs(1);
+  const backward = makeLegs(-1);
+  const distances = glyphDistances.map(distance => (options.flip ? -distance : distance) + lineOffset);
+  const points: Array<{ x: number; y: number; angle: number }> = [];
+  for (const distance of distances) {
+    const direction = distance > 0 ? 1 : -1;
+    const branch = direction > 0 ? forward : backward;
+    const travel = Math.abs(distance);
+    const legs = branch.ensure(travel);
+    if (!legs)
+      return undefined;
+    const leg = legs.find(leg => leg.end > travel) ?? (travel === legs.at(-1)?.end ? legs.at(-1) : undefined);
+    if (!leg)
+      return undefined;
+    const t = (travel - leg.start) / (leg.end - leg.start);
+    const angle = (options.flip ? Math.PI : 0) + (direction < 0 ? Math.PI : 0) + leg.angle;
+    points.push({ x: leg.x + leg.dx * t, y: leg.y + leg.dy * t, angle: options.rotateToLine ? normalizeAngle(angle) : 0 });
+  }
+  const firstDistance = distances[0];
+  const lastDistance = distances[distances.length - 1];
+  const minimum = Math.min(firstDistance, lastDistance);
+  const maximum = Math.max(firstDistance, lastDistance);
+  const intermediates: Array<{ x: number; y: number; distance: number }> = [];
+  for (const [legs, direction] of [[backward.legs, -1], [forward.legs, 1]] as const) {
+    for (const leg of legs) {
+      const distance = direction * leg.end;
+      if (distance > minimum && distance < maximum)
+        intermediates.push({ x: leg.x + leg.dx, y: leg.y + leg.dy, distance });
     }
-    return legs;
-  };
-  const forward = buildLegs(1);
-  const backward = buildLegs(-1);
-  const place = (distances: readonly number[], flip: boolean): Array<{ x: number; y: number; angle: number }> | undefined => {
-    const placed: Array<{ x: number; y: number; angle: number }> = [];
-    for (const signed of distances) {
-      const distance = flip ? -signed : signed;
-      // Strictly positive goes forward; zero takes the backward branch like
-      // upstream (direction = combinedOffsetX > 0 ? 1 : -1), keeping the
-      // anchor glyph's angle consistent with its neighbours.
-      const direction = distance > 0 ? 1 : -1;
-      const legs = direction > 0 ? forward : backward;
-      const travel = Math.abs(distance);
-      // Glyphs face the label reading direction, not the travel direction:
-      // upstream adds PI for backward travel (and PI more when flipped).
-      const baseAngle = (flip ? Math.PI : 0) + (direction < 0 ? Math.PI : 0);
-      if (legs.length === 0 && travel === 0) {
-        placed.push({ x: anchorX, y: anchorY, angle: baseAngle });
-        continue;
-      }
-      let low = 0;
-      let high = legs.length;
-      while (low < high) {
-        const mid = (low + high) >>> 1;
-        if (legs[mid].end < travel)
-          low = mid + 1;
-        else high = mid;
-      }
-      const leg = legs[low];
-      if (!leg) {
-        return undefined;
-      }
-      const t = (travel - leg.start) / (leg.end - leg.start);
-      placed.push({ x: leg.x + leg.dx * t, y: leg.y + leg.dy * t, angle: baseAngle + leg.angle });
-    }
-    return placed;
-  };
-
-  // Keep-upright, decided per label from the end glyphs like upstream's
-  // first/last placement: a label reading right-to-left in tile space is
-  // mirrored around its anchor (equivalent to rotating the label by PI).
-  // Viewport-dependent flips under map rotation are a known limitation.
-  const tryUnflipped = place(glyphDistances, false);
-  if (!tryUnflipped) {
-    return undefined;
   }
-  let flip = false;
-  if (writingMode !== WRITING_MODE_VERTICAL && glyphDistances.length > 1) {
-    const first = tryUnflipped[0];
-    const last = tryUnflipped[tryUnflipped.length - 1];
-    flip = last.x < first.x;
-  }
-  else if (writingMode !== WRITING_MODE_VERTICAL && glyphDistances.length === 1) {
-    // A single glyph cannot decide by end order: flip by the anchor
-    // segment's tile-space direction instead.
-    const sx = lineX(lineStartIndex + anchorSegment);
-    const ex = lineX(Math.min(lineStartIndex + anchorSegment + 1, end - 1));
-    flip = ex < sx;
-  }
-  const final = flip ? place(glyphDistances, true) : tryUnflipped;
-  if (!final) {
-    return undefined;
-  }
-  return {
-    points: final,
-    angles: final.map(p => normalizeAngle(p.angle)),
-    flipped: flip,
-  };
+  intermediates.sort((a, b) => firstDistance < lastDistance ? a.distance - b.distance : b.distance - a.distance);
+  return { points, path: [points[0], ...intermediates, points[points.length - 1]], angles: points.map(point => point.angle), flipped: options.flip };
 }
 
 function normalizeAngle(angle: number): number {
@@ -393,7 +422,10 @@ function extractGeometry(
   size: SymbolPartSize,
   overlapMode: OverlapMode,
   ignorePlacement: boolean,
-  collision: { boxes: CollisionBoxArray; tilePixelRatio: number; layoutZoom: number },
+  viewportPerspective: boolean,
+  mapPitch: boolean,
+  sizePerspective: boolean,
+  collision: { boxes: CollisionBoxArray; tilePixelRatio: number; layoutZoom: number; textPadding: number },
   line?: LineDataView,
   /** Collects the worker symbol-instance ordinal for each emitted entry. */
   emittedOrdinals?: number[],
@@ -402,6 +434,7 @@ function extractGeometry(
    * Absent for constant-paint layers; every emitted vertex is then white.
    */
   paint?: SymbolPaintView,
+  pointMapRotation?: SymbolPrimitiveGeometry['pointMapRotation'],
 ): ExtractedSymbolGeometry | undefined {
   const int16 = buffers.layoutVertexArray.int16;
   const uint16 = buffers.layoutVertexArray.uint16;
@@ -480,6 +513,11 @@ function extractGeometry(
       // emitLinePlacement drops the whole label when a glyph does not fit
       // (matching upstream): only record ordinals for emitted entries.
       if (placed.length > placedBefore) {
+        const emitted = placed[placedBefore];
+        if (kind === 'text' && instance.useRuntimeCollisionCircles)
+          emitted.collisionCircles = { diameter: instance.collisionCircleDiameter, padding: collision.textPadding };
+        if (kind === 'icon')
+          emitted.collisionBox = pointCollisionBox(instance, kind, collision, sizes, sizesMax, sizeZooms, emitted.vertexStart);
         emittedOrdinals?.push(i);
       }
     }
@@ -577,6 +615,10 @@ function extractGeometry(
     sdf,
     overlapMode,
     ignorePlacement,
+    viewportPerspective,
+    mapPitch,
+    pointMapRotation,
+    sizePerspective,
   };
 }
 
@@ -630,6 +672,7 @@ interface LinePlacedRange {
   lineLength: number;
   lineOffsetTiles: number;
   lineOffsetX: number;
+  lineOffsetY: number;
   writingMode: number;
   textBoxScale: number;
   vertexStart: number;
@@ -667,9 +710,10 @@ function linePlacedSymbol(
       segment: placed.segment,
       lineStartIndex: placed.lineStartIndex,
       lineLength: placed.lineLength,
-      // text-offset is in ems: one em renders 24 shaped units.
-      lineOffsetTiles: placed.lineOffsetX * 24 * instance.textBoxScale,
+      // The worker already converted text-offset ems to 24-em shaped units.
+      lineOffsetTiles: placed.lineOffsetX * instance.textBoxScale,
       lineOffsetX: placed.lineOffsetX,
+      lineOffsetY: placed.lineOffsetY,
       writingMode: placed.writingMode,
       textBoxScale: instance.textBoxScale,
       vertexStart: placed.vertexStartIndex,
@@ -715,7 +759,7 @@ function emitLinePlacement(
   const distances: number[] = [];
   for (let g = 0; g < range.numGlyphs; g++) {
     const offsetX = line.glyphOffsetX(range.glyphStartIndex + g);
-    distances.push(offsetX * range.textBoxScale + range.lineOffsetTiles);
+    distances.push(offsetX * range.textBoxScale);
   }
   const placement = projectGlyphsAlongLine(
     index => line.linePointX(index),
@@ -726,7 +770,8 @@ function emitLinePlacement(
     range.anchorY,
     range.segment,
     distances,
-    range.writingMode,
+    range.lineOffsetTiles,
+    { flip: false, lineOffsetY: range.lineOffsetY * range.textBoxScale, rotateToLine: line.rotateToLine },
   );
   if (!placement) {
     return;
@@ -817,6 +862,9 @@ export function lineLabelView(
     segment: range.segment,
     glyphOffsets,
     lineOffsetX: range.lineOffsetX,
+    lineOffsetY: range.lineOffsetY,
+    keepUpright: line.keepUpright,
+    rotateToLine: line.rotateToLine,
     writingMode: range.writingMode,
   };
 }
@@ -876,7 +924,9 @@ export function symbolBucketGeometry(
   const iconIgnorePlacement = firstLayout?.get('icon-ignore-placement') === true;
   // Text and icon buffers own separate placed-symbol arrays; the glyph
   // offsets and line vertices are shared per bucket.
-  const lineDataFor = (placed: LineDataView['placed']): LineDataView => ({
+  const lineDataFor = (placed: LineDataView['placed'], keepUpright: boolean): LineDataView => ({
+    keepUpright,
+    rotateToLine: firstLayout?.get('text-rotation-alignment') === 'map',
     placed,
     glyphOffsetX: index => bucket.glyphOffsetArray.getoffsetX(index),
     linePointX: index => bucket.lineVertexArray.getx(index),
@@ -904,7 +954,10 @@ export function symbolBucketGeometry(
     ? { config: iconPaintConfig, colorProperty: 'icon-color', zoom: bucket.zoom }
     : undefined;
   const textOrdinals: number[] = [];
-  const collision = { boxes: collisionBoxArray, tilePixelRatio: bucket.tilePixelRatio, layoutZoom: bucket.zoom };
+  const linePlacement = firstLayout?.get('symbol-placement') !== 'point';
+  const textAlongLine = linePlacement && firstLayout?.get('text-rotation-alignment') === 'map';
+  const iconAlongLine = linePlacement && firstLayout?.get('icon-rotation-alignment').constantOr('viewport') === 'map';
+  const collision = { boxes: collisionBoxArray, tilePixelRatio: bucket.tilePixelRatio, layoutZoom: bucket.zoom, textPadding: firstLayout?.get('text-padding') ?? 0 };
   const text = extractGeometry(
     bucket.text as unknown as SymbolBuffersView,
     instances as unknown as { length: number; get: (index: number) => SymbolInstanceRow },
@@ -914,10 +967,14 @@ export function symbolBucketGeometry(
     textSize,
     textOverlapMode,
     textIgnorePlacement,
+    firstLayout?.get('text-pitch-alignment') === 'viewport',
+    (textAlongLine || !linePlacement) && firstLayout?.get('text-pitch-alignment') === 'map',
+    !bucketLayer?._unevaluatedLayout.hasValue('icon-offset'),
     collision,
-    lineDataFor(bucket.text.placedSymbolArray as unknown as LineDataView['placed']),
+    textAlongLine ? lineDataFor(bucket.text.placedSymbolArray as unknown as LineDataView['placed'], firstLayout?.get('text-keep-upright') === true) : undefined,
     textOrdinals,
     textPaint,
+    !linePlacement && firstLayout?.get('text-pitch-alignment') === 'map' ? firstLayout?.get('text-rotation-alignment') === 'map' ? 'map' : 'viewport' : undefined,
   );
   if (text) {
     result.text = text;
@@ -932,10 +989,14 @@ export function symbolBucketGeometry(
     iconSize,
     iconOverlapMode,
     iconIgnorePlacement,
+    firstLayout?.get('icon-pitch-alignment') === 'viewport',
+    (iconAlongLine || !linePlacement) && firstLayout?.get('icon-pitch-alignment') === 'map',
+    !bucketLayer?._unevaluatedLayout.hasValue('icon-offset'),
     collision,
-    lineDataFor(bucket.icon.placedSymbolArray as unknown as LineDataView['placed']),
+    iconAlongLine ? lineDataFor(bucket.icon.placedSymbolArray as unknown as LineDataView['placed'], firstLayout?.get('icon-keep-upright') === true) : undefined,
     iconOrdinals,
     iconPaint,
+    !linePlacement && firstLayout?.get('icon-pitch-alignment') === 'map' ? firstLayout?.get('icon-rotation-alignment').constantOr('viewport') === 'map' ? 'map' : 'viewport' : undefined,
   );
   if (icon) {
     result.icon = icon;
