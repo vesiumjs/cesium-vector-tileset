@@ -11,6 +11,8 @@ declare global {
   interface Window {
     switchCoverage: number[][];
     stopSwitchCoverage: () => void;
+    lifecycleTileset: import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset;
+    lifecycleParent: import('cesium').PrimitiveCollection;
   }
 }
 interface OpenOptions {
@@ -132,7 +134,7 @@ test('zoom replacement keeps framebuffer coverage', async ({ page, renderUrl }, 
           retired: tileset._vectorRenderer.retiredCollections.map(collections),
           held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
           hiddenSurfaceLayers: [...tileset._tileResidency.hiddenSurfaceLayers].map(([tileId, layers]) => ({ tileId, layers: [...layers] })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase })),
+          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
           firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ ...collections(collection), index: update.index }))),
         };
       }
@@ -270,7 +272,7 @@ test('unsupported and unavailable styles reject without disrupting a loaded scen
     assert.deepEqual(validateStyleMin(unsupported), []);
     const unsupportedFailure = await page.evaluate(async (json) => {
       const next: StyleSpecification = JSON.parse(json);
-      const Constructor = window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset').CesiumVectorTileset;
+      const Constructor = window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset;
       const candidate = new Constructor({ style: next });
       try {
         await candidate.whenReady();
@@ -287,7 +289,7 @@ test('unsupported and unavailable styles reject without disrupting a loaded scen
   }
   const failure = await page.evaluate(async (url) => {
     try {
-      const candidate = await (window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset').CesiumVectorTileset).fromUrl(url);
+      const candidate = await (window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset).fromUrl(url);
       candidate.destroy();
       return null;
     }
@@ -335,6 +337,110 @@ test('settled demand rendering stops frames and destruction releases the primiti
   await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
 });
 
+test('adding, hiding, showing and removing a tileset wakes a settled demand scene', async ({ page, renderUrl }) => {
+  const { errors } = await open(page, renderUrl);
+  const idle = async () => expect.poll(() => page.evaluate(async () => {
+    const validation = window.renderValidation;
+    const before = validation.renderedFrames;
+    await new Promise<void>(resolve => setTimeout(resolve, 400));
+    return validation.viewer.scene.globe.tilesLoaded && validation.renderedFrames === before;
+  })).toBe(true);
+  // Establish an empty, idle scene before creating the next primitive. This
+  // explicit setup frame must not help that primitive render after insertion.
+  await page.evaluate(() => {
+    const { viewer, tileset } = window.renderValidation;
+    viewer.scene.primitives.remove(tileset);
+    viewer.scene.requestRender();
+  });
+  await idle();
+  await page.evaluate(async (url) => {
+    const Constructor = window.renderValidation.tileset.constructor as typeof import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset;
+    const candidate = await Constructor.fromUrl(url);
+    window.lifecycleTileset = candidate;
+    window.renderValidation.viewer.scene.primitives.add(candidate);
+  }, `${renderUrl}/lifecycle/style.json`);
+  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+  await idle();
+  await page.evaluate(() => {
+    window.lifecycleTileset.show = false;
+  });
+  await expect.poll(() => page.evaluate(color => Math.max(...window.renderValidation.readCoverage(color)), blue)).toBeLessThan(0.01);
+  await idle();
+  await page.evaluate(() => {
+    window.lifecycleTileset.show = true;
+  });
+  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+  await idle();
+  await page.evaluate(() => {
+    window.renderValidation.viewer.scene.primitives.remove(window.lifecycleTileset);
+  });
+  await expect.poll(() => page.evaluate(color => Math.max(...window.renderValidation.readCoverage(color)), blue)).toBeLessThan(0.01);
+  assert.equal(await page.evaluate(() => window.lifecycleTileset.isDestroyed()), true);
+  await idle();
+  const initiallyHidden = await page.evaluate(async (url) => {
+    const Constructor = window.lifecycleTileset.constructor as typeof import('../packages/cesium-vector-tileset/src/cesium-vector-tileset').CesiumVectorTileset;
+    const candidate = await Constructor.fromUrl(url, { show: false });
+    window.lifecycleTileset = candidate;
+    window.renderValidation.viewer.scene.primitives.add(candidate);
+    return { ready: candidate.ready, show: candidate.show };
+  }, `${renderUrl}/lifecycle/style.json`);
+  assert.deepEqual(initiallyHidden, { ready: true, show: false });
+  await idle();
+  assert.equal(await page.evaluate(() => window.lifecycleTileset.stats().renderableTiles), 0);
+  assert.ok((await page.evaluate(color => window.renderValidation.readCoverage(color), blue)).every(ratio => ratio < 0.01));
+  await page.evaluate(() => {
+    window.lifecycleTileset.show = true;
+  });
+  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+  await page.evaluate(() => {
+    window.renderValidation.viewer.scene.primitives.remove(window.lifecycleTileset);
+  });
+  await expect.poll(() => page.evaluate(color => Math.max(...window.renderValidation.readCoverage(color)), blue)).toBeLessThan(0.01);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
+});
+
+test('retained removal and reinsertion wake a settled scene without destroying the tileset', async ({ page, renderUrl }) => {
+  const { errors } = await open(page, renderUrl);
+  const idle = async () => expect.poll(() => page.evaluate(async () => {
+    const validation = window.renderValidation;
+    const before = validation.renderedFrames;
+    await new Promise<void>(resolve => setTimeout(resolve, 400));
+    return validation.viewer.scene.globe.tilesLoaded && validation.renderedFrames === before;
+  })).toBe(true);
+  await idle();
+  await page.evaluate(() => {
+    const { viewer, tileset } = window.renderValidation;
+    viewer.scene.primitives.destroyPrimitives = false;
+    viewer.scene.primitives.remove(tileset);
+  });
+  await expect.poll(() => page.evaluate(color => Math.max(...window.renderValidation.readCoverage(color)), blue)).toBeLessThan(0.01);
+  assert.equal(await page.evaluate(() => window.renderValidation.tileset.isDestroyed()), false);
+  await idle();
+  await page.evaluate(() => window.renderValidation.viewer.scene.primitives.add(window.renderValidation.tileset));
+  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+  await idle();
+  await page.evaluate(() => {
+    const { viewer, tileset } = window.renderValidation;
+    const Collection = Object.getPrototypeOf(tileset.constructor) as typeof import('cesium').PrimitiveCollection;
+    const parent = new Collection({ destroyPrimitives: false });
+    viewer.scene.primitives.remove(tileset);
+    parent.add(tileset);
+    viewer.scene.primitives.add(parent);
+    window.lifecycleParent = parent;
+  });
+  await idle();
+  await page.evaluate(() => window.renderValidation.viewer.scene.primitives.remove(window.lifecycleParent));
+  await expect.poll(() => page.evaluate(color => Math.max(...window.renderValidation.readCoverage(color)), blue)).toBeLessThan(0.01);
+  assert.equal(await page.evaluate(() => window.renderValidation.tileset.isDestroyed()), false);
+  await idle();
+  await page.evaluate(() => window.renderValidation.viewer.scene.primitives.add(window.lifecycleParent));
+  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+  await idle();
+  assert.deepEqual(errors, []);
+  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
+});
+
 test('transparent parent and child tile replacement keeps each pixel at a single opacity', async ({ page, renderUrl }, testInfo) => {
   const initialStyle = style(renderUrl);
   initialStyle.sources.land.maxzoom = 14;
@@ -372,7 +478,7 @@ test('transparent parent and child tile replacement keeps each pixel at a single
           sources: Object.entries(tileset._style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
           live: [...tileset._vectorRenderer.collections].map(([id, collection]) => ({ id, show: collection.show })),
           held: [...tileset._tileResidency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase })),
+          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
         };
       }
       frames.push(frame);

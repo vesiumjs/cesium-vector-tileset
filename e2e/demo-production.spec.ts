@@ -88,7 +88,7 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
     return route.abort();
   });
 
-  await page.goto(`${productionUrl}${basePath}?view=london`);
+  await page.goto(`${productionUrl}${basePath}?preset=london&source=liberty`);
   await expect.poll(() => pixels(page, [51, 102, 170])).toBeGreaterThanOrEqual(0.95);
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   // Cesium reports N/A when requestRenderMode has no frame to draw.

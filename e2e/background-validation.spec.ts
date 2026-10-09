@@ -237,7 +237,7 @@ for (const scenario of [{ mode: '3d', ratio: 1 }, { mode: '2d', ratio: 1 }, { mo
               ideal: pyramid._covering?.idealTileIDs.map(tile => tile.toString()),
               renderable: pyramid.getRenderableIds().map(key => ({ key, state: pyramid.getTileByID(key).state })),
             })),
-            jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase })),
+            jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
             patternRefreshes: [...tileset._tilePublishQueue._patternRefreshes.keys()],
             firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, ready: collection.ready, index: update.index }))),
           };

@@ -1,7 +1,7 @@
 import type { TestScene, TestTileset } from './browser-types';
 import { Cartesian3, CesiumWidget, Primitive, Rectangle, SceneMode } from 'cesium';
 import { CesiumVectorTileset } from '../../packages/cesium-vector-tileset/index';
-import { sceneOptions, widgetOptions } from '../../src/demo-config';
+import { sceneOptions, widgetOptions } from '../../src/demo/scene-config';
 import 'cesium/Build/Cesium/Widgets/shared.css';
 import 'cesium/Build/Cesium/Widgets/CesiumWidget/CesiumWidget.css';
 

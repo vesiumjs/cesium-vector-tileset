@@ -105,7 +105,7 @@ async function replace(page: Page, next: StyleSpecification, expected: number[],
             const texture = entry.material._textures.image;
             return { id, show: entry.primitive.show, ready: entry.primitive.ready, parentShow: entry.collection.show, fade: entry.material.uniforms.u_fade, opacity: entry.material.uniforms.opacity, texture: texture && { width: texture.width, height: texture.height, destroyed: texture.isDestroyed() }, source: { width: entry.image.width, height: entry.image.height } };
           })),
-          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, phase: job.phase })),
+          jobs: [...tileset._tilePublishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
           firstUpdates: tileset._sceneCollections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: update.index }))),
         };
       }

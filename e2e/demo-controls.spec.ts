@@ -1,10 +1,18 @@
 import type { Page } from 'playwright/test';
-import type { TestScene } from './fixtures/browser-types';
+import type { TestScene, TestTileset } from './fixtures/browser-types';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createCanvas, loadImage } from 'canvas';
+import { Cartesian3 } from 'cesium';
 import { expect } from 'playwright/test';
+import { demoPresets } from '../src/demo/preset-catalog';
 import { fromGeojsonVt, test } from './fixtures';
+
+declare global {
+  interface Window {
+    demoLifecycle: { scene: TestScene; tileset: TestTileset; frames: number; stop: () => void };
+  }
+}
 
 const tile = fromGeojsonVt({ land: { features: [{ type: 3, geometry: [[[0, 0], [4096, 0], [4096, 4096], [0, 4096], [0, 0]]], tags: {} }] } }, { version: 2, extent: 4096 });
 const blue = [51, 102, 170];
@@ -16,22 +24,6 @@ const styleColors = {
   osm: [204, 136, 34],
   versatiles: [34, 153, 170],
 };
-
-// Fixed intended views, independent of the catalog read by the application.
-const pressureViews = [
-  { id: 'manhattan', styleId: 'buildings', longitude: -74.01192337274551, latitude: 40.70752701473173, height: 60, heading: 32, pitch: -12 },
-  { id: 'hong-kong', styleId: 'buildings', longitude: 114.1578, latitude: 22.2797, height: 120, heading: 70, pitch: -18 },
-  { id: 'shinjuku', styleId: 'liberty', longitude: 139.7005, latitude: 35.6905, height: 1500, heading: 15, pitch: -45 },
-  { id: 'london', styleId: 'osm', longitude: -0.0863, latitude: 51.5078, height: 900, heading: 110, pitch: -35 },
-  { id: 'shanghai', styleId: 'buildings', longitude: 121.5013, latitude: 31.237, height: 120, heading: 220, pitch: -15 },
-  { id: 'amsterdam', styleId: 'buildings', longitude: 4.8954, latitude: 52.3728, height: 350, heading: 60, pitch: -40 },
-  { id: 'san-francisco', styleId: 'versatiles', longitude: -122.4098, latitude: 37.791, height: 700, heading: 75, pitch: -12 },
-  { id: 'paris', styleId: 'osm', longitude: 2.2951, latitude: 48.8738, height: 900, heading: 135, pitch: -45 },
-  { id: 'sao-paulo', styleId: 'liberty', longitude: -46.6559, latitude: -23.5614, height: 1500, heading: 50, pitch: -35 },
-  { id: 'sydney', styleId: 'bright', longitude: 151.2108, latitude: -33.8588, height: 1500, heading: 75, pitch: -30 },
-  { id: 'cape-town', styleId: 'versatiles', longitude: 18.4241, latitude: -33.9249, height: 1500, heading: 300, pitch: -30 },
-  { id: 'dateline', styleId: 'bright', longitude: 179.99, latitude: -16.8, height: 45000, heading: 90, pitch: -70 },
-] as const;
 
 async function coverage(page: Page, color: number[], rows = [0.3, 0.5, 0.7]) {
   const image = await loadImage(await page.locator('.cesium-widget canvas').screenshot());
@@ -89,7 +81,7 @@ async function interceptStyles(page: Page, baseUrl: string, failure = 'style') {
 
 async function renderedView(page: Page) {
   return page.evaluate(async () => {
-    const scene = (document.querySelector('[data-testid="tileset-status"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+    const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
     await new Promise<void>((resolve) => {
       const remove = scene.postRender.addEventListener(() => {
         remove();
@@ -113,71 +105,183 @@ async function renderedView(page: Page) {
   });
 }
 
+test('the camera readout follows real motion and projection switches', async ({ page, renderUrl }, testInfo) => {
+  const { errors } = await interceptStyles(page, renderUrl, 'none');
+  await page.goto(`${renderUrl}/?preset=manhattan`);
+  await expect(page.getByTestId('tileset-status')).toHaveAttribute('aria-busy', 'false');
+  await expect.poll(() => page.getByTestId('camera-height').getAttribute('data-value').then(Number)).toBeCloseTo(1000, 4);
+  for (const mode of ['3d', 'cv', '2d']) {
+    await page.getByTestId('scene-select').selectOption(mode);
+    await expect(page).toHaveURL(new RegExp(`mode=${mode}`));
+    const samples = await page.evaluate(async () => {
+      const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+      const keys = ['longitude', 'latitude', 'height', 'heading', 'pitch', 'roll'] as const;
+      const samples: Array<{ actual: number[]; displayed: number[] }> = [];
+      const degrees = (radians: number) => radians * 180 / Math.PI;
+      const sample = async () => {
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        const camera = scene.camera;
+        const position = camera.positionCartographic;
+        samples.push({
+          actual: [degrees(position.longitude), degrees(position.latitude), position.height, degrees(camera.heading), degrees(camera.pitch), degrees(camera.roll)],
+          displayed: keys.map(key => Number(document.querySelector(`[data-testid="camera-${key}"]`)?.getAttribute('data-value'))),
+        });
+      };
+      // Camera operations exercise the real requestRenderMode loop; the HUD
+      // observes those frames without requesting its own continuation.
+      for (let step = 0; step < 8; step++) {
+        scene.camera.zoomOut(10);
+        if (scene.mode !== 2)
+          scene.camera.lookRight(0.01);
+        await new Promise<void>((resolve) => {
+          const remove = scene.postRender.addEventListener(() => {
+            remove();
+            resolve();
+          });
+        });
+        await sample();
+      }
+      return samples;
+    });
+    assert.equal(samples.length, 8);
+    for (const { actual, displayed } of samples) {
+      assert.ok(displayed.every(Number.isFinite), `${mode} displayed non-finite camera values`);
+      actual.forEach((value, index) => assert.ok(Math.abs(value - displayed[index]) < (index === 2 ? 1e-5 : 1e-7), `${mode} ${index}: expected ${value}, displayed ${displayed[index]}`));
+    }
+    assert.ok(Math.abs(samples.at(-1).displayed[2] - samples[0].displayed[2]) > 1, `${mode} height did not follow zoom`);
+    await testInfo.attach(`camera-readout-${mode}`, { body: JSON.stringify(samples, null, 2), contentType: 'application/json' });
+  }
+  assert.deepEqual(errors, []);
+});
+
 test('a retained active map still reports its tile errors after a candidate preset fails', async ({ page, renderUrl }) => {
   const { errors, failActiveTiles } = await interceptStyles(page, renderUrl);
-  await page.goto(`${renderUrl}/?view=london`);
+  await page.goto(`${renderUrl}/?preset=london&source=liberty`);
   await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
   await page.getByTestId('source-select').selectOption('versatiles');
   await expect(page.getByRole('alert')).toContainText('503');
   assert.ok(await coverage(page, blue) >= 0.98, 'the failed candidate removed the active map');
   failActiveTiles();
-  await page.getByTestId('city-tokyo').click();
+  await page.evaluate((destination) => {
+    const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+    scene.camera.flyTo({ destination, duration: 0 });
+  }, Cartesian3.fromDegrees(139.6917, 35.6895, 18000));
   // The newly exposed region needs active-source data. Its failure must be
   // reported by the retained map, whose lifetime exceeds the failed candidate.
   await expect(page.getByRole('alert')).toContainText('/demo-fixture/tile/');
   assert.deepEqual(errors, []);
 });
 
-test('demo style, city, scene and reload controls render deterministic MVT data', async ({ page, renderUrl }) => {
+test('demo style, unified preset, scene and add controls render deterministic MVT data', async ({ page, renderUrl }) => {
   const { requests, errors } = await interceptStyles(page, renderUrl, 'none');
-  await page.goto(`${renderUrl}/?view=london`);
+  await page.goto(`${renderUrl}/?preset=london&source=liberty`);
   await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   await page.getByTestId('source-select').selectOption('bright');
   await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
   assert.ok(requests.some(url => url.endsWith('/bright')));
-  await page.getByTestId('city-tokyo').click();
-  await expect(page.getByTestId('city-tokyo')).toHaveAttribute('aria-pressed', 'true');
-  await expect(page).toHaveURL(/view=tokyo/);
+  await page.getByTestId('preset-select').selectOption('shinjuku');
+  await page.getByTestId('source-select').selectOption('bright');
+  await expect(page.getByTestId('preset-select')).toHaveValue('shinjuku');
+  await expect(page).toHaveURL(/preset=shinjuku/);
   await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
   for (const mode of ['2d', 'cv', '3d']) {
     await page.getByTestId('scene-select').selectOption(mode);
     await expect(page).toHaveURL(new RegExp(`mode=${mode}`));
-    if (mode === '2d')
-      await expect(page.getByTestId('angle-select')).toBeDisabled();
     await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
   }
-  for (const angle of ['oblique', 'horizon']) {
-    await page.getByTestId('angle-select').selectOption(angle);
-    await expect(page).toHaveURL(new RegExp(`angle=${angle}`));
-    // A low camera legitimately exposes sky. Verify the ground portion at
-    // the bottom of the canvas rather than treating sky as missing coverage.
-    await expect.poll(() => coverage(page, green, [0.8, 0.85])).toBeGreaterThan(0.8);
-  }
-  await page.getByTestId('angle-select').selectOption('top');
-  await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
+  await expect(page.getByText('预设说明', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('来源与使用条件', { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId('angle-select')).toHaveCount(0);
+  await expect(page.getByTestId('scenario-select')).toHaveCount(0);
+  await expect(page.getByTestId('city-select')).toHaveCount(0);
   const beforeReload = requests.length;
-  await page.getByTestId('reload-style').click();
+  await page.getByTestId('add-tileset').click();
   await expect.poll(() => requests.length).toBeGreaterThan(beforeReload);
   await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
 
-  await page.getByTestId('scenario-select').selectOption('manhattan');
+  await page.getByTestId('preset-select').selectOption('manhattan');
   await expect(page.getByTestId('source-select')).toHaveValue('buildings');
-  await expect(page.getByTestId('height-select')).toHaveValue('60');
-  await expect.poll(() => renderedView(page)).toMatchObject({ height: expect.closeTo(60, 2), mode: 3 });
+  await expect(page.getByTestId('height-select')).toHaveCount(0);
+  await expect.poll(() => page.getByTestId('camera-height').getAttribute('data-value').then(Number)).toBeCloseTo(1000, 4);
+  await expect.poll(() => renderedView(page)).toMatchObject({ height: expect.closeTo(1000, 2), mode: 3 });
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   assert.deepEqual(errors, []);
 });
 
-for (const view of pressureViews) {
-  test(`demo config renders the ${view.id} pressure view`, async ({ page, renderUrl }, testInfo) => {
+test('demo remove destroys its tileset and add restores paint without caller render requests', async ({ page, renderUrl }) => {
+  const { errors } = await interceptStyles(page, renderUrl, 'none');
+  await page.goto(`${renderUrl}/?preset=london&source=liberty`);
+  await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
+  await expect(page.getByTestId('tileset-status')).toHaveAttribute('aria-busy', 'false');
+  const initial = await page.evaluate(() => {
+    const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+    window.demoLifecycle = { scene, tileset: scene.primitives.get(0), frames: 0, stop: () => {} };
+    window.demoLifecycle.stop = scene.postRender.addEventListener(() => window.demoLifecycle.frames++);
+    return { count: scene.primitives.length, destroyed: window.demoLifecycle.tileset.isDestroyed() };
+  });
+  expect(initial).toEqual({ count: 1, destroyed: false });
+  await page.getByTestId('remove-tileset').click();
+  await expect(page.getByTestId('tileset-status')).toHaveText('地图已移除');
+  await expect(page.getByTestId('remove-tileset')).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => window.demoLifecycle.frames)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => ({ count: window.demoLifecycle.scene.primitives.length, destroyed: window.demoLifecycle.tileset.isDestroyed() }))).toEqual({ count: 0, destroyed: true });
+  await expect.poll(() => coverage(page, blue)).toBeLessThan(0.01);
+  await page.getByTestId('add-tileset').click();
+  await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
+  await expect(page.getByTestId('tileset-status')).toHaveAttribute('aria-busy', 'false');
+  expect(await page.evaluate(() => {
+    const { scene, tileset: removed } = window.demoLifecycle;
+    return { count: scene.primitives.length, reused: scene.primitives.get(0) === removed };
+  })).toEqual({ count: 1, reused: false });
+  await page.evaluate(() => window.demoLifecycle.stop());
+  expect(errors).toEqual([]);
+});
+
+test('demo remove cancels a pending style and prevents a late response from adding it', async ({ page, renderUrl }) => {
+  const { errors } = await interceptStyles(page, renderUrl, 'none');
+  let release = () => {};
+  const response = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let requested = false;
+  await page.route('https://tiles.versatiles.org/assets/styles/colorful/style.json', async (route) => {
+    requested = true;
+    await response;
+    await route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#22aa55' } }] } });
+  });
+  try {
+    await page.goto(`${renderUrl}/?preset=london&source=liberty`);
+    await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
+    await page.getByTestId('source-select').selectOption('versatiles');
+    await expect.poll(() => requested).toBe(true);
+    await expect(page.getByTestId('tileset-status')).toHaveAttribute('aria-busy', 'true');
+    await page.getByTestId('remove-tileset').click();
+    release();
+    await expect(page.getByTestId('tileset-status')).toHaveText('地图已移除');
+    expect(await page.evaluate(async () => {
+      const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+      for (let frame = 0; frame < 12; frame++)
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      return scene.primitives.length;
+    })).toBe(0);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.getByTestId('source-select').selectOption('bright');
+    await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
+    expect(errors).toEqual([]);
+  }
+  finally { release(); }
+});
+
+for (const view of demoPresets) {
+  test(`demo config applies the ${view.id} camera and source`, async ({ page, renderUrl }, testInfo) => {
     const { tileRequests, errors } = await interceptStyles(page, renderUrl, 'none');
     const requestStart = 0;
-    await page.goto(`${renderUrl}/?scenario=${view.id}`);
+    await page.goto(`${renderUrl}/?preset=${view.id}`);
     await expect(page.getByTestId('source-select')).toHaveValue(view.styleId);
     await expect(page.getByTestId('scene-select')).toHaveValue('3d');
-    await expect(page.getByTestId('height-select')).toHaveValue(String(view.height));
-    await expect(page).toHaveURL(new RegExp(`scenario=${view.id}`));
+    await expect.poll(() => page.getByTestId('camera-height').getAttribute('data-value').then(Number)).toBeCloseTo(view.height, 3);
+    await expect(page).toHaveURL(new RegExp(`preset=${view.id}`));
     await expect.poll(() => renderedView(page)).toEqual({ longitude: expect.closeTo(view.longitude, 5), latitude: expect.closeTo(view.latitude, 5), height: expect.closeTo(view.height, 2), heading: expect.closeTo(view.heading, 5), pitch: expect.closeTo(view.pitch, 5), roll: expect.closeTo(0, 5), mode: 3, fps: true, globe: true });
     await expect(page.getByTestId('tileset-status')).toHaveAttribute('aria-busy', 'false', { timeout: 60_000 });
     await expect.poll(() => coverage(page, styleColors[view.styleId], [0.8, 0.85])).toBeGreaterThan(0.8);
@@ -204,7 +308,7 @@ for (const view of pressureViews) {
 for (const failure of ['style', 'tiles']) {
   test(`demo reports an unavailable ${failure} service and recovers after another preset is selected`, async ({ page, renderUrl }) => {
     const { errors } = await interceptStyles(page, renderUrl, failure);
-    await page.goto(`${renderUrl}/?view=london`);
+    await page.goto(`${renderUrl}/?preset=london&source=liberty`);
     await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
     await page.getByTestId('source-select').selectOption('versatiles');
     await expect(page.getByRole('alert')).toContainText('503');
@@ -245,7 +349,7 @@ test('native credits follow the active configuration, reloads and service failur
   const ofm = credits.locator('a[href="https://openfreemap.org/"]');
   const bkg = credits.locator('a[href="https://www.bkg.bund.de/"]');
   const way = credits.locator('a[href="https://waymorphic.com/"]');
-  await page.goto(`${renderUrl}/?view=london`);
+  await page.goto(`${renderUrl}/?preset=london&source=liberty`);
   await expect.poll(() => coverage(page, blue)).toBeGreaterThanOrEqual(0.98);
   await expect(ofm).toBeVisible();
   try {
@@ -260,7 +364,7 @@ test('native credits follow the active configuration, reloads and service failur
     pendingTiles = undefined;
     await expect.poll(() => coverage(page, green)).toBeGreaterThanOrEqual(0.98);
 
-    await page.getByTestId('reload-style').click();
+    await page.getByTestId('add-tileset').click();
     await expect(page.getByTestId('tileset-status')).toHaveAttribute('aria-busy', 'false');
     await expect(bkg).toHaveCount(1);
     await page.getByTestId('source-select').selectOption('bright');

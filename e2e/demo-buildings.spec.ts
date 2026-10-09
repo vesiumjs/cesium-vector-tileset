@@ -4,16 +4,19 @@ import type { TestScene, TestTileset } from './fixtures/browser-types';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createCanvas, loadImage } from 'canvas';
+import { Cartesian3 } from 'cesium';
 import { expect } from 'playwright/test';
-import { scenarioPresets } from '../src/demo-config';
+import { demoPresets } from '../src/demo/preset-catalog';
 import buildingsStyle from '../src/styles/buildings.json' with { type: 'json' };
 import { fromGeojsonVt, GeoJSONVT, test } from './fixtures';
 
-const manhattan = scenarioPresets.find(scenario => scenario.id === 'manhattan');
-const { longitude, latitude } = manhattan;
+const manhattan = demoPresets.find(scenario => scenario.id === 'manhattan');
+// Keep the low street regression independent of the gallery's overview pose.
+const longitude = -74.01192337274551;
+const latitude = 40.70752701473173;
 const extent = 4096;
 const buildings = [];
-// Align fixture streets with the real Manhattan scenario's current heading.
+// Align fixture streets with the low street regression camera.
 // The camera looks down a street corridor at both heights, outside footprints.
 const heading = manhattan.heading * Math.PI / 180;
 for (let north = -25; north <= 25; north++) {
@@ -39,6 +42,15 @@ const buildingIndex = new GeoJSONVT({
 
 function buildingTile(z, x, y) {
   return fromGeojsonVt({ building: buildingIndex.getTile(z, x, y) ?? { features: [] } }, { version: 2, extent });
+}
+
+async function flyToHeight(page: Page, height: number): Promise<void> {
+  await page.evaluate(({ destination, heading, pitch }) => {
+    const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+    scene.camera.cancelFlight();
+    scene.camera.flyTo({ destination, orientation: { heading, pitch, roll: 0 }, duration: 0.8 });
+  }, { destination: Cartesian3.fromDegrees(longitude, latitude, height), heading, pitch: -12 * Math.PI / 180 });
+  await expect.poll(() => page.getByTestId('camera-height').getAttribute('data-value').then(Number)).toBeCloseTo(height, 3);
 }
 
 async function buildingPixels(page: Page, excludedColors: number[][] = []) {
@@ -69,7 +81,7 @@ async function buildingPixels(page: Page, excludedColors: number[][] = []) {
 
 async function attachBuildingState(page: Page, testInfo: TestInfo, height: string) {
   const state = await page.evaluate(() => {
-    const scene = (document.querySelector('[data-testid="tileset-status"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
+    const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
     const tileset = Array.from({ length: scene.primitives.length }, (_, index) => scene.primitives.get(index))
       .find(primitive => typeof primitive.stats === 'function') as TestTileset;
     return {
@@ -77,7 +89,7 @@ async function attachBuildingState(page: Page, testInfo: TestInfo, height: strin
       styleZoom: tileset._styleEvaluation.zoom,
       hidden: tileset._style.getLayer('white-buildings').isHidden(tileset._style.z),
       stats: tileset.stats(),
-      jobs: [...tileset._tilePublishQueue._jobs].map(([id, job]) => ({ id, phase: job.phase, tile: job.data.tileID.canonical, buildPhase: job.vectorBuild?.phase })),
+      jobs: [...tileset._tilePublishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols, tile: job.data.tileID.canonical, buildPhase: job.vectorBuild?.phase })),
       firstUploads: tileset._sceneCollections._firstUpdates.map(queue => [...queue].map(([collection, upload]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: upload.index }))),
       camera: { longitude: scene.camera.positionCartographic.longitude, latitude: scene.camera.positionCartographic.latitude, height: scene.camera.positionCartographic.height, pitch: scene.camera.pitch },
       loaded: tileset.tilesLoaded,
@@ -124,15 +136,15 @@ test('Manhattan white buildings remain visible at 60 and 15 metre camera heights
   } }));
   // A deterministic starting style avoids any live service dependency.
   await page.route('https://tiles.openfreemap.org/styles/liberty', route => route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#183040' } }] } }));
-  await page.goto(`${renderUrl}/?view=london`);
-  await page.getByTestId('scenario-select').selectOption('manhattan');
-  await expect(page.locator('.cities [aria-pressed="true"]')).toHaveCount(0);
+  await page.goto(`${renderUrl}/?preset=london&source=liberty`);
+  await page.getByTestId('preset-select').selectOption('manhattan');
+  await expect(page.getByTestId('preset-select')).toHaveValue('manhattan');
   await expect(page.getByTestId('source-select')).toHaveValue('buildings');
   await expect(page.getByTestId('scene-select')).toHaveValue('3d');
-  await expect(page.getByTestId('scenario-angle')).toHaveText('朝向 32° · 俯角 12°');
+  await expect.poll(() => page.getByTestId('camera-heading').getAttribute('data-value').then(Number)).toBeCloseTo(32, 5);
+  await expect.poll(() => page.getByTestId('camera-pitch').getAttribute('data-value').then(Number)).toBeCloseTo(manhattan.pitch, 5);
   for (const height of ['60', '15']) {
-    await page.getByTestId('height-select').selectOption(height);
-    await expect(page).toHaveURL(new RegExp(`height=${height}`));
+    await flyToHeight(page, Number(height));
     // Camera.flyTo lasts 0.8 seconds; old-view pixels must not satisfy the
     // assertion for the newly selected height while that flight is running.
     await page.waitForTimeout(1000);
@@ -147,12 +159,13 @@ test('Manhattan white buildings remain visible at 60 and 15 metre camera heights
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   for (const mode of ['cv', '2d', '3d']) {
     await page.getByTestId('scene-select').selectOption(mode);
-    await expect(page.getByTestId('scenario-select')).toHaveValue('manhattan');
+    await expect(page.getByTestId('preset-select')).toHaveValue('manhattan');
     await expect.poll(() => page.evaluate(() => {
-      const camera = (document.querySelector('[data-testid="tileset-status"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene.camera;
+      const camera = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene.camera;
       return { longitude: camera.positionCartographic.longitude, latitude: camera.positionCartographic.latitude };
-    })).toEqual({ longitude: expect.closeTo(longitude * Math.PI / 180, 6), latitude: expect.closeTo(latitude * Math.PI / 180, 6) });
+    })).toEqual({ longitude: expect.closeTo(manhattan.longitude * Math.PI / 180, 6), latitude: expect.closeTo(manhattan.latitude * Math.PI / 180, 6) });
   }
+  await flyToHeight(page, 60);
   await expect.poll(async () => (await buildingPixels(page)).neutral, { timeout: 30_000 }).toBeGreaterThan(0.03);
   // Removing building geometry leaves the same background at the same
   // height. This proves the neutral pixels came from actual extrusion walls.
@@ -176,16 +189,17 @@ test('real OpenFreeMap Manhattan white buildings draw at 60 and 15 metres', { ta
     if (response.url().startsWith('https://tiles.openfreemap.org/') && /\/\d+\/\d+\/\d+(?:\.pbf)?(?:\?|$)/.test(response.url()))
       tiles.set(response.url(), response.status());
   });
-  // Exercise the real preset and public UI with its real TileJSON and MVT;
+  // Exercise the real preset and camera with its real TileJSON and MVT;
   // the deterministic fixture above supplies no routes to this separate page.
-  await page.goto(`${renderUrl}/?source=buildings&scenario=manhattan&height=60`);
+  await page.goto(`${renderUrl}/?source=buildings&preset=manhattan`);
   await expect(page.getByTestId('source-select')).toHaveValue('buildings');
   await expect(page.getByTestId('scene-select')).toHaveValue('3d');
-  await expect(page.getByTestId('scenario-angle')).toHaveText('朝向 32° · 俯角 12°');
+  await expect.poll(() => page.getByTestId('camera-heading').getAttribute('data-value').then(Number)).toBeCloseTo(32, 5);
+  await expect.poll(() => page.getByTestId('camera-pitch').getAttribute('data-value').then(Number)).toBeCloseTo(manhattan.pitch, 5);
   for (const height of ['60', '15']) {
-    await page.getByTestId('height-select').selectOption(height);
+    await flyToHeight(page, Number(height));
     await page.waitForTimeout(1000);
-    await expect.poll(() => page.evaluate(() => (document.querySelector('[data-testid="tileset-status"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene.camera.positionCartographic.height)).toBeCloseTo(Number(height), 1);
+    await expect.poll(() => page.evaluate(() => (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene.camera.positionCartographic.height)).toBeCloseTo(Number(height), 1);
     // Real background/road colors are also neutral. Exclude those known
     // paints so a flat basemap cannot satisfy the building pixel assertion.
     try {
