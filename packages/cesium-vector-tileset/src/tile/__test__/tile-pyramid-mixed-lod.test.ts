@@ -83,7 +83,7 @@ describe('mixed LOD tile retention', () => {
     for (const id of expected) addLoaded(pyramid, id);
     const retain: Record<string, OverscaledTileID> = {};
 
-    const incomplete = pyramid._retainLoadedChildren(retain, new Set([target]));
+    const incomplete = pyramid.retainLoadedChildren(retain, new Set([target]));
 
     expect(Object.keys(retain).sort()).toEqual(expected.map(id => id.key).sort());
     expect(incomplete.size).toBe(0);
@@ -121,7 +121,7 @@ describe('mixed LOD tile retention', () => {
     for (const id of [...completeChildren, ...partialChildren, neighbor]) addLoaded(pyramid, id);
     const retain: Record<string, OverscaledTileID> = {};
 
-    const incomplete = pyramid._retainLoadedChildren(retain, new Set([complete, partial]));
+    const incomplete = pyramid.retainLoadedChildren(retain, new Set([complete, partial]));
 
     expect(Object.keys(retain).sort()).toEqual([...completeChildren, ...partialChildren].map(id => id.key).sort());
     expect([...incomplete]).toEqual([partial]);
@@ -139,7 +139,7 @@ describe('mixed LOD tile retention', () => {
     for (const id of [deeper, adjacent, wrapped, nearest]) addLoaded(pyramid, id);
     const retain: Record<string, OverscaledTileID> = {};
 
-    const incomplete = pyramid._retainLoadedChildren(retain, new Set([target]));
+    const incomplete = pyramid.retainLoadedChildren(retain, new Set([target]));
 
     expect(Object.keys(retain)).toEqual([nearest.key]);
     expect(incomplete.size).toBe(0);
@@ -160,7 +160,7 @@ describe('mixed LOD tile retention', () => {
     addLoaded(pyramid, beyond);
     const retain: Record<string, OverscaledTileID> = {};
 
-    const incomplete = pyramid._retainLoadedChildren(retain, new Set([target]));
+    const incomplete = pyramid.retainLoadedChildren(retain, new Set([target]));
 
     expect(beyond.isChildOf(target)).toBe(true);
     expect(Object.keys(retain)).toHaveLength(0);
@@ -202,9 +202,9 @@ describe('mixed LOD tile retention', () => {
     expect(candidates).toEqual([parentID]);
     const enumerate = vi.spyOn(pyramid._activeTiles, 'getAllTiles');
     expect(pyramid.getLoadedTileIDs(13, 14)).toBe(candidates);
-    pyramid._removeTile(parentID.key);
+    pyramid.removeTile(parentID.key);
     expect(pyramid.getLoadedTileIDs(13, 14)).toBe(candidates);
-    pyramid._addTile(parentID);
+    pyramid.addTile(parentID);
     expect(pyramid.getLoadedTileIDs(13, 14)).toBe(candidates);
     expect(enumerate).not.toHaveBeenCalled();
     pyramid.clearTiles();
@@ -217,7 +217,7 @@ describe('mixed LOD tile retention', () => {
       tile.state = 'loaded';
     });
     const child = new OverscaledTileID(14, 0, 14, 8186, 5448);
-    pyramid._addTile(child);
+    pyramid.addTile(child);
     await Promise.resolve();
     expect(pyramid.getLoadedTileIDs(13, 14)).toEqual([parentID, child]);
 
@@ -228,7 +228,7 @@ describe('mixed LOD tile retention', () => {
         resolve({ unmodified: true });
       };
     }));
-    const reload = pyramid._reloadTile(parentID.key, 'reloading');
+    const reload = pyramid.reloadTile(parentID.key, 'reloading');
     expect(pyramid.getLoadedTileIDs(13, 14)).toEqual([child]);
     finish();
     await reload;
@@ -238,7 +238,7 @@ describe('mixed LOD tile retention', () => {
     pyramid._source.loadTile = vi.fn(async () => {
       throw Object.assign(new Error('missing'), { status: 404 });
     });
-    await pyramid._reloadTile(parentID.key, 'reloading');
+    await pyramid.reloadTile(parentID.key, 'reloading');
     expect(pyramid.getLoadedTileIDs(13, 14)).toEqual([child]);
     pyramid.clearTiles();
   });

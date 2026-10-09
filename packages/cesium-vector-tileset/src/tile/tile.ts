@@ -35,7 +35,9 @@ const CLOCK_SKEW_RETRY_TIMEOUT = 30000;
  */
 export type TileState = 'loading' | 'loaded' | 'reloading' | 'unloaded' | 'errored' | 'expired';
 
-/** @internal */
+/**
+ * @internal
+ */
 interface CrossFadeArgs {
   fadingRole: FadingRoles;
   fadingDirection: FadingDirections;

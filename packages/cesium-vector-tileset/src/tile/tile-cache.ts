@@ -10,7 +10,6 @@ interface TileCacheEntry {
  * A [least-recently-used cache](https://en.wikipedia.org/wiki/Cache_algorithms)
  * with hash lookup made possible by keeping a list of keys in parallel to
  * an array of dictionary of values
- *
  * TilePyramid offloads currently unused tiles to this cache, and when a tile gets used again,
  * it is also removed from this cache. Thus addition is the only operation that counts as "usage"
  * for the purposes of LRU behaviour.
@@ -113,7 +112,8 @@ export class TileCache {
   /*
      * Get and remove the value with the specified key.
      */
-  _getAndRemoveByKey(key: string): Tile | undefined {
+
+  private _getAndRemoveByKey(key: string): Tile | undefined {
     const entries = this.data[key];
     const data = entries?.shift();
     if (!data) {
@@ -234,6 +234,7 @@ export class TileCache {
 
 export class BoundedLRUCache<K, V> {
   private maxEntries: number;
+
   private map: Map<K, V>;
 
   constructor(maxEntries: number) {

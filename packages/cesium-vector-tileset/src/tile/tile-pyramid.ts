@@ -57,7 +57,6 @@ export class TilePyramid extends Evented<SourceEventType> {
    * signifies that the TileJSON is loaded if applicable.
    * if the source type does not come with a TileJSON, the flag signifies the
    * source data has loaded (i.e geojson has been tiled on the worker and is ready)
-   * @internal
    */
   _sourceLoaded = false;
 
@@ -83,8 +82,11 @@ export class TilePyramid extends Evented<SourceEventType> {
   _state: SourceFeatureState;
   _didEmitContent: boolean;
   _updated: boolean;
+
   private _tileSetRevision = 0;
+
   private _loadedTileRevision = 0;
+
   private _loadedTileIDs?: {
     revision: number;
     zooms: Map<number, OverscaledTileID[]>;
@@ -243,7 +245,10 @@ export class TilePyramid extends Evented<SourceEventType> {
       this.update(this._covering);
   }
 
-  async _loadTile(tile: Tile, _id: string, state: TileState): Promise<void> {
+  /**
+   * @internal
+   */
+  private async _loadTile(tile: Tile, _id: string, state: TileState): Promise<void> {
     const dispatchKey = tile.tileID.key;
     this._dispatchedLoads.add(dispatchKey);
     try {
@@ -290,7 +295,10 @@ export class TilePyramid extends Evented<SourceEventType> {
     }
   }
 
-  _unloadTile(tile: Tile): void {
+  /**
+   * @internal
+   */
+  private _unloadTile(tile: Tile): void {
     this._loadedTileRevision++;
     if (this._source.unloadTile) {
       // Tile removal is not awaited by the pyramid. Consume teardown errors
@@ -304,7 +312,10 @@ export class TilePyramid extends Evented<SourceEventType> {
     }
   }
 
-  _abortTile(tile: Tile): void {
+  /**
+   * @internal
+   */
+  private _abortTile(tile: Tile): void {
     if (this._source.abortTile) {
       try {
         void Promise.resolve(this._source.abortTile(tile)).catch(() => {});
@@ -395,15 +406,18 @@ export class TilePyramid extends Evented<SourceEventType> {
         continue;
       }
       else if (sourceDataChanged) {
-        this._reloadTile(id, tile.state === 'errored' ? 'loading' : 'expired');
+        this.reloadTile(id, tile.state === 'errored' ? 'loading' : 'expired');
       }
       else if (tile.state !== 'errored') {
-        this._reloadTile(id, 'reloading');
+        this.reloadTile(id, 'reloading');
       }
     }
   }
 
-  async _reloadTile(id: string, state: TileState): Promise<void> {
+  /**
+   * @internal
+   */
+  async reloadTile(id: string, state: TileState): Promise<void> {
     const tile = this._activeTiles.getTileById(id);
 
     // The tile may have left the active set before its reload was scheduled.
@@ -421,7 +435,10 @@ export class TilePyramid extends Evented<SourceEventType> {
     await this._loadTile(tile, id, state);
   }
 
-  _tileLoaded(tile: Tile, id: string, previousState: TileState, result: LoadTileResult | void): void {
+  /**
+   * @internal
+   */
+  private _tileLoaded(tile: Tile, id: string, previousState: TileState, result: LoadTileResult | void): void {
     if (!this._isTileActive(tile)) {
       return;
     }
@@ -517,29 +534,25 @@ export class TilePyramid extends Evented<SourceEventType> {
 
   /**
    * Retain the uppermost loaded children of each provided target tile, within a variable covering zoom range.
-   *
    * On pitched maps, different parts of the screen show different zoom levels simultaneously.
    * Ideal tiles are generated using coveringTiles() above, which returns the ideal tile set for
    * the current pitched plane, which can carry tiles of varying zooms (overscaledZ).
    * See: https://maplibre.org/maplibre-gl-js/docs/examples/level-of-detail-control/
-   *
    * A fixed `maxCoveringZoom` on a pitched map would incorrectly intersect with some
    * ideal tiles and cause distant high-pitch tiles to skip their uppermost children.
-   *
    * To solve this, we calculate the max covering zoom for each ideal tile separately using its
    * `overscaledZ`. This effectively makes the "max covering zoom plane" parallel to the
    * "ideal tile plane," ensuring that we correctly capture the uppermost children
    * of each ideal tile across the pitched view.
-   *
    * Analogy: imagine two sheets of paper in 3D space:
    *   - one sheet = ideal tiles at varying overscaledZ
    *   - the second sheet = maxCoveringZoom
-   *
    * @param retainTileMap - this parameters will be updated with the child tiles to keep
    * @param idealTilesWithoutData - which of the ideal tiles currently does not have loaded data
    * @return a set of tiles that need to be loaded
+   * @internal
    */
-  _retainLoadedChildren(retainTileMap: Record<string, OverscaledTileID>, idealTilesWithoutData: Set<OverscaledTileID>): Set<OverscaledTileID> {
+  retainLoadedChildren(retainTileMap: Record<string, OverscaledTileID>, idealTilesWithoutData: Set<OverscaledTileID>): Set<OverscaledTileID> {
     const loadedDescendents: Record<string, Tile[]> = this._getLoadedDescendents(idealTilesWithoutData);
     const incomplete = new Set<OverscaledTileID>();
 
@@ -586,8 +599,9 @@ export class TilePyramid extends Evented<SourceEventType> {
 
   /**
    * Return dictionary of qualified loaded descendents for each provided target tile id
+   * @internal
    */
-  _getLoadedDescendents(targetTileIDs: Set<OverscaledTileID>): Record<string, Tile[]> {
+  private _getLoadedDescendents(targetTileIDs: Set<OverscaledTileID>): Record<string, Tile[]> {
     const loadedDescendents: Record<string, Tile[]> = {};
 
     // enumerate current tiles and find the loaded descendents of each target tile
@@ -608,8 +622,9 @@ export class TilePyramid extends Evented<SourceEventType> {
    * Test the non-overlapping descendant footprints selected above. Mixed
    * levels contribute their actual canonical area; an overscaled tile keeps
    * the same footprint. Canonical zooms 0..25 make these dyadic areas exact.
+   * @internal
    */
-  _areDescendentsComplete(generationIDs: OverscaledTileID[], ancestor: OverscaledTileID): boolean {
+  private _areDescendentsComplete(generationIDs: OverscaledTileID[], ancestor: OverscaledTileID): boolean {
     let coverage = 0;
     for (const id of generationIDs)
       coverage += 4 ** (ancestor.canonical.z - id.canonical.z);
@@ -751,7 +766,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     // Dispatch ideals deferred by the pressure valve while slots are free
     // (an abort during cleanup may have freed one this very pass).
     this._drainDeferredLoads();
-    // _addTile/_removeTile may change the revision while retaining tiles. Save
+    // addTile/removeTile may change the revision while retaining tiles. Save
     // the post-update state so a static frame does not perform one redundant
     // pyramid walk on the next Cesium render.
     this._lastUpdate = {
@@ -763,6 +778,9 @@ export class TilePyramid extends Evented<SourceEventType> {
     };
   }
 
+  /**
+   * @internal
+   */
   private _sameUpdate(covering: TileCovering): boolean {
     const previous = this._lastUpdate;
     if (!previous
@@ -826,8 +844,9 @@ export class TilePyramid extends Evented<SourceEventType> {
 
   /**
    * Remove vector tiles that are no longer retained and also not needed for symbol fading
+   * @internal
    */
-  _cleanUpVectorTiles(retain: Record<string, OverscaledTileID>): void {
+  private _cleanUpVectorTiles(retain: Record<string, OverscaledTileID>): void {
     for (const id of this._activeTiles.getAllIds()) {
       const tile = this._activeTiles.getTileById(id);
       if (!tile) {
@@ -842,7 +861,7 @@ export class TilePyramid extends Evented<SourceEventType> {
 
       // remove non-retained tiles without symbols
       if (!tile.hasSymbolBuckets) {
-        this._removeTile(id);
+        this.removeTile(id);
         continue;
       }
 
@@ -851,7 +870,7 @@ export class TilePyramid extends Evented<SourceEventType> {
         tile.setSymbolHoldDuration(this.style?.fadeDuration ?? 300);
       }
       else if (tile.symbolFadeFinished()) {
-        this._removeTile(id);
+        this.removeTile(id);
       }
     }
   }
@@ -860,7 +879,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     for (const id of this._activeTiles.getAllIds()) {
       const tile = this._activeTiles.getTileById(id);
       if (tile?.holdingForSymbolFade()) {
-        this._removeTile(id);
+        this.removeTile(id);
       }
     }
   }
@@ -869,12 +888,13 @@ export class TilePyramid extends Evented<SourceEventType> {
    * Set tiles to be retained on update of the source. For ideal tiles that do not have data, retain their loaded
    * children so they can be displayed as substitutes pending load of each ideal tile (to reduce flickering).
    * If no loaded children are available, fallback to seeking loaded parents as an alternative substitute.
+   * @internal
    */
-  _updateRetainedTiles(idealTileIDs: OverscaledTileID[]): Record<string, OverscaledTileID> {
+  private _updateRetainedTiles(idealTileIDs: OverscaledTileID[]): Record<string, OverscaledTileID> {
     this._deferProbe = { idealTileIDs };
     const idealTilesWithoutData = new Set<OverscaledTileID>();
     for (const idealID of idealTileIDs) {
-      const idealTile = this._addTile(idealID);
+      const idealTile = this.addTile(idealID);
 
       if (!idealTile.hasData()) {
         idealTilesWithoutData.add(idealID);
@@ -887,7 +907,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     for (const tileID of idealTileIDs) {
       retainTileMap[tileID.key] = tileID;
     }
-    const tileIdsWithoutData = this._retainLoadedChildren(retainTileMap, idealTilesWithoutData);
+    const tileIdsWithoutData = this.retainLoadedChildren(retainTileMap, idealTilesWithoutData);
 
     // for remaining missing tiles with incomplete child coverage, seek a loaded parent tile
     const checked: Record<string, boolean> = {};
@@ -910,7 +930,7 @@ export class TilePyramid extends Evented<SourceEventType> {
 
         tile = this.getTile(parentId);
         if (!tile && (parentWasRequested || this._tileCache.get(parentId)?.hasData())) {
-          tile = this._addTile(parentId);
+          tile = this.addTile(parentId);
         }
         if (tile) {
           const hasData = tile.hasData();
@@ -936,6 +956,7 @@ export class TilePyramid extends Evented<SourceEventType> {
    * to). Uncovered ideals always dispatch - no holes, ever. Consulted only
    * inside the ideal loop (see _deferProbe); parent-ascent requests are the
    * rendering fallback and never defer.
+   * @internal
    */
   private _shouldDeferIdealLoad(idealID: OverscaledTileID): boolean {
     const probe = this._deferProbe;
@@ -943,7 +964,7 @@ export class TilePyramid extends Evented<SourceEventType> {
       return false;
     }
     if (!probe.covered) {
-      const incomplete = this._retainLoadedChildren({}, new Set(probe.idealTileIDs));
+      const incomplete = this.retainLoadedChildren({}, new Set(probe.idealTileIDs));
       const incompleteKeys = new Set([...incomplete].map(id => id.key));
       probe.covered = new Set(probe.idealTileIDs.map(id => id.key).filter(key => !incompleteKeys.has(key)));
     }
@@ -963,6 +984,7 @@ export class TilePyramid extends Evented<SourceEventType> {
    * Dispatch deferred ideals while slots are free. Deferred tiles sit in
    * view with state 'loading' but no dispatched promise; completions bump
    * the revision so the next walk reaches here with a free slot.
+   * @internal
    */
   private _drainDeferredLoads(): void {
     if (this._dispatchedLoads.size >= TilePyramid.MAX_CONCURRENT_LOADS) {
@@ -981,8 +1003,9 @@ export class TilePyramid extends Evented<SourceEventType> {
 
   /**
    * Add a tile, given its coordinate, to the pyramid.
+   * @internal
    */
-  _addTile(tileID: OverscaledTileID): Tile {
+  addTile(tileID: OverscaledTileID): Tile {
     let tile = this._activeTiles.getTileById(tileID.key);
     if (tile)
       return tile;
@@ -1026,21 +1049,25 @@ export class TilePyramid extends Evented<SourceEventType> {
 
   /**
    * Set a timeout to reload the tile after it expires
+   * @internal
    */
-  _setTileReloadTimer(id: string, tile: Tile): void {
+  private _setTileReloadTimer(id: string, tile: Tile): void {
     this._clearTileReloadTimer(id);
 
     const expiryTimeout = tile.getExpiryTimeout();
     if (expiryTimeout) {
       const reload = () => {
-        this._reloadTile(id, 'expired');
+        this.reloadTile(id, 'expired');
         delete this._timers[id];
       };
       this._timers[id] = setTimeout(reload, expiryTimeout);
     }
   }
 
-  _clearTileReloadTimer(id: string): void {
+  /**
+   * @internal
+   */
+  private _clearTileReloadTimer(id: string): void {
     const timeout = this._timers[id];
     if (timeout) {
       clearTimeout(timeout);
@@ -1048,7 +1075,10 @@ export class TilePyramid extends Evented<SourceEventType> {
     }
   }
 
-  _resetTileReloadTimers(): void {
+  /**
+   * @internal
+   */
+  private _resetTileReloadTimers(): void {
     for (const id in this._timers) {
       clearTimeout(this._timers[id]);
       delete this._timers[id];
@@ -1074,15 +1104,16 @@ export class TilePyramid extends Evented<SourceEventType> {
         continue;
       }
       if (tileIds.some(tid => tid.equals(tile.tileID.canonical))) {
-        this._reloadTile(id, 'expired');
+        this.reloadTile(id, 'expired');
       }
     }
   }
 
   /**
    * Remove a tile, given its id, from the pyramid
+   * @internal
    */
-  _removeTile(id: string): void {
+  removeTile(id: string): void {
     const tile = this._activeTiles.getTileById(id);
     if (!tile)
       return;
@@ -1105,6 +1136,9 @@ export class TilePyramid extends Evented<SourceEventType> {
     }
   }
 
+  /**
+   * @internal
+   */
   private _isTileActive(tile: Tile): boolean {
     return !this._removed && !tile.aborted && this._activeTiles.getTileById(tile.tileID.key) === tile;
   }
@@ -1115,6 +1149,7 @@ export class TilePyramid extends Evented<SourceEventType> {
    * +179° to -179° keeps the same world copy. If a caller supplies an
    * explicitly unwrapped longitude, preserve it and let handleWrapJump apply
    * the corresponding world-copy key change.
+   * @internal
    */
   private _continuousCenterLng(lng: number): number {
     if (!Number.isFinite(lng)) {
@@ -1141,6 +1176,7 @@ export class TilePyramid extends Evented<SourceEventType> {
    * The Cesium covering uses canonical coordinates, while TileIDs also carry
    * the world copy in `wrap`. Assign the copy whose tile centre is closest to
    * the camera so dateline tiles are not rendered in the opposite world.
+   * @internal
    */
   private _assignWorldCopies(tiles: OverscaledTileID[], centerLng: number): OverscaledTileID[] {
     if (!Number.isFinite(centerLng)) {
@@ -1233,7 +1269,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     this._paused = false;
 
     for (const id of this._activeTiles.getAllIds()) {
-      this._removeTile(id);
+      this.removeTile(id);
     }
 
     this._tileCache.reset();
@@ -1297,7 +1333,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     for (const id of this._activeTiles.getAllIds()) {
       const tile = this._activeTiles.getTileById(id);
       if (tile?.hasDependency(namespaces, keys)) {
-        this._reloadTile(id, 'reloading');
+        this.reloadTile(id, 'reloading');
       }
     }
     this._tileCache.filter(tile => !tile.hasDependency(namespaces, keys));

@@ -8,7 +8,9 @@ import { compareTileId } from './tile-id';
 /** Tiles retained by a pyramid for loading, fallback coverage or fading, excluding its cache. */
 export class ActiveTiles {
   private _tiles: Record<string, Tile> = {};
+
   private _allTilesCache?: Tile[];
+
   private _renderableCache?: {
     bearingInRadians: number;
     symbolLayer: boolean;
@@ -22,6 +24,9 @@ export class ActiveTiles {
     }>;
   };
 
+  /**
+   * @internal
+   */
   private _invalidateCaches(): void {
     this._allTilesCache = undefined;
     this._renderableCache = undefined;
