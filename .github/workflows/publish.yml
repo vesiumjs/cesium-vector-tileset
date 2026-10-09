@@ -16,11 +16,13 @@ jobs:
     runs-on: ubuntu-24.04
     environment: Publish Package
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/setup@v3
@@ -41,3 +43,8 @@ jobs:
 
       - name: Publish to npm with OIDC
         run: pnpm publish:ci
+
+      - name: Create GitHub Release
+        run: pnpm dlx changelogithub --no-group
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
