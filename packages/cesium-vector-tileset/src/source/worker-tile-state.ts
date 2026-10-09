@@ -12,20 +12,24 @@ export class WorkerTileState {
   parsing: Record<string, ParsingState> = {};
 
   startLoading(uid: string | number, tile: WorkerTile): void {
+    this.loading[uid]?.abort?.abort();
+    this.loaded[uid]?.abort?.abort();
     this.loading[uid] = tile;
   }
 
-  finishLoading(uid: string | number): void {
-    delete this.loading[uid];
+  finishLoading(uid: string | number, tile: WorkerTile): void {
+    if (this.loading[uid] === tile)
+      delete this.loading[uid];
   }
 
   abort(uid: string | number): void {
-    const tile = this.loading[uid];
+    const tile = this.loading[uid] ?? this.loaded[uid];
     const abortController = tile?.abort;
     if (!abortController)
       return;
     abortController.abort();
-    delete this.loading[uid];
+    if (this.loading[uid] === tile)
+      delete this.loading[uid];
   }
 
   getParsing(uid: string | number): ParsingState | undefined {
@@ -36,8 +40,9 @@ export class WorkerTileState {
     this.parsing[uid] = state;
   }
 
-  removeParsing(uid: string | number): void {
-    delete this.parsing[uid];
+  removeParsing(uid: string | number, state: ParsingState): void {
+    if (this.parsing[uid] === state)
+      delete this.parsing[uid];
   }
 
   markLoaded(uid: string | number, tile: WorkerTile): void {
@@ -52,6 +57,7 @@ export class WorkerTileState {
   }
 
   removeLoaded(uid: string | number): void {
+    this.loaded[uid]?.abort?.abort();
     delete this.loaded[uid];
   }
 

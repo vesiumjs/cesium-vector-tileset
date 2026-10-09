@@ -19,6 +19,7 @@ import { rtlWorkerPlugin } from '../source/rtl-text-plugin-worker';
 import { VectorTileWorkerSource } from '../source/vector-tile-worker-source';
 
 import { StyleLayerIndex } from '../style/style-layer-index';
+import { throwIfAborted } from '../util/abort-error';
 import { makeRequest } from '../util/ajax';
 import {
   MessageType,
@@ -136,12 +137,12 @@ export class TileWorker {
       return (this._getWorkerSource(mapId, params.type, params.source) as GeoJSONWorkerSource).loadData(params);
     });
 
-    this.channel.registerMessageHandler(MessageType.loadTile, (mapId, params: WorkerTileParameters) => {
-      return this._loadSourceTile(mapId, params, 'loadTile');
+    this.channel.registerMessageHandler(MessageType.loadTile, (mapId, params: WorkerTileParameters, controller) => {
+      return this._loadSourceTile(mapId, params, 'loadTile', controller!);
     });
 
-    this.channel.registerMessageHandler(MessageType.reloadTile, (mapId, params: WorkerTileParameters) => {
-      return this._loadSourceTile(mapId, params, 'reloadTile');
+    this.channel.registerMessageHandler(MessageType.reloadTile, (mapId, params: WorkerTileParameters, controller) => {
+      return this._loadSourceTile(mapId, params, 'reloadTile', controller!);
     });
 
     this.channel.registerMessageHandler(MessageType.abortTile, (mapId, params: TileParameters) => {
@@ -244,8 +245,10 @@ export class TileWorker {
     mapId: string | number,
     params: WorkerTileParameters,
     operation: 'loadTile' | 'reloadTile',
+    controller: AbortController,
   ): Promise<WorkerTileResult> {
-    const result = await this._getWorkerSource(mapId, params.type, params.source)[operation](params);
+    const result = await this._getWorkerSource(mapId, params.type, params.source)[operation](params, controller);
+    throwIfAborted(controller.signal);
     if (result && 'buckets' in result) {
       this._prepareTile(result, params.tileID);
     }

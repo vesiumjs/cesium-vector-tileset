@@ -1,3 +1,4 @@
+import type { PackedLinePaths } from '../../data/line-path-transfer';
 import Point from '@mapbox/point-geometry';
 import { Color, CompoundExpression, createExpression, EvaluationContext, expressions, StyleExpression } from '@maplibre/maplibre-gl-style-spec';
 import { describe, expect, it } from 'vitest';
@@ -50,8 +51,7 @@ describe('worker transfer registries', () => {
     const encoded = worker.serialize(bucket, transferables);
     const received = structuredClone(encoded, { transfer: transferables });
     const receivedBucket = received as unknown as RuntimeLineBucket;
-    const receivedPaths = receivedBucket.linePaths;
-    const receivedPath = receivedPaths[0];
+    const receivedPaths = (received as unknown as { linePaths: PackedLinePaths }).linePaths;
     const receivedJoinCap = receivedBucket.lineJoinCap;
     const receivedConfigurations = receivedBucket.programConfigurations;
     const receivedRanges = receivedConfigurations._featureRanges;
@@ -59,15 +59,14 @@ describe('worker transfer registries', () => {
     const restored = scene.deserialize(received) as RuntimeLineBucket;
 
     expect(restored).toBe(received);
-    expect(restored.linePaths).toBe(receivedPaths);
-    expect(restored.linePaths[0]).toBe(receivedPath);
-    expect(restored.linePaths[0].points).toBe(receivedPath.points);
+    expect(restored.linePaths.every(path => path.points.buffer === receivedPaths.coordinates.buffer)).toBe(true);
     expect(restored.lineJoinCap).toBe(receivedJoinCap);
     expect(restored.programConfigurations).toBe(receivedConfigurations);
     expect(restored.programConfigurations.getFeatureRanges()).toBe(receivedRanges);
     expect(restored.programConfigurations.getFeatureRanges()[0]).toBe(receivedRange);
     expect(Object.hasOwn(restored, '$name')).toBe(false);
-    expect(bucket.linePaths[0].points.byteLength).toBe(0);
+    expect(Array.from(bucket.linePaths[0].points)).toEqual(paths[0].points);
+    expect((encoded as unknown as { linePaths: PackedLinePaths }).linePaths.coordinates.byteLength).toBe(0);
     expect(restored).toBeInstanceOf(RuntimeLineBucket);
     expect(restored).not.toBeInstanceOf(WorkerLineBucket);
     expect(Reflect.get(restored, 'populate')).toBeUndefined();

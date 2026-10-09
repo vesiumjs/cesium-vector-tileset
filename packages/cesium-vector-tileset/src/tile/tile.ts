@@ -18,6 +18,7 @@ import { deserialize as deserializeBucket } from '../data/bucket';
 import { SymbolBucket } from '../data/bucket-runtime';
 import { GEOJSON_TILE_LAYER_NAME } from '../data/feature-index';
 import { rtlMainThreadPluginFactory } from '../source/rtl-text-plugin-main-thread';
+import { AbortError } from '../util/abort-error';
 import { parseCacheControl } from '../util/ajax';
 
 const CLOCK_SKEW_RETRY_TIMEOUT = 30000;
@@ -52,6 +53,29 @@ export type FadingDirections = typeof FadingDirections[keyof typeof FadingDirect
  * its place, as well as a unique ID and data tracking for its content
  */
 let nextTileUid = 1;
+
+/** One cancellable load lease; every coalesced caller waits for its latest version. */
+export class TileLoadRequest<T> {
+  version = 0;
+  readonly controller = new AbortController();
+  readonly promise: Promise<T>;
+
+  constructor(load: (request: TileLoadRequest<T>) => Promise<T>) {
+    this.promise = Promise.resolve().then(() => load(this));
+  }
+
+  /** Cancellation settles waits even when a dependency ignores its AbortSignal. */
+  wait<Value>(promise: Value | PromiseLike<Value>): Promise<Value> {
+    const signal = this.controller.signal;
+    if (signal.aborted)
+      return Promise.reject(new AbortError(signal.reason));
+    return new Promise<Value>((resolve, reject) => {
+      const abort = () => reject(new AbortError(signal.reason));
+      signal.addEventListener('abort', abort, { once: true });
+      Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
+  }
+}
 
 export class Tile {
   tileID: OverscaledTileID;

@@ -8,6 +8,7 @@ import type { WorkerDispatcher } from '../worker/dispatcher';
 import type { Source } from './source';
 import type { OverzoomParameters, TileEncoding, WorkerTileParameters, WorkerTileResult } from './worker-source';
 
+import { TileLoadRequest } from '../tile/tile';
 import { TileBounds } from '../tile/tile-bounds';
 import { isAbortError } from '../util/abort-error';
 import { ensureError, hasHttpStatus } from '../util/errors';
@@ -87,6 +88,8 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   isTileClipped: boolean;
   _tileJSONRequest?: AbortController;
   _loaded: boolean;
+  private _removed = false;
+  private readonly _tileLoads = new Map<Tile, TileLoadRequest<LoadTileResult | void>>();
 
   constructor(id: string, options: VectorTileSourceOptions, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super();
@@ -169,6 +172,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   }
 
   onAdd(): void {
+    this._removed = false;
     this.load();
   }
 
@@ -210,6 +214,9 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   }
 
   onRemove(): void {
+    this._removed = true;
+    for (const request of this._tileLoads.values())
+      request.controller.abort();
     if (this._tileJSONRequest) {
       this._tileJSONRequest.abort();
       this._tileJSONRequest = undefined;
@@ -221,135 +228,101 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   }
 
   loadTile(tile: Tile): Promise<LoadTileResult | void> {
-    // Some Source test doubles only implement the small part of Tile needed
-    // for a request. Keep the lifecycle queue lazy-compatible with those
-    // objects while real Tiles initialize it in their constructor.
-    tile.reloadPromises ||= [];
-
-    if (tile.aborted) {
+    if (this._removed || tile.aborted) {
       return Promise.resolve();
     }
-
-    // There is only one worker request per Tile at a time. Coalesce callers
-    // that arrive during it into one follow-up reload instead of overwriting
-    // a single promise (which used to leave earlier callers pending).
-    if (tile.loadPromise) {
-      return new Promise<LoadTileResult | void>((resolve, reject) => {
-        tile.reloadPromises.push({
-          resolve: value => resolve(value as LoadTileResult | void),
-          reject,
-        });
-      });
+    const active = this._tileLoads.get(tile);
+    if (active) {
+      active.version++;
+      return active.promise;
     }
-
-    const loadPromise = this._loadTile(tile);
-    tile.loadPromise = loadPromise;
-    loadPromise.then(
-      () => this._finishTileLoad(tile, loadPromise),
-      error => this._finishTileLoad(tile, loadPromise, error, true),
-    );
-    return loadPromise;
-  }
-
-  private async _loadTile(tile: Tile): Promise<LoadTileResult | void> {
-    const url = tile.tileID.canonical.url(this.tiles, this.style?.pixelRatio ?? 1, this.scheme);
-    const params: WorkerTileParameters = {
-      request: await transformRequest(url, ResourceType.Tile, this.style?.transformRequest),
-      uid: tile.uid,
-      tileID: tile.tileID,
-      zoom: tile.tileID.overscaledZ,
-      tileSize: this.tileSize * tile.tileID.overscaleFactor(),
-      type: this.type,
-      source: this.id,
-      pixelRatio: this.style?.pixelRatio ?? 1,
-      promoteId: this.promoteId,
-      encoding: this.encoding,
-      overzoomParameters: await this._getOverzoomParameters(tile),
-      etag: tile.etag,
+    const request = new TileLoadRequest<LoadTileResult | void>(current => this._loadTile(tile, current));
+    this._tileLoads.set(tile, request);
+    tile.abortController = request.controller;
+    tile.loadPromise = request.promise;
+    const finish = () => {
+      if (this._tileLoads.get(tile) === request)
+        this._tileLoads.delete(tile);
+      if (tile.loadPromise === request.promise)
+        tile.loadPromise = undefined;
+      if (tile.abortController === request.controller)
+        delete tile.abortController;
     };
-    if (params.request) {
-      params.request.collectResourceTiming = this._collectResourceTiming;
-    }
-    await this.dispatcher.waitForInitComplete();
-    if (tile.aborted) {
-      return;
-    }
-    let messageType: typeof MessageType.loadTile | typeof MessageType.reloadTile = MessageType.reloadTile;
-    if (!tile.channel || tile.state === 'expired') {
-      tile.channel = this.dispatcher.getReadyChannel();
-      messageType = MessageType.loadTile;
-    }
-    const abortController = new AbortController();
-    tile.abortController = abortController;
-    try {
-      const channel = tile.channel;
-      if (!channel) {
-        throw new Error(`No channel is available for tile ${tile.uid}.`);
-      }
-      const data = await channel.sendAsync({ type: messageType, data: params }, abortController);
-      if (tile.abortController === abortController) {
-        delete tile.abortController;
-      }
-
-      if (tile.aborted) {
-        return;
-      }
-      this._afterTileLoadWorkerResponse(tile, data);
-
-      const result: LoadTileResult = {};
-      if (data?.etagUnmodified)
-        result.unmodified = true;
-      return result;
-    }
-    catch (err) {
-      if (tile.abortController === abortController) {
-        delete tile.abortController;
-      }
-
-      if (tile.aborted || isAbortError(err)) {
-        return;
-      }
-      if (err && (!hasHttpStatus(err) || err.status !== 404)) {
-        throw err;
-      }
-      this._afterTileLoadWorkerResponse(tile, undefined);
-    }
+    void request.promise.then(finish, finish);
+    return request.promise;
   }
 
-  private _finishTileLoad(
-    tile: Tile,
-    loadPromise: Promise<LoadTileResult | void>,
-    error?: unknown,
-    rejected = false,
-  ): void {
-    if (tile.loadPromise !== loadPromise) {
-      return;
-    }
-    tile.loadPromise = undefined;
+  private async _loadTile(tile: Tile, request: TileLoadRequest<LoadTileResult | void>): Promise<LoadTileResult | void> {
+    while (!this._removed && !tile.aborted && !request.controller.signal.aborted) {
+      const version = request.version;
+      const style = this.style;
+      if (!style)
+        throw new Error('Vector tile data cannot be loaded before the source is attached to a Style.');
+      const parseState = style.getSourceParseState(this.id);
+      const superseded = () => version !== request.version || parseState !== style.getSourceParseState(this.id);
+      try {
+        await request.wait(parseState.ready);
+        if (superseded())
+          continue;
+        const url = tile.tileID.canonical.url(this.tiles, this.style?.pixelRatio ?? 1, this.scheme);
+        const params: WorkerTileParameters = {
+          request: await request.wait(transformRequest(url, ResourceType.Tile, this.style?.transformRequest)),
+          uid: tile.uid,
+          tileID: tile.tileID,
+          zoom: tile.tileID.overscaledZ,
+          tileSize: this.tileSize * tile.tileID.overscaleFactor(),
+          type: this.type,
+          source: this.id,
+          pixelRatio: this.style?.pixelRatio ?? 1,
+          promoteId: this.promoteId,
+          encoding: this.encoding,
+          overzoomParameters: await request.wait(this._getOverzoomParameters(tile)),
+          etag: tile.etag,
+        };
+        if (params.request) {
+          params.request.collectResourceTiming = this._collectResourceTiming;
+        }
+        await request.wait(this.dispatcher.waitForInitComplete());
+        if (this._removed || tile.aborted || request.controller.signal.aborted) {
+          return;
+        }
+        if (superseded())
+          continue;
+        let messageType: typeof MessageType.loadTile | typeof MessageType.reloadTile = MessageType.reloadTile;
+        if (!tile.channel || tile.state === 'expired') {
+          tile.channel = this.dispatcher.getReadyChannel();
+          messageType = MessageType.loadTile;
+        }
+        const channel = tile.channel;
+        if (!channel) {
+          throw new Error(`No channel is available for tile ${tile.uid}.`);
+        }
+        const data = await request.wait(channel.sendAsync({ type: messageType, data: params }, request.controller));
+        if (this._removed || tile.aborted || request.controller.signal.aborted) {
+          return;
+        }
+        if (superseded())
+          continue;
+        this._afterTileLoadWorkerResponse(tile, data);
 
-    const reloadPromises = tile.reloadPromises.splice(0);
-    if (reloadPromises.length === 0) {
-      return;
-    }
-
-    if (rejected) {
-      for (const reloadPromise of reloadPromises) {
-        reloadPromise.reject(error);
+        const result: LoadTileResult = {};
+        if (data?.etagUnmodified)
+          result.unmodified = true;
+        return result;
       }
-      return;
-    }
-
-    if (tile.aborted) {
-      for (const reloadPromise of reloadPromises) {
-        reloadPromise.resolve();
+      catch (err) {
+        if (this._removed || tile.aborted || request.controller.signal.aborted || isAbortError(err)) {
+          return;
+        }
+        if (superseded())
+          continue;
+        if (err && (!hasHttpStatus(err) || err.status !== 404)) {
+          throw err;
+        }
+        this._afterTileLoadWorkerResponse(tile, undefined);
+        return;
       }
-      return;
     }
-
-    this.loadTile(tile).then(
-      result => reloadPromises.forEach(reloadPromise => reloadPromise.resolve(result)),
-      reloadError => reloadPromises.forEach(reloadPromise => reloadPromise.reject(reloadError)),
-    );
   }
 
   /**
@@ -390,13 +363,10 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   }
 
   async abortTile(tile: Tile): Promise<void> {
-    tile.reloadPromises ||= [];
+    tile.aborted = true;
     if (tile.abortController) {
       tile.abortController.abort();
       delete tile.abortController;
-    }
-    for (const reloadPromise of tile.reloadPromises.splice(0)) {
-      reloadPromise.resolve();
     }
     if (tile.channel) {
       await tile.channel.sendAsync({

@@ -14,6 +14,7 @@ import type { GeoJSONWorkerOptions, LoadGeoJSONParameters } from './geojson-work
 import type { Source } from './source';
 import type { WorkerTileParameters } from './worker-source';
 import { EXTENT } from '../data/extent';
+import { TileLoadRequest } from '../tile/tile';
 import { tileIdToLngLatBounds } from '../tile/tile-id-to-lng-lat-bounds';
 import { isAbortError } from '../util/abort-error';
 import { browser } from '../util/browser';
@@ -159,6 +160,7 @@ type PreparedGeoJSONWorkerOptions = Omit<GeoJSONWorkerOptions, 'geojsonVtOptions
  * @see [Create and style clusters](https://maplibre.org/maplibre-gl-js/docs/examples/create-and-style-clusters/)
  */
 export class GeoJSONSource extends Evented<SourceEventType> implements Source {
+  private readonly _tileLoads = new Map<Tile, TileLoadRequest<void>>();
   type: 'geojson';
   id: string;
   minzoom: number;
@@ -675,115 +677,86 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
   }
 
   loadTile(tile: Tile): Promise<void> {
-    tile.reloadPromises ||= [];
-
-    if (tile.aborted) {
+    if (this._removed || tile.aborted) {
       return Promise.resolve();
     }
-
-    // GeoJSON reloads are channel requests too. Coalesce a reload arriving
-    // while the initial parse is still running so an older worker response
-    // cannot replace the newer bucket state.
-    if (tile.loadPromise) {
-      return new Promise<void>((resolve, reject) => {
-        tile.reloadPromises.push({ resolve: () => resolve(), reject });
-      });
+    const active = this._tileLoads.get(tile);
+    if (active) {
+      active.version++;
+      return active.promise;
     }
-
-    const loadPromise = this._loadTile(tile);
-    tile.loadPromise = loadPromise;
-    loadPromise.then(
-      () => this._finishTileLoad(tile, loadPromise),
-      error => this._finishTileLoad(tile, loadPromise, error, true),
-    );
-    return loadPromise;
+    const request = new TileLoadRequest<void>(current => this._loadTile(tile, current));
+    this._tileLoads.set(tile, request);
+    tile.abortController = request.controller;
+    tile.loadPromise = request.promise;
+    const finish = () => {
+      if (this._tileLoads.get(tile) === request)
+        this._tileLoads.delete(tile);
+      if (tile.loadPromise === request.promise)
+        tile.loadPromise = undefined;
+      if (tile.abortController === request.controller)
+        delete tile.abortController;
+    };
+    void request.promise.then(finish, finish);
+    return request.promise;
   }
 
-  private async _loadTile(tile: Tile): Promise<void> {
-    if (this._removed || tile.aborted) {
-      return;
-    }
-    const message = !tile.channel ? MessageType.loadTile : MessageType.reloadTile;
-    const channel = await this.channelPromise;
-    if (this._removed || tile.aborted) {
-      return;
-    }
-    tile.channel = channel;
-    const params: WorkerTileParameters = {
-      type: this.type,
-      uid: tile.uid,
-      tileID: tile.tileID,
-      zoom: tile.tileID.overscaledZ,
-      maxZoom: this.maxzoom,
-      tileSize: this.tileSize,
-      source: this.id,
-      pixelRatio: this.style?.pixelRatio ?? 1,
-      promoteId: this.promoteId,
-    };
+  private async _loadTile(tile: Tile, request: TileLoadRequest<void>): Promise<void> {
+    while (!this._removed && !tile.aborted && !request.controller.signal.aborted) {
+      const version = request.version;
+      const style = this.style;
+      if (!style)
+        throw new Error('GeoJSON tile data cannot be loaded before the source is attached to a Style.');
+      const parseState = style.getSourceParseState(this.id);
+      const superseded = () => version !== request.version || parseState !== style.getSourceParseState(this.id);
+      try {
+        await request.wait(parseState.ready);
+        if (superseded())
+          continue;
+        const message = !tile.channel ? MessageType.loadTile : MessageType.reloadTile;
+        const channel = await request.wait(this.channelPromise);
+        if (this._removed || tile.aborted || request.controller.signal.aborted) {
+          return;
+        }
+        if (superseded())
+          continue;
+        tile.channel = channel;
+        const params: WorkerTileParameters = {
+          type: this.type,
+          uid: tile.uid,
+          tileID: tile.tileID,
+          zoom: tile.tileID.overscaledZ,
+          maxZoom: this.maxzoom,
+          tileSize: this.tileSize,
+          source: this.id,
+          pixelRatio: this.style?.pixelRatio ?? 1,
+          promoteId: this.promoteId,
+        };
 
-    const abortController = new AbortController();
-    tile.abortController = abortController;
-    try {
-      const data = await channel.sendAsync({ type: message, data: params }, abortController);
-      if (tile.abortController === abortController) {
-        delete tile.abortController;
-      }
-      tile.unloadVectorData();
-
-      if (!this._removed && !tile.aborted && this.style) {
-        tile.loadVectorData(data, this.style, message === MessageType.reloadTile);
-      }
-    }
-    catch (err) {
-      if (tile.abortController === abortController) {
-        delete tile.abortController;
-      }
-      if (tile.aborted || isAbortError(err)) {
+        const data = await request.wait(channel.sendAsync({ type: message, data: params }, request.controller));
+        if (this._removed || tile.aborted || request.controller.signal.aborted) {
+          return;
+        }
+        if (superseded())
+          continue;
+        tile.loadVectorData(data, style, message === MessageType.reloadTile);
         return;
       }
-      throw err;
-    }
-  }
-
-  private _finishTileLoad(tile: Tile, loadPromise: Promise<void>, error?: unknown, rejected = false): void {
-    if (tile.loadPromise !== loadPromise) {
-      return;
-    }
-    tile.loadPromise = undefined;
-
-    const reloadPromises = tile.reloadPromises.splice(0);
-    if (reloadPromises.length === 0) {
-      return;
-    }
-
-    if (rejected) {
-      for (const reloadPromise of reloadPromises) {
-        reloadPromise.reject(error);
+      catch (err) {
+        if (this._removed || tile.aborted || request.controller.signal.aborted || isAbortError(err)) {
+          return;
+        }
+        if (superseded())
+          continue;
+        throw err;
       }
-      return;
     }
-
-    if (tile.aborted) {
-      for (const reloadPromise of reloadPromises) {
-        reloadPromise.resolve();
-      }
-      return;
-    }
-
-    this.loadTile(tile).then(
-      () => reloadPromises.forEach(reloadPromise => reloadPromise.resolve()),
-      reloadError => reloadPromises.forEach(reloadPromise => reloadPromise.reject(reloadError)),
-    );
   }
 
   async abortTile(tile: Tile): Promise<void> {
     if (tile.abortController) {
       tile.abortController.abort();
       delete tile.abortController;
-    }
-    tile.reloadPromises ||= [];
-    for (const reloadPromise of tile.reloadPromises.splice(0)) {
-      reloadPromise.resolve();
     }
     tile.aborted = true;
   }
@@ -795,6 +768,8 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
 
   onRemove(): void {
     this._removed = true;
+    for (const request of this._tileLoads.values())
+      request.controller.abort();
     void this.channelPromise
       .then(channel => channel.sendAsync({ type: MessageType.removeSource, data: { type: this.type, source: this.id } }))
       .catch(() => {});

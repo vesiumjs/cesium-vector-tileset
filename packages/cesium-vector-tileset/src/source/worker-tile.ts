@@ -25,6 +25,7 @@ import { loadGeometry } from '../data/load-geometry';
 import { EvaluationParameters } from '../style/evaluation-parameters';
 import { performSymbolLayout } from '../symbol/symbol-layout';
 import { OverscaledTileID } from '../tile/tile-id';
+import { throwIfAborted } from '../util/abort-error';
 import { DictionaryCoder } from '../util/dictionary-coder';
 import { warnOnce } from '../util/errors';
 import { mapObject } from '../util/objects';
@@ -77,12 +78,39 @@ export class WorkerTile {
     this.inFlightDependencies = [];
   }
 
-  async parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender): Promise<WorkerTileResult> {
+  async parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller = new AbortController()): Promise<WorkerTileResult> {
+    throwIfAborted(controller.signal);
+    if (this.abort !== controller)
+      this.abort?.abort();
+    this.abort = controller;
     this.status = 'parsing';
+    const dependencies: AbortController[] = [];
+    this.inFlightDependencies = dependencies;
+    const cancel = () => {
+      for (const dependency of dependencies)
+        dependency.abort();
+    };
+    controller.signal.addEventListener('abort', cancel, { once: true });
+    try {
+      const result = await this._parse(data, layerIndex, availableImages, channel, controller, dependencies);
+      throwIfAborted(controller.signal);
+      return result;
+    }
+    finally {
+      controller.signal.removeEventListener('abort', cancel);
+      cancel();
+      if (this.abort === controller) {
+        this.status = 'done';
+        this.inFlightDependencies = [];
+      }
+    }
+  }
+
+  private async _parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller: AbortController, dependencies: AbortController[]): Promise<WorkerTileResult> {
     // WorkerTile instances are reused for reloads. Collision boxes belong to
     // one parse result; retaining the previous array duplicates collision
     // data and leaves stale boxes in the next serialized tile.
-    this.collisionBoxArray = new CollisionBoxArray();
+    const collisionBoxArray = this.collisionBoxArray = new CollisionBoxArray();
     const sourceLayerCoder = new DictionaryCoder(Object.keys(data.layers).sort());
 
     const featureIndex = new FeatureIndex(this.tileID, this.promoteId);
@@ -139,7 +167,7 @@ export class WorkerTile {
           zoom: this.zoom,
           pixelRatio: this.pixelRatio,
           overscaling: this.overscaling,
-          collisionBoxArray: this.collisionBoxArray,
+          collisionBoxArray,
           sourceLayerIndex,
           sourceID: this.source,
         });
@@ -153,15 +181,12 @@ export class WorkerTile {
     // this line makes an object like: {"SomeFontName":[10,32]}
     const stacks: { [_: string]: number[] } = mapObject(options.glyphDependencies, glyphs => Object.keys(glyphs).map(Number));
 
-    for (const request of this.inFlightDependencies) {
-      request?.abort();
-    }
-    this.inFlightDependencies = [];
+    throwIfAborted(controller.signal);
 
     let getGlyphsPromise = Promise.resolve<GetGlyphsResponse>({});
     if (Object.keys(stacks).length) {
       const abortController = new AbortController();
-      this.inFlightDependencies.push(abortController);
+      dependencies.push(abortController);
       getGlyphsPromise = channel.sendAsync({ type: MessageType.getGlyphs, data: { stacks, source: this.source, tileID: this.tileID, type: 'glyphs' } }, abortController);
     }
 
@@ -169,7 +194,7 @@ export class WorkerTile {
     let getIconsPromise = Promise.resolve<GetImagesResponse>({});
     if (icons.length) {
       const abortController = new AbortController();
-      this.inFlightDependencies.push(abortController);
+      dependencies.push(abortController);
       getIconsPromise = channel.sendAsync({ type: MessageType.getImages, data: { icons, source: this.source, tileID: this.tileID, type: 'icons' } }, abortController);
     }
 
@@ -177,7 +202,7 @@ export class WorkerTile {
     let getPatternsPromise = Promise.resolve<GetImagesResponse>({});
     if (patterns.length) {
       const abortController = new AbortController();
-      this.inFlightDependencies.push(abortController);
+      dependencies.push(abortController);
       getPatternsPromise = channel.sendAsync({ type: MessageType.getImages, data: { icons: patterns, source: this.source, tileID: this.tileID, type: 'patterns' } }, abortController);
     }
 
@@ -185,11 +210,12 @@ export class WorkerTile {
     let getDashesPromise = Promise.resolve<GetDashesResponse>({} as GetDashesResponse);
     if (Object.keys(dashes).length) {
       const abortController = new AbortController();
-      this.inFlightDependencies.push(abortController);
+      dependencies.push(abortController);
       getDashesPromise = channel.sendAsync({ type: MessageType.getDashes, data: { dashes } }, abortController);
     }
 
     const [glyphMap, iconMap, patternMap, dashPositions] = await Promise.all([getGlyphsPromise, getIconsPromise, getPatternsPromise, getDashesPromise]);
+    throwIfAborted(controller.signal);
 
     // Resolve the numeric dash patterns the getDashes round-trip received.
     // The atlas positions come back keyed by the same dash key; the renderer
@@ -275,11 +301,10 @@ export class WorkerTile {
     }
     featureIndex.features = new FeatureSnapshot(snapshot);
 
-    this.status = 'done';
     return {
       buckets: outputBuckets,
       featureIndex,
-      collisionBoxArray: this.collisionBoxArray,
+      collisionBoxArray,
       glyphAtlasImage: glyphAtlas.image,
       imageAtlas,
       dashPositions,

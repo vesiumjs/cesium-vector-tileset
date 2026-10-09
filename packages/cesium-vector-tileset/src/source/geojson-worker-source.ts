@@ -12,7 +12,7 @@ import { createExpression } from '@maplibre/maplibre-gl-style-spec';
 
 import { GeoJSONWrapper } from '@maplibre/vt-pbf';
 import { EXTENT } from '../data/extent';
-import { isAbortError } from '../util/abort-error';
+import { isAbortError, throwIfAborted } from '../util/abort-error';
 import { getJSON } from '../util/ajax';
 import { RequestPerformance } from '../util/request-performance';
 import { WorkerTile } from './worker-tile';
@@ -100,11 +100,12 @@ export class GeoJSONWorkerSource implements WorkerSource {
   /**
    * Implements {@link WorkerSource.loadTile}.
    */
-  async loadTile(params: WorkerTileParameters): Promise<WorkerTileResult | null> {
+  async loadTile(params: WorkerTileParameters, controller = new AbortController()): Promise<WorkerTileResult | null> {
+    throwIfAborted(controller.signal);
     const { uid } = params;
 
     const workerTile = new WorkerTile(params);
-    workerTile.abort = new AbortController();
+    workerTile.abort = controller;
     try {
       const loadResult = this.loadVectorTile(params);
       if (!loadResult)
@@ -115,18 +116,19 @@ export class GeoJSONWorkerSource implements WorkerSource {
       workerTile.vectorTile = vectorTile;
       this.tileState.markLoaded(uid, workerTile);
 
-      return await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel);
+      return await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel, controller);
     }
     catch (err) {
-      workerTile.status = 'done';
-      if (!workerTile.abort.signal.aborted) {
+      if (workerTile.abort === controller)
+        workerTile.status = 'done';
+      if (!controller.signal.aborted) {
         this.tileState.markLoaded(uid, workerTile);
       }
       throw err;
     }
   }
 
-  private async _reloadLoadedTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
+  private async _reloadLoadedTile(params: WorkerTileParameters, controller: AbortController): Promise<WorkerTileResult> {
     const uid = params.uid;
 
     const workerTile = this.tileState.getLoaded(uid);
@@ -135,7 +137,7 @@ export class GeoJSONWorkerSource implements WorkerSource {
 
     // If there was no vector tile data on the initial load, don't try and reparse the tile.
     if (workerTile.vectorTile) {
-      return await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel);
+      return await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel, controller);
     }
   }
 
@@ -221,14 +223,14 @@ export class GeoJSONWorkerSource implements WorkerSource {
    * @param params - the parameters
    * @returns A promise that resolves when the tile is reloaded
    */
-  reloadTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
+  reloadTile(params: WorkerTileParameters, controller = new AbortController()): Promise<WorkerTileResult> {
     const tile = this.tileState.getLoaded(params.uid);
 
     if (tile) {
-      return this._reloadLoadedTile(params);
+      return this._reloadLoadedTile(params, controller);
     }
 
-    return this.loadTile(params);
+    return this.loadTile(params, controller);
   }
 
   /**

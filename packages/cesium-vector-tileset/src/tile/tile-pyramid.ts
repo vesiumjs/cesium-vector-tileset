@@ -84,6 +84,13 @@ export class TilePyramid extends Evented<SourceEventType> {
   _didEmitContent: boolean;
   _updated: boolean;
   private _tileSetRevision = 0;
+  private _loadedTileRevision = 0;
+  private _loadedTileIDs?: {
+    revision: number;
+    zooms: Map<number, OverscaledTileID[]>;
+    ranges: Map<string, readonly OverscaledTileID[]>;
+  };
+
   private _lastUpdate?: {
     used: boolean | undefined;
     sourceLoaded: boolean;
@@ -258,6 +265,7 @@ export class TilePyramid extends Evented<SourceEventType> {
         return;
       }
       tile.state = 'errored';
+      this._loadedTileRevision++;
 
       // The tileset reuses one covering object across frames, so update() short-
       // circuits on identity. Bump the revision so the next pyramid walk
@@ -283,6 +291,7 @@ export class TilePyramid extends Evented<SourceEventType> {
   }
 
   _unloadTile(tile: Tile): void {
+    this._loadedTileRevision++;
     if (this._source.unloadTile) {
       // Tile removal is not awaited by the pyramid. Consume teardown errors
       // so a destroyed worker cannot create an unhandled rejection.
@@ -407,6 +416,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     // first becoming a "loaded" tile.
     if (tile.state !== 'loading') {
       tile.state = state;
+      this._loadedTileRevision++;
     }
     await this._loadTile(tile, id, state);
   }
@@ -423,6 +433,8 @@ export class TilePyramid extends Evented<SourceEventType> {
     if (previousState === 'expired')
       tile.refreshedUponExpiration = true;
     this._setTileReloadTimer(id, tile);
+
+    this._loadedTileRevision++;
 
     if (result && result.unmodified)
       return;
@@ -459,26 +471,48 @@ export class TilePyramid extends Evented<SourceEventType> {
     return this._activeTiles.getTileById(id);
   }
 
-  /** Loaded data that can reenter the current pyramid without a tile request. */
-  getLoadedTileIDs(zoom: number): OverscaledTileID[] {
-    const tiles = new Map<string, OverscaledTileID>();
-    const add = (tile: Tile): void => {
-      if (tile.state === 'loaded' && tile.tileID.overscaledZ === zoom) {
-        const id = tile.tileID.wrapped();
-        tiles.set(id.key, id);
+  /** Loaded substitutes within the requested LOD range, without consuming the data cache. */
+  getLoadedTileIDs(minZoom: number, maxZoom: number): readonly OverscaledTileID[] {
+    let cached = this._loadedTileIDs;
+    if (!cached || cached.revision !== this._loadedTileRevision) {
+      const tiles = new Map<string, OverscaledTileID>();
+      const add = (tile: Tile): void => {
+        if (tile.state === 'loaded') {
+          const id = tile.tileID.wrapped();
+          tiles.set(id.key, id);
+        }
+      };
+      for (const tile of this._activeTiles.getAllTiles()) {
+        add(tile);
       }
-    };
-    for (const tile of this._activeTiles.getAllTiles()) {
-      add(tile);
-    }
-    // getAndRemove restores the first entry for each wrapped key. Inspect
-    // that same version without consuming it or changing its LRU position.
-    for (const entries of Object.values(this._tileCache.data)) {
-      if (entries[0]) {
-        add(entries[0].value);
+      // Restore uses the first version for each wrapped key. Camera changes
+      // and active/cache transfers preserve this snapshot; load/reload and
+      // every unload (including expiry and eviction) invalidate its contents.
+      for (const entries of Object.values(this._tileCache.data)) {
+        if (entries[0]) {
+          add(entries[0].value);
+        }
       }
+      const zooms = new Map<number, OverscaledTileID[]>();
+      for (const id of tiles.values()) {
+        const group = zooms.get(id.overscaledZ) ?? [];
+        group.push(id);
+        zooms.set(id.overscaledZ, group);
+      }
+      cached = { revision: this._loadedTileRevision, zooms, ranges: new Map() };
+      this._loadedTileIDs = cached;
     }
-    return [...tiles.values()];
+    const key = `${minZoom}/${maxZoom}`;
+    let result = cached.ranges.get(key);
+    if (!result) {
+      const tiles: OverscaledTileID[] = [];
+      for (let zoom = minZoom; zoom <= maxZoom; zoom++) {
+        tiles.push(...(cached.zooms.get(zoom) ?? []));
+      }
+      result = tiles;
+      cached.ranges.set(key, result);
+    }
+    return result;
   }
 
   /**
@@ -525,26 +559,24 @@ export class TilePyramid extends Evented<SourceEventType> {
         continue;
       }
 
-      // retain the uppermost descendents in the topmost zoom below the target tile
-      let topZoom = Infinity;
+      // Choose the shallowest loaded footprint in each spatial branch. A
+      // coarse tile in one quarter cannot discard finer tiles in another.
+      // Equal canonical footprints prefer the first overscaled generation.
+      candidates.sort((a, b) => a.tileID.canonical.z - b.tileID.canonical.z
+        || a.tileID.overscaledZ - b.tileID.overscaledZ);
       const topIDs: OverscaledTileID[] = [];
       for (const tile of candidates) {
-        const zoom = tile.tileID.overscaledZ;
-        if (zoom < topZoom) {
-          topZoom = zoom;
-          topIDs.length = 0;
-          topIDs.push(tile.tileID);
-        }
-        else if (zoom === topZoom) {
-          topIDs.push(tile.tileID);
-        }
+        const canonical = tile.tileID.canonical;
+        if (topIDs.some(id => canonical.equals(id.canonical) || canonical.isChildOf(id.canonical)))
+          continue;
+        topIDs.push(tile.tileID);
       }
       for (const tileID of topIDs) {
         retainTileMap[tileID.key] = tileID;
       }
 
       // determine if the retained generation is fully covered
-      if (!this._areDescendentsComplete(topIDs, topZoom, targetID.overscaledZ)) {
+      if (!this._areDescendentsComplete(topIDs, targetID)) {
         incomplete.add(targetID);
       }
     }
@@ -573,20 +605,15 @@ export class TilePyramid extends Evented<SourceEventType> {
   }
 
   /**
-   * Determine if tile ids fully cover the current generation.
-   * - 1st generation: need 4 children or 1 overscaled child
-   * - 2nd generation: need 16 children or 1 overscaled child
+   * Test the non-overlapping descendant footprints selected above. Mixed
+   * levels contribute their actual canonical area; an overscaled tile keeps
+   * the same footprint. Canonical zooms 0..25 make these dyadic areas exact.
    */
-  _areDescendentsComplete(generationIDs: OverscaledTileID[], generationZ: number, ancestorZ: number): boolean {
-    // if overscaled, seeking 1 tile at generationZ, otherwise seeking a power of 4 for each descending Z
-    const firstGenerationID = generationIDs[0];
-    if (generationIDs.length === 1 && firstGenerationID?.isOverscaled()) {
-      return firstGenerationID.overscaledZ === generationZ;
-    }
-    else {
-      const expectedTiles = 4 ** (generationZ - ancestorZ); // 4, 16, 64 (for first 3 gens)
-      return expectedTiles === generationIDs.length;
-    }
+  _areDescendentsComplete(generationIDs: OverscaledTileID[], ancestor: OverscaledTileID): boolean {
+    let coverage = 0;
+    for (const id of generationIDs)
+      coverage += 4 ** (ancestor.canonical.z - id.canonical.z);
+    return coverage === 1;
   }
 
   /**

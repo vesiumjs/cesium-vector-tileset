@@ -98,7 +98,8 @@ export class VectorTileWorkerSource implements WorkerSource {
   /**
    * Implements {@link WorkerSource.loadTile}.
    */
-  async loadTile(params: WorkerTileParameters): Promise<WorkerTileResult | null> {
+  async loadTile(params: WorkerTileParameters, abortController = new AbortController()): Promise<WorkerTileResult | null> {
+    throwIfAborted(abortController.signal);
     const { uid, overzoomParameters } = params;
 
     if (overzoomParameters) {
@@ -109,7 +110,6 @@ export class VectorTileWorkerSource implements WorkerSource {
     const workerTile = new WorkerTile(params);
 
     this.tileState.startLoading(uid, workerTile);
-    const abortController = new AbortController();
     workerTile.abort = abortController;
     try {
       // Download the tile data from the network.
@@ -121,12 +121,12 @@ export class VectorTileWorkerSource implements WorkerSource {
 
       // Tile data hasn't changed (etag support) - return an unmodified result
       if (params.etag && params.etag === tileResponse.etag) {
-        this.tileState.finishLoading(uid);
+        this.tileState.finishLoading(uid, workerTile);
         return this._getEtagUnmodifiedResult(tileResponse, timing);
       }
 
       const tileResult = parent?.decoded ?? this.loadVectorTile(params, tileResponse.data);
-      this.tileState.finishLoading(uid);
+      this.tileState.finishLoading(uid, workerTile);
       if (!tileResult)
         return null;
 
@@ -149,15 +149,16 @@ export class VectorTileWorkerSource implements WorkerSource {
       const parseState = { cacheControl, resourceTiming };
       this.tileState.setParsing(uid, parseState);
       try {
-        return await this._parseWorkerTile(workerTile, parseState);
+        return await this._parseWorkerTile(workerTile, parseState, abortController);
       }
       finally {
-        this.tileState.removeParsing(uid);
+        this.tileState.removeParsing(uid, parseState);
       }
     }
     catch (err) {
-      this.tileState.finishLoading(uid);
-      workerTile.status = 'done';
+      this.tileState.finishLoading(uid, workerTile);
+      if (workerTile.abort === abortController)
+        workerTile.status = 'done';
       if (!abortController.signal.aborted) {
         this.tileState.markLoaded(uid, workerTile);
       }
@@ -263,8 +264,8 @@ export class VectorTileWorkerSource implements WorkerSource {
     return Object.assign({ etagUnmodified: true as const }, cacheControl, resourceTiming);
   }
 
-  async _parseWorkerTile(workerTile: WorkerTile, parseState?: ParsingState): Promise<WorkerTileResult> {
-    let result = await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel);
+  async _parseWorkerTile(workerTile: WorkerTile, parseState?: ParsingState, controller = new AbortController()): Promise<WorkerTileResult> {
+    let result = await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel, controller);
 
     if (parseState) {
       const { cacheControl, resourceTiming } = parseState;
@@ -355,7 +356,8 @@ export class VectorTileWorkerSource implements WorkerSource {
   /**
    * Implements {@link WorkerSource.reloadTile}.
    */
-  async reloadTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
+  async reloadTile(params: WorkerTileParameters, controller = new AbortController()): Promise<WorkerTileResult> {
+    throwIfAborted(controller.signal);
     const uid = params.uid;
 
     const workerTile = this.tileState.getLoaded(uid);
@@ -370,19 +372,23 @@ export class VectorTileWorkerSource implements WorkerSource {
 
     if (workerTile.status === 'parsing') {
       // Keep the original response metadata when replacing its parse.
-      const parseState = this.tileState.getParsing(uid);
+      const previous = this.tileState.getParsing(uid);
+      const parseState = previous && { ...previous };
+      if (parseState)
+        this.tileState.setParsing(uid, parseState);
       try {
-        return await this._parseWorkerTile(workerTile, parseState);
+        return await this._parseWorkerTile(workerTile, parseState, controller);
       }
       finally {
-        this.tileState.removeParsing(uid);
+        if (parseState)
+          this.tileState.removeParsing(uid, parseState);
       }
     }
 
     // If there was no vector tile data on the initial load, don't try and reparse the tile.
     // this seems like a missing case where cache control is lost? see #3309
     if (workerTile.status === 'done' && workerTile.vectorTile) {
-      return await this._parseWorkerTile(workerTile);
+      return await this._parseWorkerTile(workerTile, undefined, controller);
     }
   }
 

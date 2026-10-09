@@ -108,12 +108,12 @@ export interface WorkerSource {
    * back to the main thread for rendering, including buckets, feature metadata,
    * atlases and collision boxes.
    */
-  loadTile: (params: WorkerTileParameters) => Promise<WorkerTileResult>;
+  loadTile: (params: WorkerTileParameters, controller?: AbortController) => Promise<WorkerTileResult>;
   /**
    * Re-parses a tile that has already been loaded.  Yields the same data as
    * {@link WorkerSource.loadTile}.
    */
-  reloadTile: (params: WorkerTileParameters) => Promise<WorkerTileResult>;
+  reloadTile: (params: WorkerTileParameters, controller?: AbortController) => Promise<WorkerTileResult>;
   /**
    * Aborts loading a tile that is in progress.
    */
