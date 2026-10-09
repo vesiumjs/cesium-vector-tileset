@@ -329,7 +329,12 @@ export function extrusionStyleForFeature(bucket: FillExtrusionBucket, featureInd
   const config = bucket.programConfigurations.get(layer.id);
   const color = colorFor(config, layer, 'fill-extrusion-color', range, zoom);
   const opacity = numberFor(config, layer, 'fill-extrusion-opacity', range, zoom);
-  color.alpha *= opacity;
+  // MapLibre shades the original premultiplied RGB but ignores color alpha
+  // when assigning the extrusion layer's final opacity.
+  color.red *= color.alpha;
+  color.green *= color.alpha;
+  color.blue *= color.alpha;
+  color.alpha = opacity;
   return {
     color,
     // MapLibre clamps subterranean floors and ceilings to ground level in

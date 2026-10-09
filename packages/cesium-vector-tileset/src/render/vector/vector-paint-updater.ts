@@ -22,7 +22,7 @@ import {
 } from 'cesium';
 import { CircleBucket, FillBucket, FillExtrusionBucket } from '../../data/bucket-runtime';
 import { samePaintZoom } from '../../style/render-transition';
-import { beginLineBuild, canResumeLineBuild, canUpdateLinePaint, commitLineBuild, stepLineBuild, updateLinePaint } from '../line/line-renderer';
+import { beginLineBuild, canResumeLineBuild, canUpdateLinePaint, captureUniformLinePaint, commitLineBuild, discardLineBuild, stepLineBuild, updateLinePaint, updateUniformLinePaint } from '../line/line-renderer';
 import { drawBatchForOwner } from '../scene/draw-batch';
 import { UNBOUNDED_BUDGET } from '../scene/frame-budget';
 import { deferredExtrusionLayers } from './extrusion-primitive';
@@ -36,13 +36,13 @@ const showValue = new Uint8Array(1);
 export const PAINT_ZOOM_STEP = 1 / 8;
 
 /**
- * Integer style-cache key: a bucket index for ordinary paints (evaluated
- * values only change at integer zoom boundaries) and a quantized step index
- * for zoom-dependent ones. Integer keys compare exactly, so float noise in
+ * Constant and source surface paints keep one key across camera zooms;
+ * zoom-dependent surfaces use a quantized step index. Integer keys compare
+ * exactly, so float noise in
  * the derived camera zoom can never split a step.
  */
 function paintZoomKey(zoom: number, zoomDependent: boolean): number {
-  return zoomDependent === true ? Math.round(zoom / PAINT_ZOOM_STEP) : Math.floor(zoom);
+  return zoomDependent === true ? Math.round(zoom / PAINT_ZOOM_STEP) : 0;
 }
 
 export interface VectorCollectionReplacement {
@@ -91,6 +91,7 @@ export interface VectorPaintState {
   lastPixelRatio?: number;
   lastLightRevision?: number;
   extrusionZoomDependent: boolean;
+  surfaceZoomDependent: boolean;
   zoomDependentPaint: boolean;
   styleCache?: PaintCacheEntry;
   extrusionCache?: ExtrusionCacheEntry;
@@ -113,14 +114,16 @@ export function createVectorPaintState(seed: VectorPaintSeed): VectorPaintState 
   const { buckets, paintRevisions, styleZoom, styleRevision, lightRevision, pixelRatio, standard } = seed;
   const zoomDependentPaint = hasZoomDependentPaint(buckets);
   const extrusionZoomDependent = hasZoomDependentExtrusionPaint(buckets);
+  const surfaceZoomDependent = hasZoomDependentSurfacePaint(buckets);
   const seeded = styleRevision !== undefined && !standard;
   return {
     buckets,
     frozen: false,
     zoomDependentPaint,
     extrusionZoomDependent,
+    surfaceZoomDependent,
     styleCache: seeded
-      ? { zoomBucket: paintZoomKey(styleZoom, zoomDependentPaint), styleRevision, paintRevisions }
+      ? { zoomBucket: paintZoomKey(styleZoom, surfaceZoomDependent), styleRevision, paintRevisions }
       : undefined,
     extrusionCache: styleRevision !== undefined && lightRevision !== undefined
       ? { zoomBucket: extrusionZoomDependent ? Math.floor(styleZoom) : 0, paintRevisions, lightRevision }
@@ -150,6 +153,8 @@ interface VectorPaintOptions {
   ) => void;
 }
 
+export type VectorCameraPaintSnapshot = ReadonlyMap<PrimitiveCollection, (zoom: number) => void>;
+
 /** Evaluates paint and rebuilds affected geometry; the store applies ownership changes. */
 export class VectorPaintUpdater {
   private readonly _options: VectorPaintOptions;
@@ -160,6 +165,7 @@ export class VectorPaintUpdater {
   private _dirty = true;
   private _polygonMaterial?: BufferPolygonMaterial;
   private _pointMaterial?: BufferPointMaterial;
+  private readonly _heldCameraPaint = new Map<PrimitiveCollection, { update: (zoom: number) => void; zoom?: number }>();
   needsContinuation = false;
 
   constructor(options: VectorPaintOptions) {
@@ -171,11 +177,58 @@ export class VectorPaintUpdater {
     this._dirty = true;
   }
 
-  /** Held generations keep their committed paint until a rebuilt generation replaces them. */
-  freezeExisting(): void {
+  /** Capture before mutation; buckets are bindings to mutable live StyleLayers. */
+  captureLivePaint(): VectorCameraPaintSnapshot {
+    const snapshot = new Map<PrimitiveCollection, (zoom: number) => void>();
+    for (const [, record] of this._options.records()) {
+      if (record.paint.frozen)
+        continue;
+      const lines = record.collections.get('lines');
+      if (lines instanceof PrimitiveCollection)
+        snapshot.set(lines, captureUniformLinePaint(lines, record.buckets));
+    }
+    return snapshot;
+  }
+
+  /** Held generations preserve schema and feature paint while camera paint stays live. */
+  freezeExisting(snapshot = this.captureLivePaint()): void {
+    for (const [collection, update] of snapshot) {
+      if (!this._heldCameraPaint.has(collection))
+        this._heldCameraPaint.set(collection, { update });
+    }
     for (const [, record] of this._options.records()) {
       record.paint.frozen = true;
+      if (record.paint.lineBuild)
+        discardLineBuild(record.paint.lineBuild);
       record.paint.lineBuild = undefined;
+    }
+  }
+
+  clearHeldPaint(): void {
+    this._heldCameraPaint.clear();
+  }
+
+  /** Mandatory camera paint does not consume or complete deferred feature work. */
+  updateLivePaint(frame: VectorPaintFrame): void {
+    // Surface publication can delete the renderer record while SceneCollections
+    // still draws its old line owner. Ownership ends with collection destruction.
+    for (const [collection, paint] of this._heldCameraPaint) {
+      if (collection.isDestroyed()) {
+        this._heldCameraPaint.delete(collection);
+      }
+      else if (paint.zoom !== frame.zoom) {
+        paint.update(frame.zoom);
+        paint.zoom = frame.zoom;
+      }
+    }
+    for (const [, record] of this._options.records()) {
+      if (record.paint.frozen) {
+        continue;
+      }
+      const lines = record.collections.get('lines');
+      if (lines instanceof PrimitiveCollection) {
+        updateUniformLinePaint(lines, record.buckets, frame.zoom);
+      }
     }
   }
 
@@ -269,9 +322,6 @@ export class VectorPaintUpdater {
       record.paint.lastEvaluationId = frame.evaluationId;
       return true;
     }
-    if (record.paint.lineBuild && (!frame.budget || frame.budget.exhausted)) {
-      return false;
-    }
     // A zoom change cannot affect source-data or truly constant paint
     // values. Do not walk every feature just because Style recalculated its
     // zoom. A style mutation or feature-state update still takes the normal
@@ -282,10 +332,17 @@ export class VectorPaintUpdater {
       record.paint.lastEvaluationId = frame.evaluationId;
       return true;
     }
+    // The Scene grants one cooperative unit to its selected stage. Consume
+    // it once at record admission, and retain that admission if validation
+    // spends the short allowance before the existing line build can resume.
+    const minimumProgress = (budget ?? frame.budget)?.takeMinimumProgress?.() ?? false;
+    if (record.paint.lineBuild && (!frame.budget || frame.budget.exhausted) && !minimumProgress) {
+      return false;
+    }
     // Upload preparation can already have refreshed this record. Only spend
     // the budget on remaining feature work; cheap cache checks must finish so
     // an exhausted frame does not keep a ready source replacement pending.
-    if (budget?.exhausted) {
+    if (budget?.exhausted && !minimumProgress) {
       return false;
     }
     // A style mutation can change which paints are zoom-dependent; refresh
@@ -293,6 +350,7 @@ export class VectorPaintUpdater {
     if (styleChanged) {
       record.paint.zoomDependentPaint = hasZoomDependentPaint(record.paint.buckets);
       record.paint.extrusionZoomDependent = hasZoomDependentExtrusionPaint(record.paint.buckets);
+      record.paint.surfaceZoomDependent = hasZoomDependentSurfacePaint(record.paint.buckets);
     }
     const paintRevisions = paintChanged ? record.paint.buckets.map(paintRevision) : record.paint.lastPaintRevisions!;
     const zoomBucket = Math.floor(zoom);
@@ -309,7 +367,7 @@ export class VectorPaintUpdater {
     // looking continuous (see PAINT_ZOOM_STEP), coarse enough that the cache
     // survives the frames inside one step - which matters because a miss
     // re-evaluates every feature of the record.
-    const styleCacheZoom = paintZoomKey(zoom, record.paint.zoomDependentPaint);
+    const styleCacheZoom = paintZoomKey(zoom, record.paint.surfaceZoomDependent);
     const styleCache = record.paint.styleCache;
     const styleCacheValid = styleCache !== undefined
       && styleCache.zoomBucket === styleCacheZoom
@@ -328,12 +386,14 @@ export class VectorPaintUpdater {
     if (lines instanceof PrimitiveCollection) {
       // Once admitted, validation and at least one feature form a progress
       // unit. Validation spending the deadline cannot strand every frame.
-      const canBuild = frame.budget !== undefined && !frame.budget.exhausted;
+      const canBuild = frame.budget !== undefined && (!frame.budget.exhausted || minimumProgress);
       if ((!lineCacheValid || record.paint.lineBuild) && !canUpdateLinePaint(lines, record.buckets, dash)) {
         if (!canBuild) {
           return false;
         }
         if (!record.paint.lineBuild || !canResumeLineBuild(record.paint.lineBuild)) {
+          if (record.paint.lineBuild)
+            discardLineBuild(record.paint.lineBuild);
           record.paint.lineBuild = beginLineBuild(record.linePrimitives, record.buckets, tileId, record.tileID, record.generationId, zoom, record.mode !== SceneMode.SCENE3D, dash);
         }
         const build = record.paint.lineBuild;
@@ -354,6 +414,8 @@ export class VectorPaintUpdater {
         // Restored geometry must receive current paint before it draws.
         // A material-only revision needs no asynchronous scene handoff.
         const refresh = !!record.paint.lineBuild || !lineCacheValid || styleChanged || paintChanged;
+        if (record.paint.lineBuild)
+          discardLineBuild(record.paint.lineBuild);
         record.paint.lineBuild = undefined;
         updateLinePaint(lines, record.buckets, zoom, refresh || forceRecord, refresh ? undefined : transitionLayerIds);
         record.paint.lineCache = { zoomBucket, styleRevision, paintRevisions };
@@ -579,6 +641,10 @@ function layerHasZoomDependentConstantPaint(layer: unknown): boolean {
 
 export function hasZoomDependentPaint(buckets: readonly Bucket[]): boolean {
   return buckets.some(bucketHasZoomDependentPaint);
+}
+
+function hasZoomDependentSurfacePaint(buckets: readonly Bucket[]): boolean {
+  return buckets.some(bucket => (bucket instanceof FillBucket || bucket instanceof CircleBucket) && bucketHasZoomDependentPaint(bucket));
 }
 
 function bucketHasZoomDependentPaint(bucket: Bucket): boolean {

@@ -1411,7 +1411,17 @@ export class PatternTileRenderer {
   /** Take a retired entry, releasing and destroying it like an eviction. */
   private _evictRetiredEntry(tileId: string): Material[] {
     const retired = this._retired.take(tileId);
-    return retired ? this._evictEntries(retired) : [];
+    return retired ? this._evictRetiredEntries(tileId, retired) : [];
+  }
+
+  private _evictRetiredEntries(tileId: string, entries: PatternPrimitiveEntry[]): Material[] {
+    // A completed state is owned by its live or pooled entries, including
+    // legitimate empty tiles. Replacing a pooled owner must preserve the
+    // state of a newer live/pooled owner with the same key.
+    if (!this._tiles.has(tileId) && !this._retired.get(tileId)) {
+      this._tileStates.delete(tileId);
+    }
+    return this._evictEntries(entries);
   }
 
   /**
@@ -1439,19 +1449,10 @@ export class PatternTileRenderer {
     }
     this._tiles.delete(tileId);
     this._tileIdsCache = undefined;
-    // Tile state stays: a restore behaves exactly like never-left for the
-    // begin fast paths (same buckets, same atlas key). A replaced same-key
-    // entry is gone for good and takes the full eviction treatment - except
-    // the tile-state drop, which belongs to the entry just pooled: only
-    // overflow evictions (other keys) drop state.
+    // The pooled entries keep their completed state for a cheap restore.
     const removedMaterials: Material[] = [];
     for (const gone of this._retired.retire(tileId, entries)) {
-      if (gone.key !== tileId) {
-        // Evicted entries are gone for good: drop their tile state too, or
-        // a later begin would fast-path-hit with no entries to reuse.
-        this._tileStates.delete(gone.key);
-      }
-      removedMaterials.push(...this._evictEntries(gone.value));
+      removedMaterials.push(...this._evictRetiredEntries(gone.key, gone.value));
     }
     return { removed: [], added: [], removedMaterials };
   }
@@ -1484,10 +1485,9 @@ export class PatternTileRenderer {
   /** Drop retired entries (style/layer change invalidates pooled paints). */
   clearRetired(): PatternTileUpdate {
     const removedMaterials: Material[] = [];
-    for (const entries of this._retired.values()) {
-      removedMaterials.push(...this._evictEntries(entries));
+    for (const [tileId] of this._retired.entries()) {
+      removedMaterials.push(...this._evictRetiredEntry(tileId));
     }
-    this._retired.clear();
     return { removed: [], added: [], removedMaterials };
   }
 
@@ -1499,8 +1499,7 @@ export class PatternTileRenderer {
   setRetiredCapacity(capacity: number): PatternTileUpdate {
     const removedMaterials: Material[] = [];
     for (const gone of this._retired.setCapacity(capacity)) {
-      this._tileStates.delete(gone.key);
-      removedMaterials.push(...this._evictEntries(gone.value));
+      removedMaterials.push(...this._evictRetiredEntries(gone.key, gone.value));
     }
     return { removed: [], added: [], removedMaterials };
   }

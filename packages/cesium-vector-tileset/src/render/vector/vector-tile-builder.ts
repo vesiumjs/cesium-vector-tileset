@@ -31,9 +31,10 @@ import {
   ShowGeometryInstanceAttribute,
 } from 'cesium';
 import { FillExtrusionBucket } from '../../data/bucket-runtime';
+import { fillBoundingSphere } from '../geometry/fill-bounding-sphere';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { tileBoundingSphere } from '../geometry/tile-bounding-sphere';
-import { beginLineBuild, commitLineBuild, stepLineBuild } from '../line/line-renderer';
+import { beginLineBuild, commitLineBuild, discardLineBuild, stepLineBuild } from '../line/line-renderer';
 import { registerDrawBatch } from '../scene/draw-batch';
 import { iterateExtrusionBucketPrimitives } from './extrusion-geometry';
 import { deferredExtrusionLayers, ExtrusionPrimitive } from './extrusion-primitive';
@@ -75,6 +76,8 @@ export interface BucketMap { [layerId: string]: Bucket }
  * point tracks, which append to the same generation.
  */
 export interface VectorTileBuildInput {
+  /** Resume a generation previously reserved for these buckets and this tile. */
+  generationId?: number;
   tileId: string;
   buckets: BucketMap;
   tileID: TileID;
@@ -100,6 +103,7 @@ export interface VectorTileBuildState extends VectorTileBuildInput {
   lineBuild?: LineBuildState;
   extrusionBuild?: ExtrusionBuildState;
   polygonBuild?: StandardPolygonBuildState;
+  bufferPolygonBuild?: BufferPolygonBuildState;
 }
 
 export interface StandardRenderEntries {
@@ -125,6 +129,7 @@ export interface VectorBuildContext {
 export class VectorTileBuilder {
   private readonly _context: () => VectorBuildContext;
   private _nextGenerationId = 1;
+  private readonly _generations = new WeakMap<BucketMap, Map<number, Pick<VectorTileBuildInput, 'tileId' | 'styleRevision' | 'mode'>>>();
 
   constructor(context: () => VectorBuildContext) {
     this._context = context;
@@ -135,10 +140,27 @@ export class VectorTileBuilder {
    * at the fill and final publication boundaries.
    */
   begin(input: VectorTileBuildInput): VectorTileBuildState {
+    let generationId = input.generationId;
+    if (generationId === undefined) {
+      generationId = this._nextGenerationId++;
+      let generations = this._generations.get(input.buckets);
+      if (!generations) {
+        generations = new Map();
+        this._generations.set(input.buckets, generations);
+      }
+      generations.set(generationId, { tileId: input.tileId, styleRevision: input.styleRevision, mode: input.mode });
+    }
+    else {
+      const generation = this._generations.get(input.buckets)?.get(generationId);
+      if (!generation || generation.tileId !== input.tileId
+        || generation.styleRevision !== input.styleRevision || generation.mode !== input.mode) {
+        throw new Error('Cannot resume a vector generation with different tile, buckets, style or scene mode');
+      }
+    }
     const paintBuckets = [...new Set(Object.values(input.buckets))];
     return {
       ...input,
-      generationId: this._nextGenerationId++,
+      generationId,
       paintBuckets,
       // Conversion and Native preparation can span feature-state updates.
       // Keep the revisions that preceded construction, not the commit's values.
@@ -203,11 +225,11 @@ export class VectorTileBuilder {
         state.polygonBuild = undefined;
       }
       else if (result.polygons.length > 0) {
-        for (const [layerId, polygons] of groupByStyleLayer(result.polygons)) {
-          const collection = buildPolygonCollection(polygons, state.tileID, context.heightReference);
-          registerDrawBatch(collection, { layerId, tileId: state.tileId, kind: 'fill' });
-          state.entries.push([`polygons:${layerId}`, collection]);
-        }
+        state.bufferPolygonBuild ??= beginBufferPolygonBuild(result.polygons, state.tileID, state.tileId, context.heightReference);
+        if (!stepBufferPolygonBuild(state.bufferPolygonBuild, budget))
+          return false;
+        state.entries.push(...state.bufferPolygonBuild.entries);
+        state.bufferPolygonBuild = undefined;
       }
       // The completed track owns these inputs; details never rescan fills.
       result.polygons = [];
@@ -247,6 +269,10 @@ export class VectorTileBuilder {
         state.lineBuild = undefined;
       }
       state.phase = 'extrusions';
+      // A completed line owner can enter Native preparation while the
+      // remaining vector tracks continue on later build admissions.
+      if (state.entries.some(([kind]) => kind === 'lines'))
+        return false;
       // The lines phase always advances its own stepper by at least one
       // feature, so later phases may yield from here on.
       progressed = true;
@@ -312,13 +338,19 @@ export class VectorTileBuilder {
     state.entries = [];
     state.standard = undefined;
     if (state.lineBuild) {
-      state.lineBuild.geometryCache = undefined;
+      discardLineBuild(state.lineBuild);
     }
     state.lineBuild = undefined;
     state.extrusionBuild?.collection.destroy();
     state.extrusionBuild = undefined;
     state.polygonBuild?.collection.destroy();
     state.polygonBuild = undefined;
+    if (state.bufferPolygonBuild) {
+      state.bufferPolygonBuild.iterator.return();
+      for (const [, collection] of state.bufferPolygonBuild.entries)
+        collection.destroy();
+      state.bufferPolygonBuild = undefined;
+    }
     state.convert = undefined;
     state.result = undefined;
   }
@@ -678,31 +710,74 @@ function buildStandardPoints(
   return { collection, entries };
 }
 
-function isOpaque(alphas: number[]): boolean {
-  return alphas.every(a => a >= 1);
+interface BufferPolygonBuildState {
+  entries: Array<[string, BufferPolygonCollection]>;
+  iterator: Generator<void, void>;
 }
 
-function buildPolygonCollection(polygons: TileRenderResult['polygons'], tileID: TileID, heightReference: HeightReference = HeightReference.NONE): BufferPolygonCollection {
+function beginBufferPolygonBuild(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference): BufferPolygonBuildState {
+  const entries: BufferPolygonBuildState['entries'] = [];
+  return { entries, iterator: appendBufferPolygonCollections(polygons, tileID, tileId, heightReference, entries) };
+}
+
+function stepBufferPolygonBuild(state: BufferPolygonBuildState, budget: Budget): boolean {
+  do {
+    if (state.iterator.next().done)
+      return true;
+  } while (!budget.exhausted);
+  return false;
+}
+
+function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
+  const layers = new Map<string, TileRenderResult['polygons']>();
+  for (let index = 0; index < polygons.length; index++) {
+    const primitive = polygons[index];
+    const layerId = primitive.pickObject.layerId;
+    let layer = layers.get(layerId);
+    if (!layer)
+      layers.set(layerId, layer = []);
+    layer.push(primitive);
+    if ((index + 1) % 64 === 0)
+      yield;
+  }
+  for (const [layerId, layer] of layers) {
+    yield* appendBufferPolygonCollection(layer, tileID, tileId, layerId, heightReference, entries);
+  }
+}
+
+function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, layerId: string, heightReference: HeightReference, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
   let vertexCount = 0;
   let holeCount = 0;
   let triangleCount = 0;
-  for (const primitive of polygons) {
+  let opaque = true;
+  for (let index = 0; index < polygons.length; index++) {
+    const primitive = polygons[index];
     vertexCount += primitive.positions.length / 3;
     holeCount += primitive.holes.length;
     triangleCount += primitive.triangles.length / 3;
+    opaque &&= primitive.material.color.alpha >= 1;
+    if ((index + 1) % 64 === 0)
+      yield;
   }
+  const clamped = heightReference === HeightReference.CLAMP_TO_GROUND
+    || heightReference === HeightReference.CLAMP_TO_TERRAIN
+    || heightReference === HeightReference.CLAMP_TO_3D_TILE;
+  const boundingVolume = clamped ? tileBoundingSphere(tileID) : yield* fillBoundingSphere(polygons);
   const collection = new BufferPolygonCollection({
     allowPicking: true,
-    blendOption: isOpaque(polygons.map(p => p.material.color.alpha)) ? BlendOption.OPAQUE : BlendOption.TRANSLUCENT,
-    // Precomputed tile sphere: disables Cesium's per-update fromVertices
-    // scan over every vertex (see tile-bounding-sphere.ts).
-    boundingVolume: tileBoundingSphere(tileID),
+    blendOption: opaque ? BlendOption.OPAQUE : BlendOption.TRANSLUCENT,
+    // Non-draped 3D fills use their actual content. Both precomputed paths
+    // disable Native's per-update scan over all vertices.
+    boundingVolume,
     heightReference,
     primitiveCountMax: polygons.length,
     vertexCountMax: vertexCount,
     holeCountMax: holeCount,
     triangleCountMax: triangleCount,
   });
+  registerDrawBatch(collection, { layerId, tileId, kind: 'fill' });
+  // This build owns the allocation until all layers finish and transfer it.
+  entries.push([`polygons:${layerId}`, collection]);
   // One flyweight per build: add() copies the payload into the collection
   // buffers, so per-feature instances are pure garbage.
   const scratch = new BufferPolygon();
@@ -714,8 +789,8 @@ function buildPolygonCollection(polygons: TileRenderResult['polygons'], tileID: 
       material: primitive.material,
       pickObject: primitive.pickObject,
     }, scratch);
+    yield;
   }
-  return collection;
 }
 
 function buildPointCollection(points: TileRenderResult['points'], tileID: TileID): BufferPointCollection {

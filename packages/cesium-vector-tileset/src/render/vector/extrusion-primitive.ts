@@ -2,15 +2,14 @@ import type { GeometryInstance, PrimitiveCollection } from 'cesium';
 import type { FillExtrusionBucket } from '../../data/bucket-runtime';
 import type { ExtrusionLighting } from './extrusion-geometry';
 import type { TilePickObject } from './tile-conversion';
-import { Cartesian3, CullFace, PerInstanceColorAppearance } from 'cesium';
+import { Cartesian3, CullFace } from 'cesium';
+import { ExtrusionAppearance } from '../geometry/extrusion-appearance';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { extrusionStyleForFeature } from './feature-attributes';
 
 // MapLibre's fill_extrusion.vertex.glsl lighting, with Native position,
 // instance attributes, gamma correction, picking and depth handling.
 const VERTEX_SHADER = `
-in vec3 position3DHigh;
-in vec3 position3DLow;
 in vec3 a_extrusionNormal;
 in float a_extrusionTop;
 in float batchId;
@@ -47,7 +46,7 @@ void main()
     vec3 top = cvt_extrusionColor(color.rgb, normal, shape, 1.0);
     v_color = vec4(floor(mix(bottom, top, clamp(a_extrusionTop, 0.0, 1.0))) / 255.0,
         floor(color.a * 255.0 + 0.5) / 255.0);
-    gl_Position = czm_modelViewProjectionRelativeToEye * czm_computePosition();
+    gl_Position = czm_modelViewProjectionRelativeToEye * cvt_computeExtrusionPosition();
 }
 `;
 
@@ -68,10 +67,10 @@ export const deferredExtrusionLayers = new WeakMap<PrimitiveCollection, string[]
 export class ExtrusionPrimitive extends GeometryPrimitive {
   private readonly _ids: TilePickObject[];
   private readonly _heights: Float64Array;
-  private readonly _paintAppearance: PerInstanceColorAppearance & { uniforms: ExtrusionUniforms };
+  private readonly _paintAppearance: ExtrusionAppearance<ExtrusionUniforms>;
 
   constructor(instances: GeometryInstance[], lighting?: ExtrusionLighting) {
-    const appearance = new PerInstanceColorAppearance({
+    const appearance = new ExtrusionAppearance<ExtrusionUniforms>({
       flat: true,
       translucent: false,
       // MapLibre extrusions draw outward faces once, including when alpha < 1.
@@ -79,14 +78,14 @@ export class ExtrusionPrimitive extends GeometryPrimitive {
       closed: false,
       renderState: { cull: { enabled: true, face: CullFace.BACK } },
       vertexShaderSource: VERTEX_SHADER,
-    }) as PerInstanceColorAppearance & { uniforms: ExtrusionUniforms };
+    });
     appearance.uniforms = {
       u_extrusionLightPosition: new Cartesian3(),
       u_extrusionLightColor: new Cartesian3(),
       u_extrusionLightIntensity: 0,
       u_extrusionLightEnabled: false,
     };
-    super({ geometryInstances: instances, appearance }, 'native');
+    super({ geometryInstances: instances, appearance }, 'extrusion');
     this._paintAppearance = appearance;
     this._ids = instances.map(instance => instance.id as TilePickObject);
     this._heights = new Float64Array(instances.length * 2);

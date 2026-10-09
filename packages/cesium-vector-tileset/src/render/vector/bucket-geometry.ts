@@ -1,19 +1,21 @@
 import type { Bucket } from '../../data/bucket';
-import type { CirclePrimitiveGeometry, FillOutlinePath, FillPatternGeometry, FillPrimitiveGeometry, LinePrimitiveGeometry } from '../../data/projected-geometry';
+import type { CirclePrimitiveGeometry, FillOutlinePath, FillPatternGeometry, FillPrimitiveGeometry, LinePrimitiveGeometry, ProjectedGeometryList } from '../../data/projected-geometry';
 import type { Segment } from '../../data/segment';
 import type { CircleStyleLayer } from '../../style/style-layer/circle-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import { CircleBucket, FillBucket, LineBucket } from '../../data/bucket-runtime';
 import { EXTENT } from '../../data/extent';
+import { projectCircleGeometry, projectFillGeometry, projectFillOutlineGeometry, projectLineGeometry } from '../../data/projected-geometry-transfer';
+import { clipPlanarFill } from '../geometry/planar-fill';
 import { subdivideTriangles, subdivideVertexLine, surfaceGranularity, visitSubdividedLineSegment } from '../geometry/surface-subdivision';
 import { tileLocalToWgs84Ecef } from '../geometry/tile-to-ecef';
+import { prepareLineGeometry } from '../line/prepared-line-geometry';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
-import { SCENE3D } from '../scene/scene-mode';
+import { MORPHING, SCENE3D } from '../scene/scene-mode';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
 const fillGeometryCache = new WeakMap<FillBucket, Map<string, FillPrimitiveGeometry[]>>();
-const fillOutlineCache = new WeakMap<FillPrimitiveGeometry, FillOutlinePath[]>();
 const lineGeometryCache = new WeakMap<LineBucket, Map<string, LinePrimitiveGeometry[]>>();
 
 /** Project the parser's bucket-owned geometry before WorkerChannel transfer. */
@@ -24,13 +26,30 @@ export function projectWorkerBuckets(buckets: readonly Bucket[], tileID: Oversca
       continue;
     }
     if (bucket instanceof FillBucket) {
-      bucket.projectedGeometry = { fill: fillBucketPrimitives(bucket, tileID, SCENE3D) };
+      const projected = bucket.projectedGeometry ??= {};
+      projected.fill = projectFillGeometry(fillBucketPrimitives(bucket, tileID, SCENE3D));
+      // The packed owner replaces the per-polygon projection buffers.
+      fillGeometryCache.delete(bucket);
     }
     else if (bucket instanceof LineBucket) {
-      bucket.projectedGeometry = { lines: lineBucketPrimitives(bucket, tileID, SCENE3D) };
+      const primitives = lineBucketPrimitives(bucket, tileID, SCENE3D);
+      // Dash rows depend on the scene atlas. Pattern-only families were
+      // excluded above; only families with a solid member prepare strips.
+      const solid = bucket.layers.some((layer) => {
+        const paint = layer.serialize().paint as Record<string, unknown> | undefined;
+        return paint?.['line-pattern'] == null && paint?.['line-dasharray'] == null;
+      });
+      const prepared = solid
+        ? primitives.map(source => prepareLineGeometry(source, {
+            ...(bucket.featureLineJoinCaps[source.featureIndex] ?? bucket.lineJoinCap),
+            widthPx: 255,
+          }, tileID.canonical))
+        : undefined;
+      bucket.projectedGeometry = { lines: projectLineGeometry(primitives, prepared) };
+      lineGeometryCache.delete(bucket);
     }
     else if (bucket instanceof CircleBucket) {
-      bucket.projectedGeometry = { circles: circleBucketPrimitives(bucket, tileID) };
+      bucket.projectedGeometry = { circles: projectCircleGeometry(circleBucketPrimitives(bucket, tileID)) };
     }
   }
 }
@@ -144,34 +163,20 @@ function clipPathToTileX(points: Array<[number, number]>): Array<Array<[number, 
   return paths;
 }
 
-function outlinePathsForPolygon(
+function outlinePointsForPolygon(
   localPositions: Array<[number, number]>,
   holes: number[],
   granularity: number,
-  tileID: TileID,
-): FillOutlinePath[] {
+): Array<Array<[number, number]>> {
   const starts = [0, ...holes];
-  const paths: FillOutlinePath[] = [];
+  const paths: Array<Array<[number, number]>> = [];
   for (let ring = 0; ring < starts.length; ring++) {
     const start = starts[ring];
     const end = starts[ring + 1] ?? localPositions.length;
     const points = localPositions.slice(start, end);
     const sampled = subdivideVertexLine(points, granularity, true);
     for (const current of clipPathToTileX(sampled)) {
-      const positions = new Float64Array(current.length * 3);
-      for (let i = 0; i < current.length; i++) {
-        const cartesian = tileLocalToWgs84Ecef(tileID, current[i][0], current[i][1]);
-        positions[i * 3] = cartesian.x;
-        positions[i * 3 + 1] = cartesian.y;
-        positions[i * 3 + 2] = cartesian.z;
-      }
-      paths.push({
-        positions,
-        tilePositions: Float64Array.from(current.flat()),
-        closed: current.length >= 3
-          && current[0][0] === current[current.length - 1][0]
-          && current[0][1] === current[current.length - 1][1],
-      });
+      paths.push(current);
     }
   }
   return paths;
@@ -188,25 +193,83 @@ function polygonPositions(bucket: FillBucket, polygonIndex: number): Array<[numb
   return points;
 }
 
-/** Project original rings only when a visible fill outline consumes them. */
+/**
+ * Project both source-ring topologies before Worker transfer. Globe grid
+ * intersections retain their existing rounding; planar rings keep the exact
+ * original edges, including their independently computed clipping endpoints.
+ */
+function projectFillOutlines(bucket: FillBucket, tileID: TileID): ProjectedGeometryList<readonly FillOutlinePath[]> {
+  const projected = bucket.projectedGeometry ??= {};
+  if (projected.fillOutlines && projected.fillPlanarOutlines) {
+    return projected.fillOutlines;
+  }
+  const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
+  projected.fillOutlines = projectOutlineTopology(bucket, canonical, surfaceGranularity('fill', canonical.z, SCENE3D));
+  projected.fillPlanarOutlines = projectOutlineTopology(bucket, canonical, 1);
+  return projected.fillOutlines;
+}
+
+function projectOutlineTopology(bucket: FillBucket, tileID: CanonicalTileID, granularity: number): ProjectedGeometryList<readonly FillOutlinePath[]> {
+  const polygons = bucket.polygons.map((polygon, polygonIndex) => outlinePointsForPolygon(
+    polygonPositions(bucket, polygonIndex),
+    polygon.holes,
+    granularity,
+  ));
+  let count = 0;
+  for (const paths of polygons) {
+    for (const path of paths) count += path.length;
+  }
+  const positions = new Float64Array(count * 3);
+  const tilePositions = new Float64Array(count * 2);
+  const outlines: FillOutlinePath[][] = [];
+  let offset = 0;
+  for (const paths of polygons) {
+    const polygonOutlines: FillOutlinePath[] = [];
+    for (const path of paths) {
+      const start = offset;
+      for (const [x, y] of path) {
+        const cartesian = tileLocalToWgs84Ecef(tileID, x, y);
+        positions[offset * 3] = cartesian.x;
+        positions[offset * 3 + 1] = cartesian.y;
+        positions[offset * 3 + 2] = cartesian.z;
+        tilePositions[offset * 2] = x;
+        tilePositions[offset * 2 + 1] = y;
+        offset++;
+      }
+      polygonOutlines.push({
+        positions: positions.subarray(start * 3, offset * 3),
+        tilePositions: tilePositions.subarray(start * 2, offset * 2),
+        closed: path.length >= 3
+          && path[0][0] === path[path.length - 1][0]
+          && path[0][1] === path[path.length - 1][1],
+      });
+    }
+    outlines.push(polygonOutlines);
+  }
+  return projectFillOutlineGeometry(outlines);
+}
+
+/** Consume the bucket's original rings, shared across fill surface variants. */
 export function fillOutlinePaths(
   bucket: FillBucket,
   primitive: FillPrimitiveGeometry,
-  tileID: TileID,
-): FillOutlinePath[] {
-  const cached = fillOutlineCache.get(primitive);
-  if (cached) {
-    return cached;
-  }
-  const polygon = bucket.polygons[primitive.polygonIndex];
-  const paths = outlinePathsForPolygon(
-    polygonPositions(bucket, primitive.polygonIndex),
-    polygon.holes,
-    primitive.subdivision,
-    tileID,
-  );
-  fillOutlineCache.set(primitive, paths);
-  return paths;
+  mode?: number,
+): readonly FillOutlinePath[] {
+  const outlines = mode === undefined || mode === SCENE3D || mode === MORPHING
+    ? bucket.projectedGeometry?.fillOutlines
+    : bucket.projectedGeometry?.fillPlanarOutlines;
+  if (!outlines)
+    throw new TypeError('fill geometry requires projected source outlines');
+  const paths = outlines.get(primitive.polygonIndex);
+  if (primitive.subdivision !== 1)
+    return paths;
+  const group = bucket.polygons[primitive.polygonIndex].polygonGroupId;
+  let end = primitive.polygonIndex + 1;
+  while (end < bucket.polygons.length && bucket.polygons[end].polygonGroupId === group)
+    end++;
+  return end === primitive.polygonIndex + 1
+    ? paths
+    : Array.from({ length: end - primitive.polygonIndex }, (_, index) => outlines.get(primitive.polygonIndex + index)).flat();
 }
 
 /**
@@ -233,6 +296,9 @@ export function fillBucketPrimitives(
   mode?: number,
   output?: 'pattern',
 ): FillPrimitiveGeometry[] {
+  if (output !== 'pattern') {
+    projectFillOutlines(bucket, tileID);
+  }
   const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
   const subdivision = mode === undefined ? 1 : surfaceGranularity('fill', canonical.z, mode);
   const surfaceKey = geometryCacheKey(tileID, subdivision);
@@ -245,11 +311,20 @@ export function fillBucketPrimitives(
   const surfacePrimitives = output === 'pattern' ? bucketCache?.get(surfaceKey) : undefined;
   const primitives: FillPrimitiveGeometry[] = [];
 
-  for (let polygonIndex = 0; polygonIndex < bucket.polygons.length; polygonIndex++) {
+  for (let polygonIndex = 0; polygonIndex < bucket.polygons.length;) {
     const polygon = bucket.polygons[polygonIndex];
+    const firstPolygonIndex = polygonIndex;
+    let end = polygonIndex + 1;
+    if (subdivision === 1) {
+      while (end < bucket.polygons.length && bucket.polygons[end].polygonGroupId === polygon.polygonGroupId)
+        end++;
+    }
+    const chunks = bucket.polygons.slice(polygonIndex, end);
+    polygonIndex = end;
+    const vertexLength = chunks.reduce((count, chunk) => count + chunk.vertexLength, 0);
     let outsideTile = false;
     const int16 = bucket.layoutVertexArray.int16;
-    for (let i = 0; i < polygon.vertexLength; i++) {
+    for (let i = 0; i < vertexLength; i++) {
       const vertex = polygon.vertexOffset + i;
       const x = int16[vertex * 2];
       const y = int16[vertex * 2 + 1];
@@ -257,27 +332,29 @@ export function fillBucketPrimitives(
     }
 
     const triangles: number[] = [];
-    const segment = segmentForVertex(bucket.segments.get(), polygon.vertexOffset);
+    const segments = chunks.map(chunk => segmentForVertex(bucket.segments.get(), chunk.vertexOffset));
     // A missing segment means the worker payload is malformed. Falling back
     // to zero would reinterpret the first segment's indices as this polygon
     // and can produce a plausible-looking but unrelated triangle set.
-    if (!segment) {
+    if (segments.some(segment => !segment)) {
       continue;
     }
-    const segmentVertexOffset = segment.vertexOffset;
-    for (let i = 0; i < polygon.primitiveLength * 3; i += 3) {
-      const absoluteA = segmentVertexOffset + bucket.indexArray.uint16[polygon.primitiveOffset * 3 + i];
-      const absoluteB = segmentVertexOffset + bucket.indexArray.uint16[polygon.primitiveOffset * 3 + i + 1];
-      const absoluteC = segmentVertexOffset + bucket.indexArray.uint16[polygon.primitiveOffset * 3 + i + 2];
-      const relativeA = absoluteA - polygon.vertexOffset;
-      const relativeB = absoluteB - polygon.vertexOffset;
-      const relativeC = absoluteC - polygon.vertexOffset;
-      // Do not turn a malformed worker index into a huge Uint32 index that
-      // Cesium will reject later while building the GPU collection.
-      if (relativeA >= 0 && relativeA < polygon.vertexLength
-        && relativeB >= 0 && relativeB < polygon.vertexLength
-        && relativeC >= 0 && relativeC < polygon.vertexLength) {
-        triangles.push(relativeA, relativeB, relativeC);
+    for (const [chunkIndex, chunk] of chunks.entries()) {
+      const segmentVertexOffset = segments[chunkIndex]!.vertexOffset;
+      for (let i = 0; i < chunk.primitiveLength * 3; i += 3) {
+        const absoluteA = segmentVertexOffset + bucket.indexArray.uint16[chunk.primitiveOffset * 3 + i];
+        const absoluteB = segmentVertexOffset + bucket.indexArray.uint16[chunk.primitiveOffset * 3 + i + 1];
+        const absoluteC = segmentVertexOffset + bucket.indexArray.uint16[chunk.primitiveOffset * 3 + i + 2];
+        const relativeA = absoluteA - chunk.vertexOffset;
+        const relativeB = absoluteB - chunk.vertexOffset;
+        const relativeC = absoluteC - chunk.vertexOffset;
+        // Do not turn a malformed worker index into a huge Uint32 index that
+        // Cesium will reject later while building the GPU collection.
+        if (relativeA >= 0 && relativeA < chunk.vertexLength
+          && relativeB >= 0 && relativeB < chunk.vertexLength
+          && relativeC >= 0 && relativeC < chunk.vertexLength) {
+          triangles.push(absoluteA - polygon.vertexOffset, absoluteB - polygon.vertexOffset, absoluteC - polygon.vertexOffset);
+        }
       }
     }
 
@@ -295,22 +372,26 @@ export function fillBucketPrimitives(
         bucket,
         tileID,
         polygon.vertexOffset,
-        polygon.vertexLength,
+        vertexLength,
       );
       if (output === 'pattern') {
         tilePositions = Float64Array.from(int16.subarray(
           polygon.vertexOffset * 2,
-          (polygon.vertexOffset + polygon.vertexLength) * 2,
+          (polygon.vertexOffset + vertexLength) * 2,
         ));
       }
       indices = surface?.triangles ?? new Uint32Array(triangles);
     }
     else {
-      const subdivided = subdivideTriangles(polygonPositions(bucket, polygonIndex), triangles, subdivision, {
-        clipToTile: true,
-        northPole: canonical.y === 0,
-        southPole: canonical.y === (2 ** canonical.z) - 1,
-      });
+      const sourcePoints = chunks.flatMap((_chunk, index) => polygonPositions(bucket, firstPolygonIndex + index));
+      const planar = subdivision === 1 ? clipPlanarFill(sourcePoints, triangles) : undefined;
+      const subdivided = planar
+        ? { vertices: planar.points.map(([x, y]) => ({ x, y })), indices: planar.indices }
+        : subdivideTriangles(sourcePoints, triangles, subdivision, {
+            clipToTile: true,
+            northPole: canonical.y === 0,
+            southPole: canonical.y === (2 ** canonical.z) - 1,
+          });
       if (subdivided.indices.length === 0) {
         continue;
       }
@@ -346,7 +427,7 @@ export function fillBucketPrimitives(
       // the earcut hole topology, so omit stale hole metadata for that mesh.
       holes: tessellate ? [] : polygon.holes,
       triangles: indices,
-      polygonIndex,
+      polygonIndex: firstPolygonIndex,
       subdivision,
       featureIndex,
     };

@@ -9,7 +9,7 @@ import type { DashRow } from '../../source/worker-source';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { ExtrusionLighting } from './extrusion-geometry';
 import type { TileRenderResult } from './tile-conversion';
-import type { VectorCollectionReplacement, VectorPaintFrame, VectorPaintPreparation, VectorPaintState } from './vector-paint-updater';
+import type { VectorCameraPaintSnapshot, VectorCollectionReplacement, VectorPaintFrame, VectorPaintPreparation, VectorPaintState } from './vector-paint-updater';
 import type { BucketMap, StandardRenderEntries, TileID, VectorTileBuildInput, VectorTileBuildState } from './vector-tile-builder';
 import {
   BufferPolygonCollection,
@@ -17,6 +17,7 @@ import {
   HeightReference,
 } from 'cesium';
 import { DashMaterial } from '../line/dash-material';
+import { discardLineBuild } from '../line/line-renderer';
 import { drawLayersForOwner, registerDrawLayers } from '../scene/draw-batch';
 import { collectionGpuBytes } from '../scene/resource-memory';
 import { RetiredPool } from '../scene/retired-pool';
@@ -79,6 +80,8 @@ export class VectorTileRenderer {
   private _vectorProvider?: VectorDrapingProvider;
   private _heightReference: HeightReference = HeightReference.NONE;
   private readonly _drapeHolds = new Set<BufferPolygonCollection>();
+  private _drapeOrder: BufferPolygonCollection[] = [];
+  private _drapeOrderDirty = false;
   readonly dashMaterial?: DashMaterial;
   private readonly _builder: VectorTileBuilder;
   private readonly _paint: VectorPaintUpdater;
@@ -139,8 +142,16 @@ export class VectorTileRenderer {
     this._paint.invalidate();
   }
 
-  freezePaint(): void {
-    this._paint.freezeExisting();
+  captureLivePaint(): VectorCameraPaintSnapshot {
+    return this._paint.captureLivePaint();
+  }
+
+  freezePaint(snapshot?: VectorCameraPaintSnapshot): void {
+    this._paint.freezeExisting(snapshot);
+  }
+
+  updateLivePaint(frame: VectorPaintFrame): void {
+    this._paint.updateLivePaint(frame);
   }
 
   updatePaint(frame: VectorPaintFrame): VectorCollectionReplacement[] {
@@ -179,26 +190,46 @@ export class VectorTileRenderer {
    * the fills and they vanish. Call after all publishes and replacements so
    * same-frame collections are marked without a one-frame gap.
    */
-  markDrapedCollections(frameNumber: number): void {
+  markDrapedCollections(frameNumber: number, layerOrder: ReadonlyMap<string, number>): boolean {
     if (!this._isDraping()) {
-      return;
+      return false;
     }
     const provider = this._vectorProvider;
     if (!provider) {
-      return;
+      return false;
     }
+    const owned = new Set<BufferPolygonCollection>();
     for (const record of this._records.values()) {
       for (const collection of record.collections.values()) {
-        if (collection instanceof BufferPolygonCollection && collection.show) {
-          provider.markForFrame(collection, frameNumber, this._heightReference);
-        }
+        if (collection instanceof BufferPolygonCollection)
+          owned.add(collection);
       }
     }
-    for (const collection of this._drapeHolds) {
-      if (collection.show) {
-        provider.markForFrame(collection, frameNumber, this._heightReference);
+    for (const collection of this._drapeHolds)
+      owned.add(collection);
+    const ordered = [...owned].filter(collection => collection.show).map((collection) => {
+      let rank = Infinity;
+      for (const layerId of drawLayersForOwner(collection)) {
+        rank = Math.min(rank, layerOrder.get(layerId) ?? Infinity);
       }
+      return { collection, rank };
+    }).sort((a, b) => a.rank - b.rank).map(entry => entry.collection);
+    const changed = this._drapeOrderDirty || ordered.length !== this._drapeOrder.length
+      || ordered.some((collection, index) => collection !== this._drapeOrder[index]);
+    if (changed) {
+      // Native discovers collections before our update. Its persistent Map
+      // keeps first-insertion order, so marking existing keys cannot repair
+      // order after a hidden layer or a replacement becomes visible again.
+      for (const collection of new Set([...this._drapeOrder, ...owned])) {
+        provider.remove(collection);
+      }
+      this._drapeOrder = ordered;
+      this._drapeOrderDirty = false;
     }
+    for (const collection of ordered) {
+      provider.markForFrame(collection, frameNumber, this._heightReference);
+    }
+    return changed;
   }
 
   /** Stop draping a predecessor when its scene replacement is ready or cancelled. */
@@ -215,6 +246,8 @@ export class VectorTileRenderer {
   }
 
   private _undrapeAll(provider: VectorDrapingProvider | undefined): void {
+    this._drapeOrder = [];
+    this._drapeOrderDirty = false;
     if (!provider) {
       return;
     }
@@ -235,6 +268,10 @@ export class VectorTileRenderer {
   }
 
   private _undrape(provider: VectorDrapingProvider | undefined, collection: VectorCollection): void {
+    if (collection instanceof BufferPolygonCollection && this._drapeOrder.includes(collection)) {
+      this._drapeOrder = this._drapeOrder.filter(owned => owned !== collection);
+      this._drapeOrderDirty = true;
+    }
     if (provider && collection instanceof BufferPolygonCollection) {
       provider.remove(collection);
     }
@@ -350,8 +387,9 @@ export class VectorTileRenderer {
       }),
       tileID,
       skipLayerIds,
-      // Surface publication does not own the lines still being constructed.
-      linePrimitives: state.phase === 'done' ? result!.linePrimitives : [],
+      // Partial surfaces do not own unfinished lines. Complete records also
+      // retain hidden line sources for later paint changes.
+      linePrimitives: state.phase === 'done' || entries.some(([kind]) => kind === 'lines') ? result!.linePrimitives : [],
       dashRows: state.dashRows,
       collections: new Map(entries.map(([kind, collection]) => [kind, collection])),
       standard: state.standard,
@@ -366,7 +404,7 @@ export class VectorTileRenderer {
     return entries[0][1];
   }
 
-  /** Add the tracks built after a tile's fills have already been published. */
+  /** Transfer completed tracks while preserving the remaining build inputs. */
   appendTileBuild(state: VectorTileBuildState): VectorCollection[] {
     const record = this._records.get(state.tileId)!;
     const added = state.entries.map(([, collection]) => collection);
@@ -374,15 +412,18 @@ export class VectorTileRenderer {
       this._registerDrawLayers(kind, collection, state.result!.linePrimitives, state.tileId);
       record.collections.set(kind, collection);
     }
-    record.complete = true;
-    record.linePrimitives = state.result!.linePrimitives;
+    record.complete = state.phase === 'done';
+    if (record.complete || state.entries.some(([kind]) => kind === 'lines'))
+      record.linePrimitives = state.result!.linePrimitives;
     // Newly appended owners may still carry construction paint while the
     // surface already received a feature-state or transition update.
     record.paint.styleCache = undefined;
     record.paint.lastStyleRevision = undefined;
     state.entries = [];
-    state.standard = undefined;
-    state.result = undefined;
+    if (record.complete) {
+      state.standard = undefined;
+      state.result = undefined;
+    }
     this._paint.invalidate();
     return added;
   }
@@ -390,6 +431,8 @@ export class VectorTileRenderer {
   removeTile(tileId: string, retainDrape = false): boolean {
     const record = this._records.get(tileId);
     if (record) {
+      if (record.paint.lineBuild)
+        discardLineBuild(record.paint.lineBuild);
       record.paint.lineBuild = undefined;
       for (const collection of record.collections.values()) {
         if (retainDrape && collection instanceof BufferPolygonCollection && this._isDraping()) {
@@ -416,9 +459,9 @@ export class VectorTileRenderer {
   /**
    * Baked layer info for live and pooled tiles.
    */
-  tileBuildLayers(tileId: string): { layerIds: readonly string[]; skipLayerIds: ReadonlySet<string> | undefined; complete: boolean; mode: SceneMode; frozen: boolean } | undefined {
+  tileBuildLayers(tileId: string): { generationId: number; layerIds: readonly string[]; skipLayerIds: ReadonlySet<string> | undefined; complete: boolean; mode: SceneMode; frozen: boolean } | undefined {
     const record = this._records.get(tileId) ?? this._retired.get(tileId);
-    return record ? { layerIds: record.layerIds, skipLayerIds: record.skipLayerIds, complete: record.complete, mode: record.mode, frozen: record.paint.frozen } : undefined;
+    return record ? { generationId: record.generationId, layerIds: record.layerIds, skipLayerIds: record.skipLayerIds, complete: record.complete, mode: record.mode, frozen: record.paint.frozen } : undefined;
   }
 
   /**
@@ -470,8 +513,11 @@ export class VectorTileRenderer {
    * ones were already handed over by the caller's own remove pass).
    */
   removeAll(): VectorCollection[] {
+    this._paint.clearHeldPaint();
     this._undrapeAll(this._vectorProvider);
     for (const record of this._records.values()) {
+      if (record.paint.lineBuild)
+        discardLineBuild(record.paint.lineBuild);
       record.paint.lineBuild = undefined;
     }
     this._records.clear();
@@ -507,6 +553,8 @@ export class VectorTileRenderer {
     if (!record) {
       return [];
     }
+    if (record.paint.lineBuild)
+      discardLineBuild(record.paint.lineBuild);
     record.paint.lineBuild = undefined;
     for (const collection of record.collections.values()) {
       // Retired collections leave the scene: drop them from the drape set

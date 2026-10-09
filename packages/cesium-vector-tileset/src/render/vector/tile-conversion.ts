@@ -1,9 +1,11 @@
 import type { SceneMode } from 'cesium';
 import type { Bucket } from '../../data/bucket';
+import type { CirclePrimitiveGeometry, FillPrimitiveGeometry, LinePrimitiveGeometry, ProjectedGeometryList } from '../../data/projected-geometry';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
 import { BufferPointMaterial, BufferPolygonMaterial, Cartesian3, Color } from 'cesium';
 import { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
+import { projectCircleGeometry, projectFillGeometry, projectLineGeometry } from '../../data/projected-geometry-transfer';
 import { surfaceGranularity } from '../geometry/surface-subdivision';
 import { WGS84_A, WGS84_F } from '../geometry/tile-to-ecef';
 import { RASTER_SURFACE_OFFSET_M } from '../raster/raster-geometry';
@@ -54,8 +56,8 @@ export interface TileRenderResult {
   points: PointRenderPrimitive[];
   /**
    * Lines (line layer features and fill outline rings) for the
-   * antialiased line track. Style evaluation and the PolylineGeometry
-   * building happen on the consumer side, at the zoom bucket boundary.
+   * antialiased line track. Solid globe strips arrive from the worker;
+   * atlas-dependent and scene-specific planar layouts compile on consumption.
    */
   linePrimitives: import('../line/line-renderer').LinePrimitiveSource[];
   /** Style layers that produced at least one supported render primitive. */
@@ -70,6 +72,13 @@ const OUTLINE_RADIAL_EPSILON_METERS = 0.001;
 export type RadialOffsetCache = WeakMap<Float64Array, Map<number, Float64Array>>;
 
 export function radialOffsetPositions(positions: Float64Array, meters: number, radialOffsetCache: RadialOffsetCache): Float64Array {
+  const iterator = offsetRadialPositions(positions, meters, radialOffsetCache);
+  let step = iterator.next();
+  while (!step.done) step = iterator.next();
+  return step.value;
+}
+
+function* offsetRadialPositions(positions: Float64Array, meters: number, radialOffsetCache: RadialOffsetCache): Generator<void, Float64Array> {
   if (meters === 0) {
     return positions;
   }
@@ -77,7 +86,7 @@ export function radialOffsetPositions(positions: Float64Array, meters: number, r
   if (cached) {
     return cached;
   }
-  const shifted = positions.slice();
+  const shifted = new Float64Array(positions.length);
   // Closed-form ellipsoid normal: proportional to (x/a², y/a², z/b²).
   // Cesium's geodeticSurfaceNormal iterates to the same direction; the
   // iteration is pure overhead for a ~1m layer offset, and this runs once
@@ -86,13 +95,15 @@ export function radialOffsetPositions(positions: Float64Array, meters: number, r
   const e2 = WGS84_F * (2 - WGS84_F);
   const b2 = a2 * (1 - e2);
   for (let i = 0; i < shifted.length; i += 3) {
-    const nx = shifted[i] / a2;
-    const ny = shifted[i + 1] / a2;
-    const nz = shifted[i + 2] / b2;
+    const nx = positions[i] / a2;
+    const ny = positions[i + 1] / a2;
+    const nz = positions[i + 2] / b2;
     const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
-    shifted[i] += (nx / length) * meters;
-    shifted[i + 1] += (ny / length) * meters;
-    shifted[i + 2] += (nz / length) * meters;
+    shifted[i] = positions[i] + (nx / length) * meters;
+    shifted[i + 1] = positions[i + 1] + (ny / length) * meters;
+    shifted[i + 2] = positions[i + 2] + (nz / length) * meters;
+    if ((i / 3 + 1) % 32 === 0 && i + 3 < shifted.length)
+      yield;
   }
   let offsets = radialOffsetCache.get(positions);
   if (!offsets) {
@@ -149,14 +160,13 @@ interface ConvertFamily {
   workerGeometry?: import('../../data/projected-geometry').ProjectedBucketGeometry;
   fill?: import('../../data/projected-geometry').ProjectedBucketGeometry['fill'];
   line?: import('../../data/projected-geometry').ProjectedBucketGeometry['lines'];
-  circle?: ReturnType<typeof circleBucketPrimitives>;
+  circle?: import('../../data/projected-geometry').ProjectedBucketGeometry['circles'];
 }
 
 /**
  * Resumable bucket conversion. A dense tile evaluates thousands of features;
- * slicing by feature keeps publish frames under budget. All accumulation is
- * append-only, so suspending and resuming never duplicates or drops a
- * feature.
+ * Heavy radial projection yields within a feature. Render inputs publish only
+ * after that feature's coordinates complete, so resumed work stays atomic.
  */
 export interface TileConversionState {
   generationId: number;
@@ -164,6 +174,7 @@ export interface TileConversionState {
   familyIndex: number;
   layerIndex: number;
   primIndex: number;
+  featureWork?: Generator<void>;
   tileID: TileID;
   layerOrder?: ReadonlyMap<string, number>;
   styleZoom?: number;
@@ -280,7 +291,12 @@ export function advanceTileConversion(state: TileConversionState, budget: Budget
       state.primIndex = 0;
       continue;
     }
-    convertOneFeature(state, family, layerId, prims[state.primIndex]);
+    state.featureWork ??= convertOneFeature(state, family, layerId, prims.get(state.primIndex));
+    while (!state.featureWork.next().done) {
+      if (budget.exhausted)
+        return false;
+    }
+    state.featureWork = undefined;
     state.primIndex++;
   }
   state.radialOffsetCache = undefined;
@@ -291,41 +307,41 @@ export function advanceTileConversion(state: TileConversionState, budget: Budget
 function convertFamilyPrims(
   state: TileConversionState,
   family: ConvertFamily,
-): Array<{ featureIndex: number }> {
+): ProjectedGeometryList<{ featureIndex: number }> {
   const { bucket } = family;
   if (family.branch === 'fill') {
     return family.fill ??= bucket instanceof FillBucket
-      ? (family.workerGeometry?.fill ?? fillBucketPrimitives(bucket, state.tileID, state.mode))
-      : [];
+      ? (family.workerGeometry?.fill ?? projectFillGeometry(fillBucketPrimitives(bucket, state.tileID, state.mode)))
+      : projectFillGeometry([]);
   }
   if (family.branch === 'line') {
     return family.line ??= bucket instanceof LineBucket
-      ? (family.workerGeometry?.lines ?? lineBucketPrimitives(bucket, state.tileID, state.mode))
-      : [];
+      ? (family.workerGeometry?.lines ?? projectLineGeometry(lineBucketPrimitives(bucket, state.tileID, state.mode)))
+      : projectLineGeometry([]);
   }
   if (family.branch === 'circle') {
     return family.circle ??= bucket instanceof CircleBucket
-      ? (family.workerGeometry?.circles ?? circleBucketPrimitives(bucket, state.tileID))
-      : [];
+      ? (family.workerGeometry?.circles ?? projectCircleGeometry(circleBucketPrimitives(bucket, state.tileID)))
+      : projectCircleGeometry([]);
   }
-  return [];
+  throw new TypeError('unsupported projected geometry family');
 }
 
-type FillPrimitive = NonNullable<import('../../data/projected-geometry').ProjectedBucketGeometry['fill']>[number];
-type LinePrimitive = NonNullable<import('../../data/projected-geometry').ProjectedBucketGeometry['lines']>[number];
-type CirclePrimitive = ReturnType<typeof circleBucketPrimitives>[number];
+type FillPrimitive = FillPrimitiveGeometry;
+type LinePrimitive = LinePrimitiveGeometry;
+type CirclePrimitive = CirclePrimitiveGeometry;
 
 /**
  * Convert a single feature primitive: style evaluation plus the radial
  * layer offset and pick-object bookkeeping. Bodies are the four branches of
  * the old per-family loop, unchanged; the stepper above supplies the loop.
  */
-function convertOneFeature(
+function* convertOneFeature(
   state: TileConversionState,
   family: ConvertFamily,
   layerId: string,
   prim: { featureIndex: number },
-): void {
+): Generator<void> {
   const { bucket } = family;
   const { result } = state;
   // Keep vector and raster layers in one radial ordering. Raster tiles are
@@ -339,7 +355,7 @@ function convertOneFeature(
   if (family.branch === 'fill' && bucket instanceof FillBucket) {
     const primitive = prim as FillPrimitive;
     const style = fillStyleForFeature(bucket, primitive.featureIndex, layerId, styleZoom);
-    const shiftedPositions = radialOffsetPositions(primitive.positions, layerOffset, state.radialOffsetCache);
+    const shiftedPositions = yield* offsetRadialPositions(primitive.positions, layerOffset, state.radialOffsetCache!);
     result.polygons.push({
       positions: shiftedPositions,
       ringVertexCount: primitive.ringVertexCount,
@@ -355,25 +371,22 @@ function convertOneFeature(
     // outline fields are not rendered. Build explicit closed polylines
     // for a declared MapLibre fill outline instead of silently dropping
     // the border. The source polygon's hole offsets delimit each ring, and the
-    // line pipeline renders them in every scene mode.
+    // line pipeline renders them in every scene mode. Original rings are a
+    // bucket-owned Worker payload, independent of this surface mesh variant.
     if (style.outlineWidthPx > 0 && style.outlineColor.alpha > 0) {
-      for (const outlinePath of fillOutlinePaths(bucket, primitive, state.tileID)) {
-        const outlinePositions = radialOffsetPositions(
-          outlinePath.positions,
-          layerOffset + OUTLINE_RADIAL_EPSILON_METERS,
-          state.radialOffsetCache,
-        );
+      for (const outlinePath of fillOutlinePaths(bucket, primitive, state.mode)) {
         // Outline paths already contain the closing sample for closed
         // rings. Appending it again creates a zero-length final segment
         // and changes the line geometry at every polygon corner.
-        if (outlinePositions.length < 6) {
+        if (outlinePath.positions.length < 6) {
           continue;
         }
         result.linePrimitives.push({
           layerId,
           featureIndex: primitive.featureIndex,
-          positions: outlinePositions,
+          positions: outlinePath.positions,
           tilePositions: outlinePath.tilePositions,
+          offsetMeters: layerOffset + OUTLINE_RADIAL_EPSILON_METERS,
         });
       }
     }
@@ -389,6 +402,7 @@ function convertOneFeature(
       // in the shader, in projected x or along the world ellipsoid normal.
       positions: primitive.positions,
       tilePositions: primitive.tilePositions,
+      prepared: state.mode === SCENE3D ? primitive.prepared : undefined,
       offsetMeters: layerOffset,
     });
   }
