@@ -75,15 +75,24 @@ export interface VectorTileRecord {
  */
 export class VectorTileRenderer {
   private _records: Map<string, VectorTileRecord> = new Map();
+
   private readonly _tileForCollection = new WeakMap<object, string>();
+
   private _pixelRatio: number;
+
   private _vectorProvider?: VectorDrapingProvider;
+
   private _heightReference: HeightReference = HeightReference.NONE;
+
   private readonly _drapeHolds = new Set<BufferPolygonCollection>();
+
   private _drapeOrder: BufferPolygonCollection[] = [];
+
   private _drapeOrderDirty = false;
   readonly dashMaterial?: DashMaterial;
+
   private readonly _builder: VectorTileBuilder;
+
   private readonly _paint: VectorPaintUpdater;
 
   /**
@@ -179,6 +188,9 @@ export class VectorTileRenderer {
     this._heightReference = heightReference;
   }
 
+  /**
+   * @internal
+   */
   private _isDraping(): boolean {
     return this._vectorProvider !== undefined && isClampHeightReference(this._heightReference);
   }
@@ -245,6 +257,9 @@ export class VectorTileRenderer {
     this._vectorProvider = undefined;
   }
 
+  /**
+   * @internal
+   */
   private _undrapeAll(provider: VectorDrapingProvider | undefined): void {
     this._drapeOrder = [];
     this._drapeOrderDirty = false;
@@ -267,6 +282,9 @@ export class VectorTileRenderer {
     this._drapeHolds.clear();
   }
 
+  /**
+   * @internal
+   */
   private _undrape(provider: VectorDrapingProvider | undefined, collection: VectorCollection): void {
     if (collection instanceof BufferPolygonCollection && this._drapeOrder.includes(collection)) {
       this._drapeOrder = this._drapeOrder.filter(owned => owned !== collection);
@@ -444,16 +462,10 @@ export class VectorTileRenderer {
       }
     }
     this._records.delete(tileId);
-    for (const collection of this._takeRetiredCollections(tileId)) {
+    for (const collection of this.takeRetired(tileId)) {
       collection.destroy();
     }
     return !!record;
-  }
-
-  /** Take a retired entry's collections, dropping the pool entry. */
-  private _takeRetiredCollections(tileId: string): VectorCollection[] {
-    const entry = this._retired.take(tileId);
-    return entry ? [...entry.collections.values()] : [];
   }
 
   /**
@@ -653,6 +665,7 @@ export class VectorTileRenderer {
    * contents but a different blend option. The Buffer*Collection classes only
    * accept a blend option at construction, so a material alpha crossing the
    * opaque boundary requires a rebuild.
+   * @internal
    */
   private _replaceCollection(
     tileId: string,
@@ -677,6 +690,9 @@ export class VectorTileRenderer {
     }
   }
 
+  /**
+   * @internal
+   */
   private _registerDrawLayers(kind: string, collection: VectorCollection, linePrimitives: TileRenderResult['linePrimitives'], tileId: string): void {
     this._tileForCollection.set(collection, tileId);
     if (kind === 'lines') {

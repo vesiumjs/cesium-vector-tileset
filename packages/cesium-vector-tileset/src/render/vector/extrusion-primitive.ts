@@ -66,7 +66,9 @@ export const deferredExtrusionLayers = new WeakMap<PrimitiveCollection, string[]
 /** Native geometry owns shape; its instance table and Appearance own live paint. */
 export class ExtrusionPrimitive extends GeometryPrimitive {
   private readonly _ids: TilePickObject[];
+
   private readonly _heights: Float64Array;
+
   private readonly _paintAppearance: ExtrusionAppearance<ExtrusionUniforms>;
 
   constructor(instances: GeometryInstance[], lighting?: ExtrusionLighting) {

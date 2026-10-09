@@ -103,30 +103,55 @@ class LayerCommand extends runtime.ClearCommand {
   boundingVolume?: BoundingSphere;
   cull = false;
   occlude = false;
+
   private _commands: NativeCommand[] = [];
+
   private _scene!: ExtrusionDepthScene;
+
   private _frustum!: Camera['frustum'];
+
   private _revision = 0;
+
   private _renderedRevision = -1;
+
   private _context?: NativeContext;
+
   private _framebuffer?: NativeFramebuffer;
+
   private _color?: NativeTexture;
+
   private _depth?: NativeTexture;
+
   private _composite?: NativeCommand;
+
   private _width = 0;
+
   private _height = 0;
+
   private _colorDatatype?: PixelDatatype;
+
   private readonly _view = new Matrix4();
+
   private readonly _viewport = new BoundingRectangle();
+
   private readonly _textureSize = new Cartesian2();
+
   private readonly _fullFrustum = new Cartesian2();
+
   private readonly _fullInverseProjection = new Matrix4();
+
   private readonly _interval = new Cartesian2();
+
   private readonly _quadViewport = new Cartesian4();
+
   private _logDepth = false;
+
   private _height2D = 0;
+
   private _eyeOffset = 0;
+
   private _camera2D?: Camera;
+
   private readonly _clear = new runtime.ClearCommand({ color: Color.TRANSPARENT, depth: 1 });
 
   constructor() {
@@ -225,6 +250,9 @@ class LayerCommand extends runtime.ClearCommand {
     }
   };
 
+  /**
+   * @internal
+   */
   private _resources(context: NativeContext): void {
     const width = context.drawingBufferWidth;
     const height = context.drawingBufferHeight;
@@ -268,6 +296,9 @@ class LayerCommand extends runtime.ClearCommand {
     }
   }
 
+  /**
+   * @internal
+   */
   private _destroyResources(): void {
     if (this._framebuffer) {
       this._framebuffer.destroy();

@@ -1,4 +1,4 @@
-import type { ImageAtlas, ImagePosition } from '../../assets/image-atlas';
+import type { ImageAtlas } from '../../assets/image-atlas';
 import type { Bucket } from '../../data/bucket';
 import type { FeatureIndex } from '../../data/feature-index';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
@@ -94,12 +94,6 @@ interface PatternPrimitiveEntry {
   collection: PrimitiveCollection;
   id: PatternPrimitiveID;
   layer: PatternStyleLayer;
-  /**
-   * The tile's geometric id, kept on the entry so the zoom-continuity hold
-   * can relate a leaving attachment to its replacement after TilePyramid has
-   * already dropped the tile from its pyramid.
-   */
-  tileID: TileID;
   styleZoom: number | undefined;
   styleRevision: number;
   styleMutationRevision: number;
@@ -321,21 +315,13 @@ function createAtlasSource(atlas: ImageAtlas): PatternImageSource {
   return canvas;
 }
 
-function patternRectFromPosition(position: ImagePosition): PatternAtlasRect {
-  return { tlbr: position.tlbr, pixelRatio: position.pixelRatio };
-}
-
-function featureRange(bucket: FillBucket | LineBucket | FillExtrusionBucket, featureIndex: number) {
-  return bucket.programConfigurations.getFeatureRange(featureIndex);
-}
-
 function rectForFeature(
   bucket: FillBucket | LineBucket | FillExtrusionBucket,
   layer: PatternStyleLayer,
   featureIndex: number,
   atlas: ImageAtlas,
 ): PatternAtlasRect | undefined {
-  const range = featureRange(bucket, featureIndex);
+  const range = bucket.programConfigurations.getFeatureRange(featureIndex);
   if (!range) {
     return undefined;
   }
@@ -347,7 +333,7 @@ function rectForFeature(
 
   const name = constantPatternName(layer);
   const position = patternPosition(atlas.patternPositions, name ?? null);
-  return position ? patternRectFromPosition(position) : undefined;
+  return position ? { tlbr: position.tlbr, pixelRatio: position.pixelRatio } : undefined;
 }
 
 function patternStyleSignature(
@@ -371,10 +357,6 @@ function patternStyleSignature(
   }
   const style = extrusionStyleForFeature(bucket, featureIndex, layer.id, styleZoom);
   return `extrusion/${rectKey}/${style.height}/${style.base}/${extrusionPatternOpacityForFeature(bucket, featureIndex, layer.id, styleZoom)}`;
-}
-
-function patternAtlasVersion(atlas: ImageAtlas): string {
-  return String(atlas.revision ?? 0);
 }
 
 function patternMaterial(
@@ -554,17 +536,23 @@ export function patternLineGeometry(
  */
 export class PatternTileRenderer {
   private _layerCollections = new Map<string, PrimitiveCollection>();
+
   private _tiles = new Map<string, PatternPrimitiveEntry[]>();
+
   private _hiddenTiles = new Set<string>();
+
   private _tileIdsCache?: string[];
+
   private _tileStates = new Map<string, PatternTileState>();
+
   private _atlases = new Map<string, PatternAtlasEntry>();
+
   private _shared = new SharedAtlasTextures();
   /**
    * Device-pixel scale applied to line widths, refreshed by the tileset before
    * every frame. Cesium's polyline shader multiplies by scene.pixelRatio, so
    * this only compensates for the tileset's devicePixelRatio (see
-   * CesiumVectorTileset._pixelRatioForFrame).
+   * CesiumVectorTileset._pixelRatioCompensation).
    */
   pixelRatio = 1;
 
@@ -574,17 +562,6 @@ export class PatternTileRenderer {
 
   get tileIds(): ReadonlyArray<string> {
     return this._tileIdsCache ??= [...this._tiles.keys()];
-  }
-
-  /**
-   * The tile's geometric id, retained past its removal from TilePyramid. The
-   * zoom-continuity hold compares attachments that are leaving the renderable
-   * set against their unready replacements; TilePyramid has already dropped
-   * the leaving tile from its pyramid by then, so the entry is the only place
-   * its geometry survives.
-   */
-  getTileID(tileId: string): TileID | undefined {
-    return this._tiles.get(tileId)?.[0]?.tileID;
   }
 
   /** Toggle only this tile's live primitives without changing their paint visibility. */
@@ -668,7 +645,10 @@ export class PatternTileRenderer {
     return update;
   }
 
-  /** Transfer replaced entries to the scene handoff without detaching them. */
+  /**
+   * Transfer replaced entries to the scene handoff without detaching them.
+   * @internal
+   */
   private _retainEntries(entries: PatternPrimitiveEntry[]): NonNullable<PatternTileUpdate['retained']> | undefined {
     if (entries.length === 0) {
       return undefined;
@@ -709,6 +689,9 @@ export class PatternTileRenderer {
     return false;
   }
 
+  /**
+   * @internal
+   */
   private _createTileState(
     tileFeatureIndex: FeatureIndex | undefined,
     buckets: { [layerId: string]: Bucket },
@@ -753,6 +736,9 @@ export class PatternTileRenderer {
     };
   }
 
+  /**
+   * @internal
+   */
   private _patternGeometryInputs(buckets: { [layerId: string]: Bucket }, layers: readonly PatternStyleLayer[], zoom: number | undefined): Map<string, string> {
     const inputs = new Map<string, string>();
     for (const layer of layers) {
@@ -776,6 +762,9 @@ export class PatternTileRenderer {
     return inputs;
   }
 
+  /**
+   * @internal
+   */
   private _sameTileInputs(
     state: PatternTileState,
     tileFeatureIndex: FeatureIndex | undefined,
@@ -813,6 +802,9 @@ export class PatternTileRenderer {
       && zoomDependentPaint === state.zoomDependentPaint;
   }
 
+  /**
+   * @internal
+   */
   private _updateTileState(
     state: PatternTileState | undefined,
     styleRevision: number,
@@ -850,7 +842,7 @@ export class PatternTileRenderer {
     // Image patterns bake width, opacity and extrusion dimensions.
     styleZoom = styleZoom === undefined ? undefined : Math.floor(styleZoom);
     const layerKey = layers.map(layer => layer.id).join('|');
-    const atlasVersion = atlas ? patternAtlasVersion(atlas) : '';
+    const atlasVersion = atlas ? String(atlas.revision ?? 0) : '';
     const existing = this._tiles.get(tileId);
     const tileState = this._tileStates.get(tileId);
     const patternGeometry = this._patternGeometryInputs(buckets, layers, styleZoom);
@@ -1160,6 +1152,9 @@ export class PatternTileRenderer {
     state.atlasState = undefined;
   }
 
+  /**
+   * @internal
+   */
   private _renderLayer(
     tileId: string,
     sourceId: string | undefined,
@@ -1363,7 +1358,6 @@ export class PatternTileRenderer {
           collection,
           id: pending.id,
           layer,
-          tileID,
           styleZoom,
           styleRevision,
           styleMutationRevision,
@@ -1406,14 +1400,21 @@ export class PatternTileRenderer {
    * pan-back re-attaches without rebuilding or re-uploading.
    */
   static readonly MAX_RETIRED_TILES = 64;
+
   private _retired = new RetiredPool<PatternPrimitiveEntry[]>(PatternTileRenderer.MAX_RETIRED_TILES);
 
-  /** Take a retired entry, releasing and destroying it like an eviction. */
+  /**
+   * Take a retired entry, releasing and destroying it like an eviction.
+   * @internal
+   */
   private _evictRetiredEntry(tileId: string): Material[] {
     const retired = this._retired.take(tileId);
     return retired ? this._evictRetiredEntries(tileId, retired) : [];
   }
 
+  /**
+   * @internal
+   */
   private _evictRetiredEntries(tileId: string, entries: PatternPrimitiveEntry[]): Material[] {
     // A completed state is owned by its live or pooled entries, including
     // legitimate empty tiles. Replacing a pooled owner must preserve the
@@ -1508,6 +1509,7 @@ export class PatternTileRenderer {
    * Release a retired entry for good: detach (no-op when already detached),
    * release shared refs, destroy the orphaned primitives, and return
    * orphaned materials for tileset destruction.
+   * @internal
    */
   private _evictEntries(entries: PatternPrimitiveEntry[]): Material[] {
     const released = this._retireEntries(entries);
@@ -1526,6 +1528,7 @@ export class PatternTileRenderer {
    * tile maps). Atlas refs are released only for committed tiles: an
    * abandoned build never converted its build hold into per-primitive refs,
    * so releasing per entry would drive the shared count negative.
+   * @internal
    */
   private _retireEntries(entries: PatternPrimitiveEntry[], releaseAtlasRefs = true): { removed: Primitive[]; removedMaterials: Material[] } {
     const removed: Primitive[] = [];

@@ -158,13 +158,21 @@ export type VectorCameraPaintSnapshot = ReadonlyMap<PrimitiveCollection, (zoom: 
 /** Evaluates paint and rebuilds affected geometry; the store applies ownership changes. */
 export class VectorPaintUpdater {
   private readonly _options: VectorPaintOptions;
+
   private _lastZoom = -Infinity;
+
   private _lastStyleRevision = -1;
+
   private _lastPixelRatio = -1;
+
   private _lastLightRevision = -1;
+
   private _dirty = true;
+
   private _polygonMaterial?: BufferPolygonMaterial;
+
   private _pointMaterial?: BufferPointMaterial;
+
   private readonly _heldCameraPaint = new Map<PrimitiveCollection, { update: (zoom: number) => void; zoom?: number }>();
   needsContinuation = false;
 
@@ -292,6 +300,9 @@ export class VectorPaintUpdater {
     return { replacements, ready };
   }
 
+  /**
+   * @internal
+   */
   private _updateRecord(tileId: string, record: VectorTileRecord, frame: VectorPaintFrame, replacements: VectorCollectionReplacement[], budget?: Budget): boolean {
     const {
       zoom,
@@ -524,6 +535,7 @@ export class VectorPaintUpdater {
    * Apply extrusion paint through Native attributes and uniforms, rebuilding
    * only changed height/base or a layer's deferred first upload. Validate its
    * own revisions even when surface paint is cached.
+   * @internal
    */
   private _refreshExtrusions(
     tileId: string,

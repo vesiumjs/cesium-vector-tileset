@@ -359,21 +359,6 @@ interface BuiltRasterPrimitive {
   image: TextureSource;
 }
 
-function rasterGeometryInstance(
-  tileID: TileID,
-  tileId: string,
-  layerId: string,
-  surfaceOffset: number,
-  tileCoordinates: readonly RasterTileCoordinate[] | undefined,
-  flippedWindingOrder: boolean,
-  mode: SceneMode | undefined,
-): GeometryInstance {
-  return new GeometryInstance({
-    geometry: rasterGeometry(tileID, surfaceOffset, tileCoordinates, flippedWindingOrder, mode),
-    id: { type: 'raster', tileId, layerId } satisfies RasterPrimitiveID,
-  });
-}
-
 function rasterAppearance(material: Material): EllipsoidSurfaceAppearance {
   return new EllipsoidSurfaceAppearance({
     material,
@@ -402,15 +387,10 @@ function buildRasterPrimitive(
   const normalizedImage = normalizeTextureData(image as RasterTextureData);
   const material = rasterMaterial(normalizedImage, style);
   const primitive = new Primitive({
-    geometryInstances: rasterGeometryInstance(
-      tileID,
-      tileId,
-      layer.id,
-      surfaceOffset,
-      tileCoordinates,
-      flippedWindingOrder,
-      mode,
-    ),
+    geometryInstances: new GeometryInstance({
+      geometry: rasterGeometry(tileID, surfaceOffset, tileCoordinates, flippedWindingOrder, mode),
+      id: { type: 'raster', tileId, layerId: layer.id } satisfies RasterPrimitiveID,
+    }),
     appearance: rasterAppearance(material),
     allowPicking: true,
     asynchronous: false,
@@ -447,12 +427,19 @@ export function rasterSourceInfo(source: unknown): {
 
 export class RasterTileRenderer {
   private _layerCollections = new Map<string, PrimitiveCollection>();
+
   private _layerOffsets = new Map<string, number>();
+
   private _tiles = new Map<string, RasterPrimitiveEntry[]>();
+
   private _tileIdsCache?: string[];
+
   private _dynamicBatches = new Map<string, DynamicRasterBatch>();
+
   private _dynamicImageIds = new WeakMap<object, number>();
+
   private _nextDynamicImageId = 0;
+
   private _lastStyleRevision?: number;
 
   get collections(): ReadonlyMap<string, PrimitiveCollection> {
@@ -461,17 +448,6 @@ export class RasterTileRenderer {
 
   get tileIds(): ReadonlyArray<string> {
     return this._tileIdsCache ??= [...this._tiles.keys()];
-  }
-
-  /**
-   * The tile's geometric id, retained past its removal from TilePyramid. The
-   * zoom-continuity hold compares attachments that are leaving the renderable
-   * set against their unready replacements; TilePyramid has already dropped
-   * the leaving tile from its pyramid by then, so the entry is the only place
-   * its geometry survives.
-   */
-  getTileID(tileId: string): TileID | undefined {
-    return this._tiles.get(tileId)?.[0]?.tileID;
   }
 
   /** Live tile and layer-collection counts for diagnostics. */
@@ -541,6 +517,9 @@ export class RasterTileRenderer {
     return false;
   }
 
+  /**
+   * @internal
+   */
   private _retainStaticTile(tileId: string): RasterTileUpdate['retained'] {
     const entries = this._tiles.get(tileId);
     if (!entries || entries.some(entry => entry.dynamicBatch)) {
@@ -567,6 +546,9 @@ export class RasterTileRenderer {
     return this._retainStaticTile(tileId);
   }
 
+  /**
+   * @internal
+   */
   private _dynamicBatchKey(image: RasterMaterialImage, layerId: string, mode?: SceneMode): string {
     let imageId = this._dynamicImageIds.get(image);
     if (imageId === undefined) {
@@ -682,6 +664,9 @@ export class RasterTileRenderer {
     return { ...removed, tileId, added, retained, parents: new Map(entries.map(entry => [entry.primitive, entry.collection])) };
   }
 
+  /**
+   * @internal
+   */
   private _addDynamicTile(
     tileId: string,
     tileID: TileID,
@@ -798,6 +783,9 @@ export class RasterTileRenderer {
     return { removed, added, removedMaterials };
   }
 
+  /**
+   * @internal
+   */
   private _rebuildDynamicBatch(batch: DynamicRasterBatch): RasterTileUpdate {
     const update: RasterTileUpdate = { removed: [], added: [], removedMaterials: [], fading: false };
     if (batch.primitive) {
@@ -1041,6 +1029,9 @@ export class RasterTileRenderer {
     return { removed, added, removedMaterials, fading };
   }
 
+  /**
+   * @internal
+   */
   private _rebuildTile(tileId: string, entries: RasterPrimitiveEntry[]): RasterTileUpdate {
     const first = entries[0];
     const removed = this.removeTile(tileId);
@@ -1072,16 +1063,12 @@ export class RasterTileRenderer {
   }
 }
 
-export function destroyRasterPrimitives(primitives: readonly Primitive[]): void {
-  for (const primitive of primitives) {
+export function destroyRasterResources(update: RasterTileUpdate): void {
+  for (const primitive of update.removed) {
     if (!primitive.isDestroyed()) {
       primitive.destroy();
     }
   }
-}
-
-export function destroyRasterResources(update: RasterTileUpdate): void {
-  destroyRasterPrimitives(update.removed);
   for (const material of update.removedMaterials) {
     if (!material.isDestroyed()) {
       material.destroy();

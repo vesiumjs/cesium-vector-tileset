@@ -128,7 +128,9 @@ export interface VectorBuildContext {
 /** Builds detached Cesium geometry while TilePublishQueue owns the in-flight state. */
 export class VectorTileBuilder {
   private readonly _context: () => VectorBuildContext;
+
   private _nextGenerationId = 1;
+
   private readonly _generations = new WeakMap<BucketMap, Map<number, Pick<VectorTileBuildInput, 'tileId' | 'styleRevision' | 'mode'>>>();
 
   constructor(context: () => VectorBuildContext) {
