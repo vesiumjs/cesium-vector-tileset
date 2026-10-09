@@ -21,7 +21,7 @@
     "lint": "pnpm lint:eslint && pnpm lint:tsc",
     "lint:eslint": "eslint . --fix",
     "lint:tsc": "vue-tsc --build --force",
-    "taze": "taze -w -r latest --include-locked --peer --exclude typescript",
+    "taze": "taze",
     "release": "bumpp -r",
     "publish:ci": "tsx ./scripts/publish",
     "codegen": "tsx packages/cesium-vector-tileset/build/generate-style-code.ts && tsx packages/cesium-vector-tileset/build/generate-struct-arrays.ts",
