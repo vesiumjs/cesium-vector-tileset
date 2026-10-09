@@ -326,7 +326,7 @@ async function main(): Promise<void> {
     requiresComplexTextShaping(),
   ]);
 
-  fs.writeFileSync('src/util/unicode-properties.g.ts', `// This file is generated. Edit build/generate-unicode-data.ts, then run \`npm run generate-unicode-data\`.
+  fs.writeFileSync(new URL('../src/util/unicode-properties.g.ts', import.meta.url), `// This file is generated. Edit build/generate-unicode-data.ts, then run \`npm run generate-unicode-data\`.
 
 /**
  * Returns whether the fallback fonts specified by the

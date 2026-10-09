@@ -8,7 +8,7 @@
 
 'use strict';
 
-import type { StructArrayLayout, ViewType } from '../src/util/struct-array';
+import type { StructArrayLayout } from '../src/util/struct-array';
 import * as fs from 'node:fs';
 import { dashAttributes } from '../src/data/bucket/dash-attributes';
 import { patternAttributes } from '../src/data/bucket/pattern-attributes';
@@ -57,7 +57,7 @@ function normalizeMembers(members, usedTypes) {
     }
 
     return Object.assign(member, {
-      size: sizeOf(member.type),
+      size: viewTypes[member.type].BYTES_PER_ELEMENT,
       view: member.type.toLowerCase(),
     });
   });
@@ -120,10 +120,6 @@ function createStructArrayLayoutType({ members, size, alignment }) {
   };
 
   return className;
-}
-
-function sizeOf(type: ViewType): number {
-  return viewTypes[type].BYTES_PER_ELEMENT;
 }
 
 function camelize(str) {
@@ -229,7 +225,7 @@ class ${structArrayLayoutClass} extends StructArray {`,
   }
 
   output.push(`
-    _refreshViews(): void {`);
+    refreshViews(): void {`);
 
   for (const type of usedTypes) {
     output.push(
@@ -421,7 +417,7 @@ export class ${structArrayClass} extends ${structArrayLayoutClass} {`,
   return output.join('\n');
 }
 
-fs.writeFileSync('src/data/array-types.g.ts', `// This file is generated. Edit build/generate-struct-arrays.ts, then run \`npm run codegen\`.
+fs.writeFileSync(new URL('../src/data/array-types.g.ts', import.meta.url), `// This file is generated. Edit build/generate-struct-arrays.ts, then run \`npm run codegen\`.
 
 import {Struct, StructArray} from '../util/struct-array';
 import type {TransferRegistry} from '../worker/transfer-registry';

@@ -206,6 +206,9 @@ importers:
       '@vue/tsconfig':
         specifier: ^0.9.1
         version: 0.9.1(typescript@6.0.3)(vue@3.5.43(typescript@6.0.3))
+      bumpp:
+        specifier: ^12.3.0
+        version: 12.3.0
       canvas:
         specifier: ^3.2.3
         version: 3.2.3
@@ -236,6 +239,9 @@ importers:
       tsdown:
         specifier: ^0.23.0
         version: 0.23.0(@volar/typescript@2.4.28(typescript@6.0.3))(tsx@4.23.15)(typescript@6.0.3)(unrun@0.2.35(synckit@0.11.12))(vue-tsc@3.3.12(typescript@6.0.3))
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
       typescript:
         specifier: ~6.0.3
         version: 6.0.3
@@ -306,18 +312,12 @@ importers:
       '@unicode/unicode-17.0.0':
         specifier: ^2.0.7
         version: 2.0.7
-      bumpp:
-        specifier: ^12.3.0
-        version: 12.3.0
       cesium:
         specifier: ^1.146.0
         version: 1.146.0
       regenerate:
         specifier: ^1.5.0
         version: 1.5.0
-      tsx:
-        specifier: ^4.23.15
-        version: 4.23.15
 
 packages:
 

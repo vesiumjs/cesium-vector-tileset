@@ -6,15 +6,7 @@ const packageRequire = createRequire(import.meta.url);
 
 for (const name of ['README.md', 'README.zh-CN.md']) {
   const readme = readFileSync(new URL(`../../../${name}`, import.meta.url), 'utf8');
-  // Repository docs and gallery images are not included in the npm package.
-  // Keep their links usable when the copied README is rendered on npm.
-  const publishedReadme = readme.replaceAll(/\]\(\.\/docs\/([^)]*)\)/g, (_match, relativePath: string) => {
-    const base = relativePath.startsWith('images/')
-      ? 'https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/'
-      : 'https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/';
-    return `](${base}${relativePath})`;
-  });
-  writeFileSync(new URL(`../${name}`, import.meta.url), publishedReadme);
+  writeFileSync(new URL(`../${name}`, import.meta.url), readme);
 }
 
 // These dependencies are bundled into the main and Worker modules. Keep their

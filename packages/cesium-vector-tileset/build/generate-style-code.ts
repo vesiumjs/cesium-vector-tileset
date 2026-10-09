@@ -402,7 +402,7 @@ const layers: LayerProperties[] = Object.keys(latest.layer.type.values)
   }));
 
 for (const layer of layers) {
-  fs.writeFileSync(`src/style/style-layer/${layer.type}-style-layer-properties.g.ts`, emitLayerProperties(layer));
+  fs.writeFileSync(new URL(`../src/style/style-layer/${layer.type}-style-layer-properties.g.ts`, import.meta.url), emitLayerProperties(layer));
 }
 
 const roots: RootProperties[] = ['light'].map(root => ({
@@ -411,5 +411,5 @@ const roots: RootProperties[] = ['light'].map(root => ({
 }));
 
 for (const root of roots) {
-  fs.writeFileSync(`src/style/${root.root}-properties.g.ts`, emitRootProperties(root));
+  fs.writeFileSync(new URL(`../src/style/${root.root}-properties.g.ts`, import.meta.url), emitRootProperties(root));
 }

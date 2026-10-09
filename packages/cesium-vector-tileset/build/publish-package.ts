@@ -7,6 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 const cwd = fileURLToPath(new URL('../', import.meta.url));
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+const { version: workspaceVersion } = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as { version: string };
+if (workspaceVersion !== version) {
+  throw new Error(`Workspace version ${workspaceVersion} must match package version ${version}`);
+}
 if (process.env.GITHUB_REF_NAME !== `v${version}`) {
   throw new Error(`Release tag must be v${version}, received ${process.env.GITHUB_REF_NAME}`);
 }

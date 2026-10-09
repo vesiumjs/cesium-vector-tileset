@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "vite --host",
     "build": "pnpm build:lib && pnpm build:demo",
-    "build:lib": "pnpm --filter cesium-vector-tileset build",
+    "build:lib": "tsdown",
     "build:demo": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
@@ -24,8 +24,12 @@
     "lint:eslint:check": "eslint .",
     "lint:tsc": "vue-tsc --build --force",
     "taze": "taze -w -r latest --include-locked --peer --exclude typescript",
-    "release": "pnpm --filter cesium-vector-tileset release",
-    "publish:ci": "pnpm --filter cesium-vector-tileset publish:ci"
+    "release": "bumpp -r",
+    "publish:ci": "tsx packages/cesium-vector-tileset/build/publish-package.ts",
+    "prepare:package": "pnpm build:lib && tsx packages/cesium-vector-tileset/build/prepare-package.ts",
+    "pack:lib": "pnpm --filter cesium-vector-tileset pack",
+    "codegen": "tsx packages/cesium-vector-tileset/build/generate-style-code.ts && tsx packages/cesium-vector-tileset/build/generate-struct-arrays.ts",
+    "generate-unicode-data": "tsx packages/cesium-vector-tileset/build/generate-unicode-data.ts"
   },
   "dependencies": {
     "cesium": "^1.146.0",
@@ -43,6 +47,7 @@
     "@types/node": "^26.6.4",
     "@vitejs/plugin-vue": "^6.0.9",
     "@vue/tsconfig": "^0.9.1",
+    "bumpp": "^12.3.0",
     "canvas": "^3.2.3",
     "eslint": "^10.12.0",
     "eslint-plugin-format": "^2.0.1",
@@ -53,6 +58,7 @@
     "rolldown": "~1.2.12",
     "taze": "^21.3.0",
     "tsdown": "^0.23.0",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.3",
     "unplugin-cesium": "^3.1.0",
     "vite": "^8.3.2",

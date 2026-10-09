@@ -22,7 +22,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     // Discover decoder dependencies before live module Workers request them.
-    entries: ['index.html', 'packages/cesium-vector-tileset/src/worker/worker-entry.ts'],
+    entries: ['index.html', 'packages/cesium-vector-tileset/src/worker/tile.worker.ts'],
   },
   worker: {
     format: 'es',
