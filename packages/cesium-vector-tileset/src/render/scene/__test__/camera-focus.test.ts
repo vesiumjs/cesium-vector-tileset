@@ -1,4 +1,4 @@
-import { Cartesian2, Cartesian3, GeographicProjection, IntersectionTests, SceneMode, WebMercatorProjection } from 'cesium';
+import { Cartesian2, Cartesian3, GeographicProjection, IntersectionTests, SceneMode, WebMercatorProjection, WebMercatorTilingScheme } from 'cesium';
 import { describe, expect, it } from 'vitest';
 /* eslint-disable antfu/no-import-node-modules-by-path -- Independent public camera oracle from the pinned MapLibre primary source. */
 import { MercatorCoordinate } from '../../../../../../node_modules/maplibre-gl/src/geo/mercator_coordinate';
@@ -97,6 +97,29 @@ describe('finite Columbus View camera focus', () => {
 });
 
 describe('finite 3D camera focus', () => {
+  it.each([263.38, 1200])('keeps ground style scale and nearby source detail across the horizon at %s metres', (height) => {
+    const options = { longitude: 121.47454, latitude: 31.24313, height, heading: 103.6 * Math.PI / 180, width: 1280, heightPixels: 720 };
+    const frame = cameraFrame(options);
+    const pyramid = { getSource: () => ({ type: 'vector', maxzoom: 18 }) };
+    const cache = new WeakMap();
+    const nadir = zoomForFrame(pyramid, frame, cache)!;
+    const location = frame.camera.positionCartographic;
+    const scheme = new WebMercatorTilingScheme();
+    const cell = scheme.positionToTileXY(location, 18)!;
+    const nearby = new OverscaledTileID(18, 0, 18, cell.x, cell.y);
+    for (const pitch of [-6.9, -1, -0.3, 0, -6.9]) {
+      frame.camera.setView({ orientation: { heading: options.heading, pitch: pitch * Math.PI / 180, roll: 0 } });
+      const current = zoomForFrame(pyramid, frame, cache)!;
+      expect(current.styleZoom, `${pitch}: pitch alone must not change physical road widths or hide the minzoom-14 building layer`).toBeCloseTo(nadir.styleZoom, 5);
+      const cold = cameraFrame({ ...options, pitch: pitch * Math.PI / 180 });
+      expect(zoomForFrame(pyramid, cold, new WeakMap())!.styleZoom).toBeCloseTo(current.styleZoom, 10);
+      const lod = sourceTileLodForFrame(pyramid, frame, cache, 0)!;
+      expect(lod.select(nearby)!.canonical.z, `${pitch}: a missing center hit must retain fine nearby source tiles`).toBeGreaterThanOrEqual(14);
+      const distant = new OverscaledTileID(18, 0, 18, cell.x + 100, cell.y);
+      expect(lod.select(distant)!.canonical.z).toBeLessThan(lod.select(nearby)!.canonical.z);
+    }
+  });
+
   it.each([31.24, -60])('uses actual Cartographic and ENU pose with the public MapLibre camera at latitude %s', (latitude) => {
     const map = officialCamera();
     for (const heading of [0, 45]) {

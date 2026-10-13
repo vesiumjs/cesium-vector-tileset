@@ -90,14 +90,14 @@ describe('source perspective LOD', () => {
     expect(sourceLodCamera(rotated, rotated.mapProjection, 1569, 906)!.variable).toBe(true);
   });
 
-  it('uses the current official sky focus cap without authorizing deeper tiles', () => {
+  it('uses the current sky source focus while retaining local styles and distance-based detail', () => {
     const frame = cameraFrame({ projection: new WebMercatorProjection(), longitude: 121.483, latitude: 31.226, height: 1800, heading: Math.PI / 4, pitch: -25 * Math.PI / 180, width: 1569, heightPixels: 906, fovY: 36.87511294314776 * Math.PI / 180 });
     const source = { type: 'vector', minzoom: 0, maxzoom: 24, tileSize: 512 };
     const pyramid = { getSource: () => source };
     const cache = new WeakMap();
     const initial = zoomForFrame(pyramid, frame, cache)!;
     frame.camera.setView({ orientation: { heading: Math.PI / 4, pitch: 5 * Math.PI / 180, roll: 0 } });
-    expect(sourceLodCamera(frame, frame.mapProjection, 1569, 906)).toBeUndefined();
+    expect(sourceLodCamera(frame, frame.mapProjection, 1569, 906)!.variable).toBe(true);
     const sky = sourceTileLodForFrame(pyramid, frame, cache, 0)!;
     const location = frame.mapProjection.ellipsoid.cartesianToCartographic(frame.camera.positionWC)!;
     const official = new MercatorTransform({ maxPitch: 180, maxZoom: 24, renderWorldCopies: true });
@@ -105,13 +105,15 @@ describe('source perspective LOD', () => {
     official.setFov(36.87511294314776);
     const expected = official.calculateCenterFromCameraLngLatAlt({ lng: location.longitude * 180 / Math.PI, lat: location.latitude * 180 / Math.PI }, location.height, frame.camera.heading * 180 / Math.PI, 90 + frame.camera.pitch * 180 / Math.PI);
     const current = zoomForFrame(pyramid, frame, cache)!;
-    expect(current.styleZoom).toBeCloseTo(expected.zoom, 10);
+    expect(current.styleZoom).toBeCloseTo(initial.styleZoom, 10);
     expect(current.zoom).toBe(Math.floor(expected.zoom));
     expect(current.zoom).not.toBe(initial.zoom);
     const cold = cameraFrame({ projection: new WebMercatorProjection(), longitude: 121.483, latitude: 31.226, height: 1800, heading: Math.PI / 4, pitch: 5 * Math.PI / 180, width: 1569, heightPixels: 906, fovY: 36.87511294314776 * Math.PI / 180 });
     expect(zoomForFrame(pyramid, cold, new WeakMap())!.styleZoom).toBeCloseTo(current.styleZoom, 10);
     const deep = new OverscaledTileID(25, 0, 25, 13722 * 2 ** 11, 6693 * 2 ** 11);
-    expect(sky.select(deep)).toEqual(deep.scaledTo(current.zoom));
+    expect(sky.select(deep)!.canonical.z).toBeGreaterThan(current.zoom);
+    const distant = new OverscaledTileID(25, 0, 25, (13722 + 500) * 2 ** 11, 6693 * 2 ** 11);
+    expect(sky.select(distant)!.canonical.z).toBeLessThan(current.zoom);
     expect(sky.allows(deep)).toBe(false);
     const rays = vi.spyOn(frame.camera, 'getPickRay');
     expect(sourceTileLodForFrame(pyramid, frame, cache, 0)).toBe(sky);

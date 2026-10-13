@@ -41,6 +41,25 @@ out vec3 v_positionEC;
 out vec3 v_normalEC;
 out vec2 v_st;
 
+// Small ground offsets produce angles near zero, where GPU transcendental
+// built-ins can lose sub-metre displacements. These fifth-order series retain
+// relative precision; their truncation error below 0.01 is below float rounding.
+float symbolSin(float value)
+{
+    float square = value * value;
+    return abs(value) < 0.01
+        ? value * (1.0 + square * (-1.0 / 6.0 + square / 120.0))
+        : sin(value);
+}
+
+float symbolTanh(float value)
+{
+    float square = value * value;
+    return abs(value) < 0.01
+        ? value * (1.0 + square * (-1.0 / 3.0 + square * 2.0 / 15.0))
+        : tanh(value);
+}
+
 // Exact WGS84 displacement of a ground point by east/south Mercator metres.
 // Difference formulas retain small corner offsets beside a 6-million-metre
 // ECEF anchor, and work with scene3DOnly without projected attributes.
@@ -52,7 +71,7 @@ vec3 symbolGroundDeltaEC(vec2 metres)
     float cosine = length(normal.xy);
     vec3 radial = vec3(normal.xy / max(cosine, 1.0e-12), 0.0);
     vec3 east = vec3(-radial.y, radial.x, 0.0);
-    float t = tanh(-metres.y / 6378137.0);
+    float t = symbolTanh(-metres.y / 6378137.0);
     float root = sqrt(max(0.0, 1.0 - t * t));
     float denominator = 1.0 + normal.z * t;
     float deltaSin = cosine * cosine * t / denominator;
@@ -71,9 +90,9 @@ vec3 symbolGroundDeltaEC(vec2 metres)
     float radius = primeVertical * newCos;
     float deltaRadius = deltaPrimeVertical * cosine + primeVertical * deltaCos;
     float longitudeDelta = metres.x / 6378137.0;
-    float halfSin = sin(longitudeDelta * 0.5);
+    float halfSin = symbolSin(longitudeDelta * 0.5);
     vec3 delta = radial * (deltaRadius - radius * 2.0 * halfSin * halfSin)
-        + east * radius * sin(longitudeDelta)
+        + east * radius * symbolSin(longitudeDelta)
         + vec3(0.0, 0.0, (1.0 - eccentricitySquared)
             * (deltaPrimeVertical * normal.z + primeVertical * deltaSin));
     vec3 delta3DEC = (czm_modelViewRelativeToEye * vec4(delta, 0.0)).xyz;

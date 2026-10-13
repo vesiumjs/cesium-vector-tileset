@@ -1,12 +1,32 @@
 import type { Camera, MapProjection } from 'cesium';
-import { Cartesian3, GeographicProjection, IntersectionTests, Ray, Transforms, WebMercatorProjection } from 'cesium';
+import { Cartesian2, Cartesian3, GeographicProjection, IntersectionTests, Ray, Transforms, WebMercatorProjection } from 'cesium';
 import { altitudeFromMercatorZ, MercatorCoordinate } from '../../geo/mercator-coordinate';
 
-export interface CameraFocus {
+export interface CameraScale {
   zoom: number;
   /** Native world distance, in the same units as clip W. */
   cameraToCenterDistance: number;
+}
+
+export interface CameraFocus extends CameraScale {
   center: { longitude: number; latitude: number; elevation: number };
+}
+
+/**
+ * A free 3D camera changes ground detail by altitude, independently of pitch.
+ * Use Cesium's metric pixel size at the nadir distance as the style reference;
+ * the real view projection still foreshortens each ground feature.
+ */
+export function globeCameraScale(camera: Pick<Camera, 'positionWC' | 'frustum'>, projection: MapProjection, width: number, height: number): CameraScale | undefined {
+  if (!(width > 0 && height > 0))
+    return undefined;
+  const location = projection.ellipsoid.cartesianToCartographic(camera.positionWC);
+  if (!location || !(location.height > 0) || Math.abs(location.latitude) >= Math.PI / 2)
+    return undefined;
+  const pixels = camera.frustum.getPixelDimensions(width, height, location.height, 1, new Cartesian2());
+  const mercatorPixelSize = pixels.x / Math.cos(location.latitude);
+  const zoom = Math.log2(2 * Math.PI * projection.ellipsoid.maximumRadius / (512 * mercatorPixelSize));
+  return Number.isFinite(zoom) ? { zoom, cameraToCenterDistance: location.height } : undefined;
 }
 
 /**
@@ -37,6 +57,12 @@ export function columbusCameraFocus(camera: Pick<Camera, 'positionWC' | 'directi
   const east = direction.y;
   const north = direction.z / (projection instanceof GeographicProjection ? cosLatitude : 1);
   const length = Math.hypot(east, north, direction.x);
+  // Projected ground has MapLibre's flat-plane horizon. The 3D caller
+  // instead classifies its actual ellipsoid ray, whose horizon varies with
+  // altitude and can be reached before this flat-plane pitch boundary.
+  const vertical = direction.x / length;
+  if (vertical * altitude < 0 && Math.abs(vertical) >= Math.cos(89.25 * Math.PI / 180))
+    return undefined;
   const focus = finitePhysicalFocus(cameraCoordinate, altitude, east, north, direction.x, fov, height);
   return focus && { zoom: focus.zoom, center: focus.center, cameraToCenterDistance: circumference * focus.normalizedDistance / length };
 }
@@ -59,14 +85,14 @@ export function globeCameraFocus(camera: Pick<Camera, 'positionWC' | 'directionW
   const north = basis[4] * direction.x + basis[5] * direction.y + basis[6] * direction.z;
   const vertical = basis[8] * direction.x + basis[9] * direction.y + basis[10] * direction.z;
   const coordinate = MercatorCoordinate.fromLngLat({ lng: location.longitude * 180 / Math.PI, lat: location.latitude * 180 / Math.PI });
-  const focus = finitePhysicalFocus(coordinate, location.height, east, north, vertical, fov, height);
-  if (!focus)
-    return undefined;
   // Cesium getPickRayPerspective at the canvas center has x=y=0: the
   // optical ray is the actual world position and forward direction. Keep
   // classification pure so basis normalization cannot resample every source.
   const ray = new Ray(position, direction);
   if (IntersectionTests.rayEllipsoid(ray, projection.ellipsoid))
+    return undefined;
+  const focus = finitePhysicalFocus(coordinate, location.height, east, north, vertical, fov, height);
+  if (!focus)
     return undefined;
   return { zoom: focus.zoom, center: focus.center, cameraToCenterDistance: focus.distance };
 }
@@ -81,8 +107,6 @@ function finitePhysicalFocus(cameraCoordinate: MercatorCoordinate, altitude: num
   const pitchRadians = pitch * Math.PI / 180;
   const bearingRadians = bearing * Math.PI / 180;
   const dz = -Math.cos(pitchRadians);
-  if (dz * altitude < 0 && Math.abs(dz) >= Math.cos(89.25 * Math.PI / 180))
-    return undefined;
   const distance = 10000;
   const elevation = altitude + distance * dz;
   let metersPerMercatorUnit = altitudeFromMercatorZ(1, cameraCoordinate.y);

@@ -2,12 +2,12 @@ import type { Camera, CullingVolume, MapProjection, Scene } from 'cesium';
 import type { OverscaledTileID } from '../../tile/tile-id';
 import type { TileCovering } from '../../tile/tile-pyramid';
 import type { VectorDrapingProvider } from '../vector/vector-tile-renderer';
-import type { CameraFocus } from './camera-focus';
+import type { CameraFocus, CameraScale } from './camera-focus';
 import type { CameraBounds } from './covering';
 import type { GlobeLike } from './globe-covering';
-import { Cartesian2, Cartesian3, Math as CesiumMath, GeographicProjection, IntersectionTests, SceneMode, WebMercatorProjection } from 'cesium';
+import { Cartesian3, Math as CesiumMath, GeographicProjection, SceneMode, WebMercatorProjection } from 'cesium';
 import { MAX_TILE_ZOOM } from '../../geo/world-bounds';
-import { columbusCameraFocus, globeCameraFocus } from './camera-focus';
+import { columbusCameraFocus, globeCameraFocus, globeCameraScale } from './camera-focus';
 import { cameraZoom, mapZoomToSourceZoom, planarCameraBounds, planarTileIDs } from './covering';
 import { sourceLodCamera, SourceTileLod } from './source-tile-lod';
 
@@ -98,6 +98,7 @@ interface CameraCache {
   sourceLodCamera: ReturnType<typeof sourceLodCamera>;
   sourceLodMeasured: boolean;
   focus?: CameraFocus;
+  groundScale?: CameraScale;
   sourceLods: WeakMap<object, { camera: CameraCache; source: CoveringSource; sourceZoom: number; minZoom: number; maxZoom: number; round: boolean; reparse: boolean; lod: SourceTileLod }>;
   zoom?: number;
   styleZoom?: number;
@@ -152,15 +153,19 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
   }
   const input = { camera, mode, projection, width, height };
   const focus = focusForCamera(camera, mode, projection, width, height);
-  // Near-horizon scale belongs to the current finite focus. Unsupported sky
-  // views retain the last surface scale, or initially sample the bottom row.
+  // Source selection uses its optical focus and coarsens distant tiles.
   const zoom = focus?.zoom ?? cameraZoom(input) ?? previous?.zoom ?? cameraZoom({ ...input, sampleY: height - 1 });
-  const styleZoom = !focus && zoom !== undefined && previous?.styleZoom !== undefined
+  // Ground styles in a free 3D view use altitude, so pitch cannot enlarge
+  // roads/labels or hide nearby minzoom layers. Projected views retain their
+  // MapLibre camera scale and perspective semantics.
+  const groundScale = mode === SceneMode.SCENE3D ? globeCameraScale(camera, projection, width, height) : undefined;
+  const referenceZoom = mode === SceneMode.SCENE3D ? groundScale?.zoom : zoom;
+  const styleZoom = (groundScale || !focus) && referenceZoom !== undefined && previous?.styleZoom !== undefined
     && previous.mode === mode && previous.projection === projection
     && previous.width === width && previous.height === height
-    && Math.abs(zoom - previous.styleZoom) < STYLE_ZOOM_TOLERANCE
+    && Math.abs(referenceZoom - previous.styleZoom) < STYLE_ZOOM_TOLERANCE
     ? previous.styleZoom
-    : zoom;
+    : referenceZoom;
   const current: CameraCache = {
     frame,
     frameNumber: frame.frameNumber,
@@ -184,6 +189,7 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
     sourceLodCamera: undefined,
     sourceLodMeasured: false,
     focus,
+    groundScale,
     sourceLods: previous?.sourceLods ?? new WeakMap(),
     zoom,
     styleZoom,
@@ -193,7 +199,9 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
 }
 
 /** Symbol perspective distance uses the same units as the Native view clip W. */
-function cameraCenterDistance(frame: RenderFrameState, camera: CameraCache): number | undefined {
+function cameraCenterDistance(camera: CameraCache): number | undefined {
+  if (camera.mode === SceneMode.SCENE3D)
+    return camera.groundScale?.cameraToCenterDistance;
   if (camera.focus)
     return camera.focus.cameraToCenterDistance;
   if (camera.mode === SceneMode.COLUMBUS_VIEW) {
@@ -213,14 +221,7 @@ function cameraCenterDistance(frame: RenderFrameState, camera: CameraCache): num
     const distance = 2 * Math.PI * camera.projection.ellipsoid.maximumRadius / (512 * 2 ** camera.zoom) * focal / length;
     return Number.isFinite(distance) && distance > 0 ? distance : undefined;
   }
-  if (camera.mode !== SceneMode.SCENE3D)
-    return undefined;
-  const ray = frame.camera.getPickRay(new Cartesian2(camera.width / 2, camera.height / 2));
-  if (!ray)
-    return undefined;
-  const intersection = IntersectionTests.rayEllipsoid(ray, camera.projection.ellipsoid);
-  const distance = intersection?.start;
-  return distance !== undefined && Number.isFinite(distance) && distance > 0 ? distance : undefined;
+  return undefined;
 }
 
 /** Measure before Cesium temporarily clips and moves its 2D viewport camera. */
@@ -236,7 +237,7 @@ export function captureCameraForFrame(frame: RenderFrameState, cache: CoveringCa
   }
   const orthographic = mode === SceneMode.SCENE2D || projectionMatrix[15] === 1;
   if (!camera.centerDistanceMeasured) {
-    camera.cameraToCenterDistance = orthographic ? undefined : cameraCenterDistance(frame, camera);
+    camera.cameraToCenterDistance = orthographic ? undefined : cameraCenterDistance(camera);
     camera.centerDistanceMeasured = true;
   }
   return Object.freeze({

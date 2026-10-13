@@ -5,7 +5,7 @@ import { Cartesian2, Cartesian3, IntersectionTests, Ray, SceneMode, WebMercatorP
 import { mercatorXfromLng, mercatorYfromLat, mercatorZfromAltitude } from '../../geo/mercator-coordinate';
 import { MAX_TILE_ZOOM } from '../../geo/world-bounds';
 import { OverscaledTileID } from '../../tile/tile-id';
-import { columbusCameraFocus } from './camera-focus';
+import { columbusCameraFocus, globeCameraFocus } from './camera-focus';
 
 interface SourceLodCamera {
   x: number;
@@ -20,7 +20,9 @@ interface SourceLodCamera {
 export function sourceLodCamera(frame: RenderFrameState, projection: MapProjection, width: number, height: number, focus?: CameraFocus | null): SourceLodCamera | undefined {
   const finiteFocus = frame.mode === SceneMode.COLUMBUS_VIEW
     ? focus === undefined ? columbusCameraFocus(frame.camera, projection, height) : focus
-    : undefined;
+    : frame.mode === SceneMode.SCENE3D
+      ? focus === undefined ? globeCameraFocus(frame.camera, projection, width, height) : focus
+      : undefined;
   const fov = (frame.camera.frustum as { fovy?: number }).fovy;
   if (fov === undefined || !(fov > 0 && fov < Math.PI))
     return undefined;
@@ -30,14 +32,23 @@ export function sourceLodCamera(frame: RenderFrameState, projection: MapProjecti
   let normal: Cartesian3;
   let finiteCenterDistance: number | undefined;
   if (frame.mode === SceneMode.SCENE3D) {
-    if (!ray)
-      return undefined;
-    const intersection = IntersectionTests.rayEllipsoid(ray, projection.ellipsoid);
-    if (!intersection)
-      return undefined;
-    center = projection.ellipsoid.cartesianToCartographic(Ray.getPoint(ray, intersection.start, new Cartesian3()));
     position = projection.ellipsoid.cartesianToCartographic(frame.camera.positionWC);
     normal = projection.ellipsoid.geodeticSurfaceNormal(frame.camera.positionWC);
+    if (finiteFocus) {
+      // The optical target can be above the ellipsoid. Keep real ground
+      // height for tile distances and the focus's own Mercator distance for
+      // its source zoom, so fine nearby tiles survive a missing center hit.
+      center = position && { ...position, height: 0 };
+      finiteCenterDistance = height / (2 * Math.tan(fov / 2) * 512 * 2 ** finiteFocus.zoom);
+    }
+    else {
+      if (!ray)
+        return undefined;
+      const intersection = IntersectionTests.rayEllipsoid(ray, projection.ellipsoid);
+      if (!intersection)
+        return undefined;
+      center = projection.ellipsoid.cartesianToCartographic(Ray.getPoint(ray, intersection.start, new Cartesian3()));
+    }
   }
   else if (frame.mode === SceneMode.COLUMBUS_VIEW) {
     const camera = frame.camera.positionWC;
