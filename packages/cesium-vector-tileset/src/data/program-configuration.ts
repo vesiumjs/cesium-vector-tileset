@@ -13,12 +13,12 @@ import type { FeatureStates } from '../source/source-state';
 import type { TypedStyleLayer } from '../style/style-layer/typed-style-layer';
 import type { CanonicalTileID } from '../tile/tile-id';
 import type { StructArray } from '../util/struct-array';
-
 import type { TransferRegistry } from '../worker/transfer-registry';
+
 import { expressions, supportsPropertyExpression, ZoomConstantExpression, ZoomDependentExpression } from '@maplibre/maplibre-gl-style-spec';
+import { Math as CesiumMath } from 'cesium';
 import { EvaluationParameters } from '../style/evaluation-parameters';
 import { PossiblyEvaluatedPropertyValue } from '../style/properties';
-import { clamp } from '../util/math';
 import { DashLayoutArray, PatternLayoutArray, StructArrayLayout1f4, StructArrayLayout2f8, StructArrayLayout4f16 } from './array-types.g';
 
 function packColor(color: Color): [number, number] {
@@ -36,7 +36,7 @@ function packColor(color: Color): [number, number] {
  * byte shifts the whole value, so a single off-range channel corrupts both.
  */
 function packUint8ToFloat(a: number, b: number): number {
-  return 256 * clamp(Math.floor(a), 0, 255) + clamp(Math.floor(b), 0, 255);
+  return 256 * CesiumMath.clamp(Math.floor(a), 0, 255) + CesiumMath.clamp(Math.floor(b), 0, 255);
 }
 
 function isColor(value: PaintValue): value is Color {
@@ -119,13 +119,13 @@ class SourceExpressionBinder implements AttributeBinder {
 
   populatePaintArray(newLength: number, feature: Feature, options: PaintOptions) {
     const start = this.paintVertexArray.length;
-    const value: PaintValue = this.expression.evaluate(new EvaluationParameters(0, options), feature, {}, options.canonical, options.availableImages, options.formattedSection);
+    const value: PaintValue = this.expression.evaluate(new EvaluationParameters(0), feature, {}, options.canonical, options.availableImages, options.formattedSection);
     this.paintVertexArray.resize(newLength);
     this._setPaintValue(start, newLength, value);
   }
 
   updatePaintArray(start: number, end: number, feature: Feature, featureState: FeatureState, options: PaintOptions) {
-    const value: PaintValue = this.expression.evaluate(new EvaluationParameters(0, options), feature, featureState, options.canonical, options.availableImages, options.formattedSection);
+    const value: PaintValue = this.expression.evaluate(new EvaluationParameters(0), feature, featureState, options.canonical, options.availableImages, options.formattedSection);
     this._setPaintValue(start, end, value);
   }
 
@@ -170,16 +170,16 @@ class CompositeExpressionBinder implements AttributeBinder {
   }
 
   populatePaintArray(newLength: number, feature: Feature, options: PaintOptions) {
-    const min: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom, options), feature, {}, options.canonical, options.availableImages, options.formattedSection);
-    const max: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom + 1, options), feature, {}, options.canonical, options.availableImages, options.formattedSection);
+    const min: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom), feature, {}, options.canonical, options.availableImages, options.formattedSection);
+    const max: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom + 1), feature, {}, options.canonical, options.availableImages, options.formattedSection);
     const start = this.paintVertexArray.length;
     this.paintVertexArray.resize(newLength);
     this._setPaintValue(start, newLength, min, max);
   }
 
   updatePaintArray(start: number, end: number, feature: Feature, featureState: FeatureState, options: PaintOptions) {
-    const min: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom, options), feature, featureState, options.canonical, options.availableImages, options.formattedSection);
-    const max: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom + 1, options), feature, featureState, options.canonical, options.availableImages, options.formattedSection);
+    const min: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom), feature, featureState, options.canonical, options.availableImages, options.formattedSection);
+    const max: PaintValue = this.expression.evaluate(new EvaluationParameters(this.zoom + 1), feature, featureState, options.canonical, options.availableImages, options.formattedSection);
     this._setPaintValue(start, end, min, max);
   }
 

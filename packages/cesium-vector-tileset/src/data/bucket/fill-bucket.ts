@@ -62,7 +62,6 @@ export class FillBucket extends FillBucketRuntime {
     const fillSortKey = layer.layout.get('fill-sort-key');
     const sortFeaturesByKey = !fillSortKey.isConstant();
     const bucketFeatures: BucketFeature[] = [];
-    const sourceFeaturesByIndex = new Map(features.map(({ index, feature }) => [index, feature]));
 
     const globalProperties = new EvaluationParameters(this.zoom);
     const needGeometry = layer._featureFilter.needGeometry;
@@ -111,8 +110,7 @@ export class FillBucket extends FillBucketRuntime {
         this.addFeature(bucketFeature, geometry, index, canonical, {});
       }
 
-      const feature = sourceFeaturesByIndex.get(index)!;
-      options.featureIndex.insert(feature, geometry, index, sourceLayerIndex, this.index);
+      options.featureIndex.insert(index, sourceLayerIndex, this.index);
     }
   }
 

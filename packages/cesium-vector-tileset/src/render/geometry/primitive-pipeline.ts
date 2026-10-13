@@ -1,4 +1,5 @@
 import type { BoundingSphere, Geometry, GeometryInstance, MapProjection, Matrix4 } from 'cesium';
+import type { LineIndexRange } from './line-geometry-upload';
 import * as Cesium from 'cesium';
 
 interface CreatedGeometry {
@@ -32,7 +33,7 @@ export interface CombinedGeometry extends Geometry {
 interface CombineResult {
   geometries?: CombinedGeometry[];
   modelMatrix: Matrix4;
-  pickOffsets: unknown;
+  pickOffsets?: LineIndexRange[];
   offsetInstanceExtend: unknown;
   boundingSpheres: Array<BoundingSphere | undefined>;
   boundingSpheresCV: Array<BoundingSphere | undefined>;

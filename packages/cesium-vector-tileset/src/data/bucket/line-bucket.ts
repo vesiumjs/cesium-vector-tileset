@@ -107,8 +107,7 @@ export class LineBucket extends LineBucketRuntime {
         this.addFeature(bucketFeature, geometry, index, canonical, {}, {});
       }
 
-      const feature = features[index].feature;
-      options.featureIndex.insert(feature, geometry, index, sourceLayerIndex, this.index);
+      options.featureIndex.insert(index, sourceLayerIndex, this.index);
     }
   }
 

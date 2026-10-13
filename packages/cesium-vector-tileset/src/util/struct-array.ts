@@ -206,14 +206,6 @@ abstract class StructArray {
   refreshViews(): void {
     throw new Error('refreshViews() must be implemented by each concrete StructArray layout');
   }
-
-  /**
-   * Replace the buffer with an empty one so typed views release the original ArrayBuffer for GC.
-   */
-  freeBufferAfterUpload(): void {
-    this.arrayBuffer = new ArrayBuffer(0);
-    this.refreshViews();
-  }
 }
 
 /**

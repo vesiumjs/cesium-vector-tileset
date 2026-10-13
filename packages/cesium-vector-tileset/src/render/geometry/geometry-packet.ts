@@ -83,8 +83,8 @@ export function* createGeometryPacket(geometries: readonly Geometry[], inputs?: 
     packet.subTasks.push({ geometry: Object.assign(new Geometry({ attributes: attributes as unknown as Geometry['attributes'] }), geometry, {
       attributes,
       indices,
-      boundingSphere: BoundingSphere.clone(geometry.boundingSphere),
-      boundingSphereCV: BoundingSphere.clone(boundingSphereCV),
+      boundingSphere: geometry.boundingSphere ? BoundingSphere.clone(geometry.boundingSphere) : undefined,
+      boundingSphereCV: boundingSphereCV ? BoundingSphere.clone(boundingSphereCV) : undefined,
     }) });
     if (input) {
       offset = aligned(offset, 8);

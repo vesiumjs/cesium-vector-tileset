@@ -24,24 +24,27 @@ export interface FeatureGeometryRange {
   end: number;
 }
 
-/** Shared tile data and paint updates; geometry and symbol builders stay in the worker. */
+/**
+ * Shared tile data and paint updates; worker builders initialize these declared
+ * fields, and TransferRegistry restores them without running a constructor.
+ */
 export class CircleBucket<Layer extends CircleStyleLayer = CircleStyleLayer> implements Bucket {
-  projectedGeometry?: ProjectedBucketGeometry;
-  index: number;
-  zoom: number;
-  overscaling: number;
-  layerIds: string[];
-  layers: Layer[];
-  stateDependentLayers: Layer[];
-  stateDependentLayerIds: string[];
+  declare projectedGeometry?: ProjectedBucketGeometry;
+  declare index: number;
+  declare zoom: number;
+  declare overscaling: number;
+  declare layerIds: string[];
+  declare layers: Layer[];
+  declare stateDependentLayers: Layer[];
+  declare stateDependentLayerIds: string[];
 
   /** One tile-local center per point, in feature / circle-sort-key order. */
-  layoutVertexArray: PosArray;
+  declare layoutVertexArray: PosArray;
   /** Point spans, with one entry per feature. */
-  geometryRanges: FeatureGeometryRange[];
+  declare geometryRanges: FeatureGeometryRange[];
 
-  hasDependencies: boolean;
-  programConfigurations: ProgramConfigurationSet<Layer>;
+  declare hasDependencies: boolean;
+  declare programConfigurations: ProgramConfigurationSet<Layer>;
 
   update(states: FeatureStates, lookup: FeatureLookup, options: PaintOptions): void {
     if (!this.stateDependentLayers.length)
@@ -55,22 +58,22 @@ export class CircleBucket<Layer extends CircleStyleLayer = CircleStyleLayer> imp
 }
 
 export class FillBucket implements Bucket {
-  projectedGeometry?: ProjectedBucketGeometry;
-  index: number;
-  zoom: number;
-  overscaling: number;
-  layers: FillStyleLayer[];
-  layerIds: string[];
-  stateDependentLayers: FillStyleLayer[];
-  stateDependentLayerIds: string[];
+  declare projectedGeometry?: ProjectedBucketGeometry;
+  declare index: number;
+  declare zoom: number;
+  declare overscaling: number;
+  declare layers: FillStyleLayer[];
+  declare layerIds: string[];
+  declare stateDependentLayers: FillStyleLayer[];
+  declare stateDependentLayerIds: string[];
 
-  layoutVertexArray: FillLayoutArray;
+  declare layoutVertexArray: FillLayoutArray;
 
-  indexArray: TriangleIndexArray;
+  declare indexArray: TriangleIndexArray;
 
-  hasDependencies: boolean;
-  programConfigurations: ProgramConfigurationSet<FillStyleLayer>;
-  segments: SegmentVector;
+  declare hasDependencies: boolean;
+  declare programConfigurations: ProgramConfigurationSet<FillStyleLayer>;
+  declare segments: SegmentVector;
 
   /**
    * One entry per polygon (or Uint16 segment chunk) added by `addFeature`:
@@ -83,7 +86,7 @@ export class FillBucket implements Bucket {
    * polygonGroupId identifies one original classified polygon, including
    * all of its segment chunks; separate components never share that ID.
    */
-  polygons: Array<{ polygonGroupId: number; featureIndex: number; vertexOffset: number; vertexLength: number; primitiveOffset: number; primitiveLength: number; holes: number[] }>;
+  declare polygons: Array<{ polygonGroupId: number; featureIndex: number; vertexOffset: number; vertexLength: number; primitiveOffset: number; primitiveLength: number; holes: number[] }>;
 
   update(states: FeatureStates, lookup: FeatureLookup, options: PaintOptions): void {
     if (!this.stateDependentLayers.length)
@@ -97,24 +100,24 @@ export class FillBucket implements Bucket {
 }
 
 export class FillExtrusionBucket implements Bucket {
-  index: number;
-  zoom: number;
-  overscaling: number;
-  layers: FillExtrusionStyleLayer[];
-  layerIds: string[];
-  stateDependentLayers: FillExtrusionStyleLayer[];
-  stateDependentLayerIds: string[];
+  declare index: number;
+  declare zoom: number;
+  declare overscaling: number;
+  declare layers: FillExtrusionStyleLayer[];
+  declare layerIds: string[];
+  declare stateDependentLayers: FillExtrusionStyleLayer[];
+  declare stateDependentLayerIds: string[];
 
-  layoutVertexArray: FillExtrusionLayoutArray;
+  declare layoutVertexArray: FillExtrusionLayoutArray;
 
   /** Layout-vertex spans covering every polygon and segment of each feature. */
-  geometryRanges: FeatureGeometryRange[];
+  declare geometryRanges: FeatureGeometryRange[];
 
-  indexArray: TriangleIndexArray;
+  declare indexArray: TriangleIndexArray;
 
-  hasDependencies: boolean;
-  programConfigurations: ProgramConfigurationSet<FillExtrusionStyleLayer>;
-  segments: SegmentVector;
+  declare hasDependencies: boolean;
+  declare programConfigurations: ProgramConfigurationSet<FillExtrusionStyleLayer>;
+  declare segments: SegmentVector;
 
   update(states: FeatureStates, lookup: FeatureLookup, options: PaintOptions): void {
     if (!this.stateDependentLayers.length)
@@ -135,18 +138,18 @@ export interface LineJoinCap {
 }
 
 export class LineBucket implements Bucket {
-  projectedGeometry?: ProjectedBucketGeometry;
-  index: number;
-  zoom: number;
-  layers: LineStyleLayer[];
-  layerIds: string[];
-  stateDependentLayers: LineStyleLayer[];
-  stateDependentLayerIds: string[];
-  linePaths: Array<{ featureIndex: number; points: Int16Array }>;
-  lineJoinCap: LineJoinCap;
-  featureLineJoinCaps: Record<number, LineJoinCap>;
-  programConfigurations: ProgramConfigurationSet<LineStyleLayer>;
-  hasDependencies: boolean;
+  declare projectedGeometry?: ProjectedBucketGeometry;
+  declare index: number;
+  declare zoom: number;
+  declare layers: LineStyleLayer[];
+  declare layerIds: string[];
+  declare stateDependentLayers: LineStyleLayer[];
+  declare stateDependentLayerIds: string[];
+  declare linePaths: Array<{ featureIndex: number; points: Int16Array }>;
+  declare lineJoinCap: LineJoinCap;
+  declare featureLineJoinCaps: Record<number, LineJoinCap>;
+  declare programConfigurations: ProgramConfigurationSet<LineStyleLayer>;
+  declare hasDependencies: boolean;
 
   update(states: FeatureStates, lookup: FeatureLookup, options: PaintOptions): void {
     if (!this.stateDependentLayers.length)
@@ -179,28 +182,27 @@ export class SymbolBuffers {
 }
 
 export class SymbolBucket implements Bucket {
-  zoom: number;
-  layers: SymbolStyleLayer[];
-  layerIds: string[];
-  stateDependentLayers: SymbolStyleLayer[];
-  stateDependentLayerIds: string[];
+  declare zoom: number;
+  declare layers: SymbolStyleLayer[];
+  declare layerIds: string[];
+  declare stateDependentLayers: SymbolStyleLayer[];
+  declare stateDependentLayerIds: string[];
 
-  index: number;
-  sdfIcons?: boolean;
-  justReloaded: boolean;
-  hasDependencies: boolean;
+  declare index: number;
+  declare sdfIcons?: boolean;
+  declare justReloaded: boolean;
+  declare hasDependencies: boolean;
 
-  textSizeData: SizeData;
-  iconSizeData: SizeData;
+  declare textSizeData: SizeData;
+  declare iconSizeData: SizeData;
 
-  glyphOffsetArray: GlyphOffsetArray;
-  lineVertexArray: SymbolLineVertexArray;
-  symbolInstances: SymbolInstanceArray;
-  tilePixelRatio: number;
+  declare glyphOffsetArray: GlyphOffsetArray;
+  declare lineVertexArray: SymbolLineVertexArray;
+  declare symbolInstances: SymbolInstanceArray;
+  declare tilePixelRatio: number;
 
-  text: SymbolBuffers;
-  icon: SymbolBuffers;
-  hasRTLText: boolean;
+  declare text: SymbolBuffers;
+  declare icon: SymbolBuffers;
 
   update(states: FeatureStates, lookup: FeatureLookup, options: PaintOptions): void {
     if (!this.stateDependentLayers.length)
@@ -210,17 +212,7 @@ export class SymbolBucket implements Bucket {
   }
 
   isEmpty(): boolean {
-    // When the bucket encounters only rtl-text but the plugin isn't loaded, no symbol instances will be created.
-    // In order for the bucket to be serialized, and not discarded as an empty bucket both checks are necessary.
-    return this.symbolInstances.length === 0 && !this.hasRTLText;
-  }
-
-  hasTextData(): boolean {
-    return this.text.segments.get().length > 0;
-  }
-
-  hasIconData(): boolean {
-    return this.icon.segments.get().length > 0;
+    return this.symbolInstances.length === 0;
   }
 }
 

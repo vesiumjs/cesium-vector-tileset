@@ -18,9 +18,8 @@ function viewByteLength(view: unknown): number {
  */
 export function geometryBytes(geometry: Pick<Geometry, 'attributes' | 'indices'>): number {
   let bytes = 0;
-  for (const name in geometry.attributes) {
-    bytes += viewByteLength(geometry.attributes[name]?.values);
-  }
+  for (const attribute of Object.values(geometry.attributes))
+    bytes += viewByteLength(attribute?.values);
   bytes += viewByteLength(geometry.indices);
   return bytes;
 }

@@ -45,7 +45,6 @@ export class CircleBucket<Layer extends CircleStyleLayer = CircleStyleLayer> ext
   populate(features: IndexedFeature[], options: PopulateParameters, canonical: CanonicalTileID): void {
     const styleLayer = getPrimaryLayer(this.layers);
     const bucketFeatures: BucketFeature[] = [];
-    const sourceFeaturesByIndex = new Map(features.map(({ index, feature }) => [index, feature]));
     const circleSortKey = styleLayer.layout.get('circle-sort-key');
     const sortFeaturesByKey = !circleSortKey.isConstant();
 
@@ -85,10 +84,9 @@ export class CircleBucket<Layer extends CircleStyleLayer = CircleStyleLayer> ext
 
     for (const bucketFeature of bucketFeatures) {
       const { geometry, index, sourceLayerIndex } = bucketFeature;
-      const feature = sourceFeaturesByIndex.get(index)!;
 
       this.addFeature(bucketFeature, geometry, index, canonical);
-      options.featureIndex.insert(feature, geometry, index, sourceLayerIndex, this.index);
+      options.featureIndex.insert(index, sourceLayerIndex, this.index);
     }
   }
 

@@ -215,7 +215,7 @@ export function* iterateExtrusionBucketPrimitives(
     const range = ranges[rangeIndex];
     rangeByVertex.fill(rangeIndex, range.start, range.end);
   }
-  const triangleValuesByRange: number[][] = ranges.map(() => []);
+  const triangleValuesByRange: number[][] = ranges.map((): number[] => []);
   const indexArray = bucket.indexArray.uint16;
   let triangleCount = 0;
   for (const segment of bucket.segments.get()) {

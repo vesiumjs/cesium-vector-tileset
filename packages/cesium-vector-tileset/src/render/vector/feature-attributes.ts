@@ -1,6 +1,7 @@
 import type { Bucket } from '../../data/bucket';
 import type { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
 import type { FeaturePaintRange, ProgramConfiguration } from '../../data/program-configuration';
+import type { StyleLayer } from '../../style/style-layer';
 import type { CircleStyleLayer } from '../../style/style-layer/circle-style-layer';
 import { Color } from 'cesium';
 import { PossiblyEvaluatedPropertyValue } from '../../style/properties';
@@ -52,10 +53,8 @@ export function circlePaintVisible(color: Color, outlineColor: Color, outlineWid
   return color.alpha > 0 || (outlineWidth > 0 && outlineColor.alpha > 0);
 }
 
-export function paintRevision(bucket: Bucket): number {
-  let revision = (bucket as unknown as {
-    programConfigurations?: { paintRevision?: number };
-  }).programConfigurations?.paintRevision ?? 0;
+export function paintRevision(bucket: Pick<Bucket, 'layers'> & { programConfigurations?: { paintRevision: number } }): number {
+  let revision = bucket.programConfigurations?.paintRevision ?? 0;
   for (const layer of bucket.layers)
     revision += layer.paintRevision;
   return revision;
@@ -73,9 +72,9 @@ interface CachedFloat32View {
 }
 
 const float32Views = new WeakMap<object, CachedFloat32View>();
-const layerById = new WeakMap<object, Map<string, any>>();
+const layerById = new WeakMap<object, Map<string, { id: string }>>();
 
-export function findRange(bucket: FillBucket | LineBucket | CircleBucket<any> | FillExtrusionBucket, featureIndex: number): FeaturePaintRange {
+export function findRange(bucket: FillBucket | LineBucket | CircleBucket | FillExtrusionBucket, featureIndex: number): FeaturePaintRange {
   const range = bucket.programConfigurations.getFeatureRange(featureIndex);
   if (!range) {
     throw new Error(`No paint range found for feature ${featureIndex}`);
@@ -205,7 +204,7 @@ function readNumber(config: ProgramConfiguration, property: string, range: Featu
  * The evaluated value of a constant paint property, unwrapping the
  * PossiblyEvaluatedPropertyValue wrapper the style system produces.
  */
-export function constantValue(layer: { paint: { get: (property: string) => unknown } }, property: string): unknown {
+export function constantValue(layer: { paint: Pick<StyleLayer['paint'], 'get'> }, property: string): unknown {
   const value = layer.paint.get(property);
   if (value instanceof PossiblyEvaluatedPropertyValue) {
     return value.isConstant() ? value.constantOr(undefined) : undefined;
@@ -213,7 +212,7 @@ export function constantValue(layer: { paint: { get: (property: string) => unkno
   return value;
 }
 
-function colorFor(config: ProgramConfiguration, layer: any, property: string, range: FeaturePaintRange, zoom: number): Color {
+function colorFor(config: ProgramConfiguration, layer: StyleLayer, property: string, range: FeaturePaintRange, zoom: number): Color {
   const fromAttribute = readColor(config, property, range, zoom);
   if (fromAttribute) {
     return fromAttribute;
@@ -225,7 +224,7 @@ function colorFor(config: ProgramConfiguration, layer: any, property: string, ra
   return straightAlphaColor(value.r, value.g, value.b, value.a);
 }
 
-function numberFor(config: ProgramConfiguration, layer: any, property: string, range: FeaturePaintRange, zoom: number): number {
+function numberFor(config: ProgramConfiguration, layer: StyleLayer, property: string, range: FeaturePaintRange, zoom: number): number {
   const fromAttribute = readNumber(config, property, range, zoom);
   if (fromAttribute !== null) {
     return fromAttribute;
@@ -234,8 +233,8 @@ function numberFor(config: ProgramConfiguration, layer: any, property: string, r
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-export function layerFor(bucket: { layers: Array<{ id: string }> }, layerId?: string): any {
-  if (bucket.layers.length === 1) {
+export function layerFor<T extends { layers: Array<{ id: string }> }>(bucket: T, layerId?: string): T['layers'][number] {
+  if (bucket.layers.length === 1 && (!layerId || bucket.layers[0].id === layerId)) {
     return bucket.layers[0];
   }
   let layers = layerById.get(bucket);
@@ -250,10 +249,10 @@ export function layerFor(bucket: { layers: Array<{ id: string }> }, layerId?: st
   if (!layer) {
     throw new Error(`No style layer ${layerId ?? '<first>'} found in bucket`);
   }
-  return layer;
+  return layer as T['layers'][number];
 }
 
-function layerOpacity(layer: any, property: string): number {
+function layerOpacity(layer: StyleLayer, property: string): number {
   const value = constantValue(layer, property);
   return typeof value === 'number' && Number.isFinite(value) ? value : 1;
 }
@@ -348,7 +347,7 @@ export function extrusionStyleForFeature(bucket: FillExtrusionBucket, featureInd
 }
 
 export function circleStyleForFeature(bucket: CircleBucket<CircleStyleLayer>, featureIndex: number, layerId?: string, zoom = bucket.zoom): CircleFeatureStyle {
-  const layer = layerFor(bucket, layerId) as CircleStyleLayer;
+  const layer = layerFor(bucket, layerId);
   const range = findRange(bucket, featureIndex);
   const config = bucket.programConfigurations.get(layer.id);
   const color = colorFor(config, layer, 'circle-color', range, zoom);

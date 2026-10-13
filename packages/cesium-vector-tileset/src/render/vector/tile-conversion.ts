@@ -3,11 +3,10 @@ import type { Bucket } from '../../data/bucket';
 import type { CirclePrimitiveGeometry, FillPrimitiveGeometry, LinePrimitiveGeometry, ProjectedGeometryList } from '../../data/projected-geometry';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
-import { BufferPointMaterial, BufferPolygonMaterial, Cartesian3, Color } from 'cesium';
+import { BufferPointMaterial, BufferPolygonMaterial, Cartesian3, Color, Ellipsoid } from 'cesium';
 import { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
 import { projectCircleGeometry, projectFillGeometry, projectLineGeometry } from '../../data/projected-geometry-transfer';
 import { surfaceGranularity } from '../geometry/surface-subdivision';
-import { WGS84_A, WGS84_F } from '../geometry/tile-to-ecef';
 import { RASTER_SURFACE_OFFSET_M } from '../raster/raster-geometry';
 import { MORPHING, SCENE3D } from '../scene/scene-mode';
 import {
@@ -87,21 +86,17 @@ function* offsetRadialPositions(positions: Float64Array, meters: number, radialO
     return cached;
   }
   const shifted = new Float64Array(positions.length);
-  // Closed-form ellipsoid normal: proportional to (x/a², y/a², z/b²).
-  // Cesium's geodeticSurfaceNormal iterates to the same direction; the
-  // iteration is pure overhead for a ~1m layer offset, and this runs once
-  // per (layer, primitive) on the publish hot path.
-  const a2 = WGS84_A * WGS84_A;
-  const e2 = WGS84_F * (2 - WGS84_F);
-  const b2 = a2 * (1 - e2);
+  // Each resumable feature owns its scratch values across budget yields.
+  const position = new Cartesian3();
+  const normal = new Cartesian3();
   for (let i = 0; i < shifted.length; i += 3) {
-    const nx = positions[i] / a2;
-    const ny = positions[i + 1] / a2;
-    const nz = positions[i + 2] / b2;
-    const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
-    shifted[i] = positions[i] + (nx / length) * meters;
-    shifted[i + 1] = positions[i + 1] + (ny / length) * meters;
-    shifted[i + 2] = positions[i + 2] + (nz / length) * meters;
+    position.x = positions[i];
+    position.y = positions[i + 1];
+    position.z = positions[i + 2];
+    Ellipsoid.WGS84.geodeticSurfaceNormal(position, normal);
+    shifted[i] = position.x + normal.x * meters;
+    shifted[i + 1] = position.y + normal.y * meters;
+    shifted[i + 2] = position.z + normal.z * meters;
     if ((i / 3 + 1) % 32 === 0 && i + 3 < shifted.length)
       yield;
   }
@@ -123,18 +118,9 @@ function radialOffsetPoint(position: Cartesian3, meters: number): Cartesian3 {
   if (meters === 0) {
     return position;
   }
-  const a2 = WGS84_A * WGS84_A;
-  const e2 = WGS84_F * (2 - WGS84_F);
-  const b2 = a2 * (1 - e2);
-  const nx = position.x / a2;
-  const ny = position.y / a2;
-  const nz = position.z / b2;
-  const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
-  return new Cartesian3(
-    position.x + (nx / length) * meters,
-    position.y + (ny / length) * meters,
-    position.z + (nz / length) * meters,
-  );
+  const normal = Ellipsoid.WGS84.geodeticSurfaceNormal(position, new Cartesian3());
+  Cartesian3.multiplyByScalar(normal, meters, normal);
+  return Cartesian3.add(position, normal, normal);
 }
 
 function toColor(r: number, g: number, b: number, a: number): Color {
@@ -221,22 +207,21 @@ export function beginTileConversion(
     if (renderLayerIds.length === 0) {
       continue;
     }
-    if (bucket instanceof FillBucket
+    if (!(bucket instanceof FillBucket
       || bucket instanceof LineBucket
       || bucket instanceof CircleBucket
-      || bucket instanceof FillExtrusionBucket) {
-      result.layerIds.push(...renderLayerIds);
+      || bucket instanceof FillExtrusionBucket)) {
+      continue;
     }
-    const branch: ConvertBranch | undefined = bucket instanceof FillBucket
+    result.layerIds.push(...renderLayerIds);
+    // Buildings use the same Native extrusion track in every scene mode.
+    if (bucket instanceof FillExtrusionBucket)
+      continue;
+    const branch: ConvertBranch = bucket instanceof FillBucket
       ? 'fill'
       : bucket instanceof LineBucket
         ? 'line'
-        : bucket instanceof CircleBucket
-          ? 'circle'
-          : undefined;
-    // Buildings use the same Native extrusion track in every scene mode.
-    if (branch === undefined)
-      continue;
+        : 'circle';
     // Fills and lines share the worker mesh when both modes choose the same
     // subdivision. Coarser globe meshes still need their planar version.
     const sameSurfaceMesh = (branch === 'fill' || branch === 'line') && mode !== undefined

@@ -3,7 +3,7 @@ import type { WorkerTile } from './worker-tile';
 
 export interface ParsingState {
   cacheControl?: ExpiryData;
-  resourceTiming?: any;
+  resourceTiming?: { resourceTiming?: PerformanceEntryList };
 }
 
 export class WorkerTileState {

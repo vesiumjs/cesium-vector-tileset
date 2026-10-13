@@ -23,8 +23,6 @@ export class SegmentVector {
   static MAX_VERTEX_ARRAY_LENGTH: number;
   segments: Segment[];
 
-  private _forceNewSegmentOnNextPrepare: boolean = false;
-
   constructor(segments: Segment[] = []) {
     this.segments = segments;
   }
@@ -45,7 +43,7 @@ export class SegmentVector {
       warnOnce(`Max vertices per segment is ${SegmentVector.MAX_VERTEX_ARRAY_LENGTH}: bucket requested ${numVertices}. Consider using the \`fillLargeMeshArrays\` function if you require meshes with more than ${SegmentVector.MAX_VERTEX_ARRAY_LENGTH} vertices.`);
     }
 
-    if (this._forceNewSegmentOnNextPrepare || !lastSegment || lastSegment.vertexLength + numVertices > SegmentVector.MAX_VERTEX_ARRAY_LENGTH || lastSegment.sortKey !== sortKey) {
+    if (!lastSegment || lastSegment.vertexLength + numVertices > SegmentVector.MAX_VERTEX_ARRAY_LENGTH || lastSegment.sortKey !== sortKey) {
       return this.createNewSegment(layoutVertexArray, indexArray, sortKey);
     }
     else {
@@ -72,9 +70,6 @@ export class SegmentVector {
       segment.sortKey = sortKey;
     }
 
-    // If this was set, we have no need to create a new segment on next prepareSegment call,
-    // since this function already created a new, empty segment.
-    this._forceNewSegmentOnNextPrepare = false;
     this.segments.push(segment);
     return segment;
   }
@@ -90,31 +85,8 @@ export class SegmentVector {
     return this.prepareSegment(0, layoutVertexArray, indexArray, sortKey);
   }
 
-  /**
-   * Causes the next call to {@link prepareSegment} to always return a new segment,
-   * not reusing the current segment even if the new geometry would fit it.
-   */
-  forceNewSegmentOnNextPrepare(): void {
-    this._forceNewSegmentOnNextPrepare = true;
-  }
-
   get(): Segment[] {
     return this.segments;
-  }
-
-  static simpleSegment(
-    vertexOffset: number,
-    primitiveOffset: number,
-    vertexLength: number,
-    primitiveLength: number,
-  ): SegmentVector {
-    return new SegmentVector([{
-      vertexOffset,
-      primitiveOffset,
-      vertexLength,
-      primitiveLength,
-      sortKey: 0,
-    }]);
   }
 }
 

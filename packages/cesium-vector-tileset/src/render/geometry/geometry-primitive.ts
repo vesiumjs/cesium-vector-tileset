@@ -1,4 +1,4 @@
-import type { Appearance, MapProjection, SceneMode } from 'cesium';
+import type { Appearance, Cartesian4, MapProjection, SceneMode } from 'cesium';
 import type { Budget } from '../scene/frame-budget';
 import type { ExtrusionAppearance } from './extrusion-appearance';
 import type { GeometryPacket } from './geometry-packet';
@@ -27,6 +27,68 @@ interface GeometryFrame {
   afterRender?: Array<() => boolean>;
   commandList?: Array<{ boundingVolume?: BoundingSphere }>;
 }
+
+/** Native batch storage shared by the physical primitive and family replays. */
+export interface GeometryBatchTable {
+  readonly attributes: Array<{ functionName: string }>;
+  readonly numberOfInstances: number;
+  _batchValues: Uint8Array | Float32Array;
+  _batchValuesDirty: boolean;
+  setBatchedAttribute: (instance: number, attribute: number, value: number | Cartesian4) => void;
+  getUniformMapCallback: () => (uniforms: Record<string, () => unknown>) => Record<string, () => unknown>;
+  update: (frameState: unknown) => void;
+  destroy: () => void;
+}
+
+interface NativeBuffer {
+  readonly sizeInBytes: number;
+}
+
+interface NativeVertexArray {
+  readonly numberOfAttributes: number;
+  readonly indexBuffer?: NativeBuffer;
+  getAttribute: (index: number) => { vertexBuffer?: NativeBuffer };
+}
+
+/**
+ * Cesium's assembly contract, owned here by the staged Primitive integration.
+ * These fields exist in Native but are omitted from its public declarations.
+ */
+declare class _NativePrimitive extends Primitive {
+  _state: number;
+  _ready: boolean;
+  _batchTable?: GeometryBatchTable;
+  _geometries?: CombinedGeometry[];
+  _attributeLocations: Record<string, number>;
+  _pickOffsets?: LineIndexRange[];
+  _instanceIds: Array<{ featureIndex?: number }>;
+  _numberOfInstances: number;
+  _va: NativeVertexArray[];
+  _primitiveType: number;
+  _boundingSpheres: BoundingSphere[];
+  _boundingSphereWC: BoundingSphere[];
+  _boundingSphereCV: BoundingSphere[];
+  _boundingSphere2D: BoundingSphere[];
+  _boundingSphereMorph: BoundingSphere[];
+  _offsetInstanceExtend: unknown;
+  _instanceBoundingSpheres: Array<BoundingSphere | undefined>;
+  _instanceBoundingSpheresCV: Array<BoundingSphere | undefined>;
+  _recomputeBoundingSpheres: boolean;
+  _createPickOffsets: boolean;
+  _createGeometryResults?: unknown;
+  _error?: unknown;
+
+  update(frameState?: GeometryFrame): void;
+
+  static _updateBoundingVolumes(primitive: Primitive, frameState: GeometryFrame, modelMatrix: Matrix4, force: boolean): void;
+}
+
+/** Native releases construction instances after upload and again at destruction. */
+export type NativePrimitiveRuntime = Omit<_NativePrimitive, 'geometryInstances'> & {
+  geometryInstances: Primitive['geometryInstances'] | undefined;
+};
+
+const RuntimePrimitive = Primitive as typeof _NativePrimitive;
 
 export type GeometryAppearanceForMode = (appearance: Appearance, mode: SceneMode) => Appearance;
 
@@ -61,7 +123,7 @@ export function hasRunnableGeometryUpdate(primitive: Primitive): boolean {
     return false;
   if (primitive instanceof GeometryPrimitive)
     return primitive.hasRunnableUpdate;
-  const state = (primitive as Primitive & { _state: number })._state;
+  const state = (primitive as NativePrimitiveRuntime)._state;
   return state !== primitiveState.CREATING && state !== primitiveState.COMBINING;
 }
 
@@ -91,7 +153,7 @@ function createChunk(geometries: Geometry[], start: number, layout: GeometryLayo
  * Planar line neighbours are projected only when the scene is available.
  * Native Primitive still owns batch tables, drawing, picking and destruction.
  */
-export class GeometryPrimitive extends Primitive {
+export class GeometryPrimitive extends RuntimePrimitive {
   private _started = false;
 
   private _preparation?: Generator<void>;
@@ -179,9 +241,9 @@ export class GeometryPrimitive extends Primitive {
   get hasRunnableResourceUpload(): boolean {
     if (this.isDestroyed() || this.ready || this._layout !== 'line' || this._lineResourcesComplete)
       return false;
-    const state = (this as unknown as { _state: number })._state;
+    const state = this._state;
     return state !== primitiveState.FAILED
-      && !!(this as GeometryPrimitive & { _batchTable?: object })._batchTable
+      && !!this._batchTable
       && (state === primitiveState.COMBINED || this._lineUploadPending);
   }
 
@@ -189,9 +251,8 @@ export class GeometryPrimitive extends Primitive {
    * @internal
    */
   private get _linePresentationNeeded(): boolean {
-    const native = this as unknown as { _geometries?: Geometry[] };
     return this._lineResourcesComplete || (!!this._lineUpload
-      && (this._lineUploadAdopted || this._lineUpload.vertexArrays.length === native._geometries?.length)
+      && (this._lineUploadAdopted || this._lineUpload.vertexArrays.length === this._geometries?.length)
       && this._lineUpload.counts.some((count, index) => count > (this._lineDrawCounts[index] ?? 0)));
   }
 
@@ -234,7 +295,7 @@ export class GeometryPrimitive extends Primitive {
   /** CPU continuation admitted with paint by an earlier real render. */
   get hasRunnableIdlePreparation(): boolean {
     if (this.ready || this.isDestroyed()
-      || (this as unknown as { _state: number })._state === primitiveState.FAILED) {
+      || this._state === primitiveState.FAILED) {
       return false;
     }
     if (this._preparation) {
@@ -254,14 +315,14 @@ export class GeometryPrimitive extends Primitive {
       return this._linePresentationNeeded;
     if (this._lineUploadPending)
       return true;
-    const state = (this as unknown as { _state: number })._state;
+    const state = this._state;
     if (state === primitiveState.FAILED)
       return true;
     if (this._preparation || this._combinedResult)
       return false;
     if (!this._started)
       return true;
-    if (!(this as GeometryPrimitive & { _batchTable?: object })._batchTable)
+    if (!this._batchTable)
       return true;
     return state !== primitiveState.CREATING && state !== primitiveState.COMBINING;
   }
@@ -300,27 +361,28 @@ export class GeometryPrimitive extends Primitive {
       return true;
     // Solid preparation yields before Native gets its first update. Its
     // batch table still needs that frame while custom combine runs remotely.
-    if (!(this as GeometryPrimitive & { _batchTable?: object })._batchTable)
+    if (!this._batchTable)
       return true;
-    const state = (this as unknown as { _state: number })._state;
+    const state = this._state;
     return state !== primitiveState.CREATING && state !== primitiveState.COMBINING;
   }
 
   // Native's accessor works as soon as its batch table exists, before ready.
   // Before the first update, write the same mutable construction attributes.
   getGeometryInstanceAttributes(id: unknown): ReturnType<Primitive['getGeometryInstanceAttributes']> {
-    if ((this as GeometryPrimitive & { _batchTable?: object })._batchTable) {
+    const native = this as NativePrimitiveRuntime;
+    if (this._batchTable) {
       this._inputInstances = undefined;
       this._inputAttributeCache = undefined;
       return super.getGeometryInstanceAttributes(id);
     }
-    if (id === undefined || id === null || !this.geometryInstances)
+    if (id === undefined || id === null || !native.geometryInstances)
       return super.getGeometryInstanceAttributes(id);
     const cached = this._inputAttributeCache?.get(id);
     if (cached)
       return cached;
     if (!this._inputInstances) {
-      const instances = this.geometryInstances;
+      const instances = native.geometryInstances;
       this._inputInstances = new Map((Array.isArray(instances) ? instances : [instances]).map(instance => [instance.id, instance]));
     }
     const instance = this._inputInstances.get(id);
@@ -341,13 +403,16 @@ export class GeometryPrimitive extends Primitive {
   // Cesium's declaration omits the runtime frame parameter entirely. The
   // optional annotation keeps this override assignable to its Primitive type.
   update(frameState?: GeometryFrame): void {
-    if ((!this.geometryInstances && !this._started)
-      || (Array.isArray(this.geometryInstances) && this.geometryInstances.length === 0)
+    if (!frameState)
+      throw new TypeError('Geometry update requires a Native frame state');
+    const native = this as NativePrimitiveRuntime;
+    if ((!native.geometryInstances && !this._started)
+      || (Array.isArray(native.geometryInstances) && native.geometryInstances.length === 0)
       || (frameState?.passes && !frameState.passes.render && !frameState.passes.pick)) {
-      Reflect.apply(Primitive.prototype.update, this, [frameState]);
+      super.update(frameState);
       return;
     }
-    const nativeState = (this as unknown as { _state: number })._state;
+    const nativeState = this._state;
     const rendering = !frameState?.passes || (frameState.passes.render && !frameState.passes.pick);
     const resourceAdmission = geometryResourceAdmissions.get(frameState);
     if (resourceAdmission)
@@ -356,7 +421,7 @@ export class GeometryPrimitive extends Primitive {
       this._lineFailurePending = false;
       frameState.afterRender?.push(() => {
         if (!this.isDestroyed())
-          Object.assign(this, { _ready: true });
+          this._ready = true;
         return true;
       });
     }
@@ -364,7 +429,7 @@ export class GeometryPrimitive extends Primitive {
     // dash owners can skip Native without hiding a visible replay layer.
     if (this.ready && nativeState === primitiveState.COMPLETE && drawBatchForOwner(this)?.kind === 'dash') {
       const paint = linePaintForOwner(this);
-      const batchTable = (this as GeometryPrimitive & { _batchTable?: { _batchValuesDirty: boolean } })._batchTable;
+      const batchTable = this._batchTable;
       if (paint && (paint.width <= 0 || paint.color.alpha <= 0) && !batchTable?._batchValuesDirty)
         return;
     }
@@ -375,6 +440,8 @@ export class GeometryPrimitive extends Primitive {
     if (cold && !this._lineUploadPending && (!budget || !this.hasRunnableUpdate))
       return;
     if (nativeState !== primitiveState.FAILED && (!this._started || this._combinedResult || this._preparation)) {
+      if (!budget)
+        return;
       this._preparation ??= this._combinedResult ? this._prepareCombined(frameState) : this._prepare(frameState);
       this.advancePreparation(frameState, budget);
       if (this._preparation || budget.exhausted)
@@ -382,25 +449,24 @@ export class GeometryPrimitive extends Primitive {
       // Native mesh cloning and its batch-table creation retain separate
       // admissions; a line's already-budgeted encoding uses the same path.
       if ((this._layout === 'native' || this._layout === 'extrusion') && nativeState !== primitiveState.COMBINING
-        && (this as unknown as { _state: number })._state === primitiveState.COMBINING) {
+        && this._state === primitiveState.COMBINING) {
         return;
       }
     }
-    const native = this as unknown as { _state: number; _geometries: Geometry[]; _attributeLocations: Record<string, number> };
-    if (this._layout === 'line' && (native._state === primitiveState.COMBINED || this._lineUploadPending)) {
+    if (this._layout === 'line' && (this._state === primitiveState.COMBINED || this._lineUploadPending)) {
       try {
         if (rendering)
           this._lineResourceEnvironment = { context: frameState.context, mode: frameState.mode, mapProjection: frameState.mapProjection, scene3DOnly: frameState.scene3DOnly };
-        if (!(this as GeometryPrimitive & { _batchTable?: object })._batchTable) {
+        if (!this._batchTable) {
           if (!budget || (frameState.passes && (!frameState.passes.render || frameState.passes.pick)))
             return;
           // Native initializes its own table; COMBINING prevents an atomic VA upload.
-          native._state = primitiveState.COMBINING;
+          this._state = primitiveState.COMBINING;
           try {
-            Reflect.apply(Primitive.prototype.update, this, [frameState]);
+            super.update(frameState);
           }
           finally {
-            native._state = primitiveState.COMBINED;
+            this._state = primitiveState.COMBINED;
           }
           if (frameState.frameNumber !== undefined)
             this._lineUploadFrame = frameState.frameNumber;
@@ -437,7 +503,7 @@ export class GeometryPrimitive extends Primitive {
       if (source)
         this.appearance = this._appearanceForMode(source, frameState.mode);
     }
-    Reflect.apply(Primitive.prototype.update, this, [frameState]);
+    super.update(frameState);
     if (this._lineUpload && commands) {
       for (let index = firstCommand; index < commands.length; index++) {
         const command = commands[index] as { count: number; vertexArray: unknown };
@@ -450,12 +516,13 @@ export class GeometryPrimitive extends Primitive {
       this._lineDrawCounts = [...this._lineUpload.counts];
       if (this._lineResourcesComplete && this._lineUploadPending) {
         this._lineUploadPending = false;
-        Object.assign(this, { _geometries: undefined, geometryInstances: undefined });
+        this._geometries = undefined;
+        native.geometryInstances = undefined;
         frameState.afterRender?.push(() => {
           if (!this.isDestroyed()) {
             this._lineUploadTurn = undefined;
             this._lineResourceEnvironment = undefined;
-            Object.assign(this, { _ready: true });
+            this._ready = true;
           }
           return true;
         });
@@ -487,7 +554,7 @@ export class GeometryPrimitive extends Primitive {
         commands[index] = replay.update(command, sphere);
       }
     }
-    if ((this as GeometryPrimitive & { _batchTable?: object })._batchTable) {
+    if (this._batchTable) {
       this._inputInstances = undefined;
       this._inputAttributeCache = undefined;
     }
@@ -497,22 +564,19 @@ export class GeometryPrimitive extends Primitive {
    * @internal
    */
   private* _uploadLine(frameState: GeometryFrame): Generator<void> {
-    const native = this as unknown as GeometryPrimitive & {
-      _geometries: CombinedGeometry[];
-      _attributeLocations: Record<string, number>;
-      _pickOffsets: LineIndexRange[];
-      _instanceIds: Array<{ featureIndex?: number }>;
-      _va: unknown[];
-    };
-    const geometries = native._geometries;
-    this._linePositions = new LinePositionTexture(this._preparedLinePositions, this._sourceAppearance, frameState.context);
+    const geometries = this._geometries;
+    const prepared = this._preparedLinePositions;
+    const pickOffsets = this._pickOffsets;
+    if (!geometries || !prepared || !pickOffsets)
+      throw new TypeError('Line upload requires combined geometry, positions and pick offsets');
+    const positions = this._linePositions = new LinePositionTexture(prepared, this._sourceAppearance, frameState.context);
     this._preparedLinePositions = undefined;
-    yield* this._linePositions.upload();
+    yield* positions.upload();
     const ranges: LineIndexRange[] = [];
-    for (const [index, range] of native._pickOffsets.entries()) {
-      const feature = native._instanceIds[index]?.featureIndex;
+    for (const [index, range] of pickOffsets.entries()) {
+      const feature = this._instanceIds[index]?.featureIndex;
       const previous = ranges.at(-1);
-      if (feature !== undefined && feature === native._instanceIds[index - 1]?.featureIndex
+      if (feature !== undefined && feature === this._instanceIds[index - 1]?.featureIndex
         && previous?.index === range.index && previous.offset + previous.count === range.offset) {
         previous.count += range.count;
       }
@@ -520,7 +584,7 @@ export class GeometryPrimitive extends Primitive {
         ranges.push({ ...range });
       }
     }
-    const upload = this._lineUpload = new LineGeometryUpload(geometries, native._attributeLocations, ranges, frameState.context);
+    const upload = this._lineUpload = new LineGeometryUpload(geometries, this._attributeLocations, ranges, frameState.context);
     while (!upload.complete) {
       upload.advance();
       if (!upload.complete)
@@ -533,34 +597,42 @@ export class GeometryPrimitive extends Primitive {
    */
   private _adoptLineUpload(frameState: GeometryFrame): void {
     const upload = this._lineUpload;
-    const geometries = (this as unknown as { _geometries?: CombinedGeometry[] })._geometries;
+    const geometries = this._geometries;
     if (!upload || !geometries || this._lineUploadAdopted || upload.vertexArrays.length !== geometries.length)
       return;
-    this.appearance = this._linePositions.appearance;
+    const positions = this._linePositions;
+    const primitiveType = geometries[0].primitiveType;
+    if (!positions || primitiveType === undefined)
+      throw new TypeError('Line upload adoption requires its position texture and primitive type');
+    this.appearance = positions.appearance;
     // Line instances have no Native offset/distance-display attributes.
     // Own only Native's VA completion contract; its tables, shaders,
     // command creation, projection, picking and destruction stay Native.
-    Object.assign(this, {
-      _va: upload.vertexArrays,
-      _primitiveType: geometries[0].primitiveType,
-      _boundingSpheres: geometries.map(geometry => BoundingSphere.clone(geometry.boundingSphere)),
-      _boundingSphereWC: geometries.map(() => new BoundingSphere()),
-      _boundingSphereCV: frameState.scene3DOnly
-        ? []
-        : geometries.map((geometry) => {
-            const sphere = BoundingSphere.clone(geometry.boundingSphereCV);
-            const { x, y, z } = sphere.center;
-            sphere.center.x = z;
-            sphere.center.y = x;
-            sphere.center.z = y;
-            return sphere;
-          }),
-      _boundingSphere2D: frameState.scene3DOnly ? [] : geometries.map(() => new BoundingSphere()),
-      _boundingSphereMorph: frameState.scene3DOnly ? [] : geometries.map(() => new BoundingSphere()),
-      _state: primitiveState.COMPLETE,
+    this._va = upload.vertexArrays;
+    this._primitiveType = primitiveType;
+    this._boundingSpheres = geometries.map((geometry) => {
+      if (!geometry.boundingSphere)
+        throw new TypeError('Combined line geometry requires a spatial bounding sphere');
+      return BoundingSphere.clone(geometry.boundingSphere);
     });
+    this._boundingSphereWC = geometries.map(() => new BoundingSphere());
+    this._boundingSphereCV = frameState.scene3DOnly
+      ? []
+      : geometries.map((geometry) => {
+          if (!geometry.boundingSphereCV)
+            throw new TypeError('Projected line geometry requires a planar bounding sphere');
+          const sphere = BoundingSphere.clone(geometry.boundingSphereCV);
+          const { x, y, z } = sphere.center;
+          sphere.center.x = z;
+          sphere.center.y = x;
+          sphere.center.z = y;
+          return sphere;
+        });
+    this._boundingSphere2D = frameState.scene3DOnly ? [] : geometries.map(() => new BoundingSphere());
+    this._boundingSphereMorph = frameState.scene3DOnly ? [] : geometries.map(() => new BoundingSphere());
+    this._state = primitiveState.COMPLETE;
     // Force Native's first WC/2D/morph transformation even for identity.
-    Reflect.apply((Primitive as unknown as { _updateBoundingVolumes: (...args: unknown[]) => void })._updateBoundingVolumes, Primitive, [this, frameState, this.modelMatrix, true]);
+    RuntimePrimitive._updateBoundingVolumes(this, frameState, this.modelMatrix, true);
     this._lineUploadAdopted = true;
   }
 
@@ -578,7 +650,9 @@ export class GeometryPrimitive extends Primitive {
       this._fail(frameState, owner.error);
       return;
     }
-    const instances = this.geometryInstances;
+    const instances = (this as NativePrimitiveRuntime).geometryInstances;
+    if (!instances)
+      throw new TypeError('Geometry preparation requires construction instances');
     const source = Array.isArray(instances) ? instances : [instances];
     let task: Promise<GeometryPrepareResult> | undefined;
     try {
@@ -602,7 +676,7 @@ export class GeometryPrimitive extends Primitive {
         vertexCacheOptimize: this.vertexCacheOptimize,
         compressVertices: this.compressVertices,
         modelMatrix: Matrix4.clone(this.modelMatrix),
-        createPickOffsets: this._layout === 'line' || (this as Primitive & { _createPickOffsets?: boolean })._createPickOffsets,
+        createPickOffsets: this._layout === 'line' || this._createPickOffsets,
       }, transferableObjects);
       const geometries = source.map(instance => instance.geometry);
       const chunks: Array<ReturnType<typeof createChunk>> = [];
@@ -629,11 +703,19 @@ export class GeometryPrimitive extends Primitive {
       const packets: GeometryPacket[] = [];
       for (const chunk of chunks)
         packets.push(yield* createGeometryPacket(chunk.geometries, this._layout === 'line' ? lineInputs : undefined));
+      const inputs: GeometryPrepareRequest['lineInputs'] = this._layout === 'line' ? [] : undefined;
+      if (inputs) {
+        for (const packet of packets) {
+          if (!packet.lineInputs)
+            throw new TypeError('Line geometry packets require source coordinates');
+          inputs.push(...packet.lineInputs);
+        }
+      }
       const request: GeometryPrepareRequest = {
         parameters,
         geometries: packets.flatMap(packet => packet.subTasks.map(task => task.geometry)),
         layout: this._layout,
-        lineInputs: this._layout === 'line' ? packets.flatMap(packet => packet.lineInputs) : undefined,
+        lineInputs: inputs,
         scene3DOnly: frameState.scene3DOnly,
         maximumTextureSize: geometryContextLimits.maximumTextureSize,
       };
@@ -647,11 +729,9 @@ export class GeometryPrimitive extends Primitive {
         task = owner.queue.schedule(request, transferableObjects, () => this.isDestroyed());
       }
       this._waitingForSlot = undefined;
-      Object.assign(this, {
-        _numberOfInstances: source.length,
-        _instanceIds: source.map(instance => instance.id),
-        _state: primitiveState.COMBINING,
-      });
+      this._numberOfInstances = source.length;
+      this._instanceIds = source.map(instance => instance.id);
+      this._state = primitiveState.COMBINING;
       this._started = true;
     }
     catch (error) {
@@ -676,6 +756,8 @@ export class GeometryPrimitive extends Primitive {
    */
   private* _prepareCombined(frameState: GeometryFrame): Generator<void> {
     const result = this._combinedResult;
+    if (!result)
+      throw new TypeError('Combined geometry preparation requires a Worker reply');
     this._combinedResult = undefined;
     const combined = primitivePipeline.unpackCombineGeometryResults(result.combined);
     if (!combined.geometries?.length) {
@@ -696,17 +778,15 @@ export class GeometryPrimitive extends Primitive {
       (this.appearance as ExtrusionAppearance).configurePositions(combined.geometries[0]);
     if (this._layout === 'surface-planar' || this._layout === 'surface-morph')
       this.appearance = packSurfacePositions(combined.geometries, this.appearance, this._layout === 'surface-morph');
-    Object.assign(this, {
-      _geometries: combined.geometries,
-      _attributeLocations: GeometryPipeline.createAttributeLocations(combined.geometries[0]),
-      modelMatrix: Matrix4.clone(combined.modelMatrix, this.modelMatrix),
-      _pickOffsets: combined.pickOffsets,
-      _offsetInstanceExtend: combined.offsetInstanceExtend,
-      _instanceBoundingSpheres: combined.boundingSpheres,
-      _instanceBoundingSpheresCV: combined.boundingSpheresCV,
-      _recomputeBoundingSpheres: true,
-      _state: primitiveState.COMBINED,
-    });
+    this._geometries = combined.geometries;
+    this._attributeLocations = GeometryPipeline.createAttributeLocations(combined.geometries[0]);
+    Matrix4.clone(combined.modelMatrix, this.modelMatrix);
+    this._pickOffsets = combined.pickOffsets;
+    this._offsetInstanceExtend = combined.offsetInstanceExtend;
+    this._instanceBoundingSpheres = combined.boundingSpheres;
+    this._instanceBoundingSpheresCV = combined.boundingSpheresCV;
+    this._recomputeBoundingSpheres = true;
+    this._state = primitiveState.COMBINED;
   }
 
   destroy(): void {
@@ -730,13 +810,15 @@ export class GeometryPrimitive extends Primitive {
     this._lineFailurePending = false;
     this._lineUpload?.destroy();
     if (this._lineUpload)
-      Object.assign(this, { _va: [] });
+      this._va = [];
     this._lineUpload = undefined;
     this._linePositions?.destroy();
     this._linePositions = undefined;
     this._lineBoundingSpheres = undefined;
     this._expandedCommands = undefined;
-    Object.assign(this, { geometryInstances: undefined, _geometries: undefined, _createGeometryResults: undefined });
+    (this as NativePrimitiveRuntime).geometryInstances = undefined;
+    this._geometries = undefined;
+    this._createGeometryResults = undefined;
     super.destroy();
     if (owner)
       owner.release();
@@ -762,7 +844,7 @@ export class GeometryPrimitive extends Primitive {
     this._lineFailurePending = false;
     this._lineUpload?.destroy();
     if (this._lineUpload)
-      Object.assign(this, { _va: [] });
+      this._va = [];
     this._lineUpload = undefined;
     this._linePositions?.destroy();
     this._linePositions = undefined;
@@ -770,23 +852,27 @@ export class GeometryPrimitive extends Primitive {
     // Preserve IDs, matrices and mutable paint attributes, but release the
     // mesh storage that a failed owner can never upload. Shared source and
     // cached Geometry objects remain untouched.
-    const instances = this.geometryInstances;
+    const native = this as NativePrimitiveRuntime;
+    const instances = native.geometryInstances;
     if (instances) {
       const metadata = (Array.isArray(instances) ? instances : [instances]).map(instance => new GeometryInstance({
         ...instance,
         geometry: new Geometry({ attributes: {} as Geometry['attributes'], boundingSphere: instance.geometry.boundingSphere, primitiveType: instance.geometry.primitiveType }),
       }));
-      Object.assign(this, { geometryInstances: Array.isArray(instances) ? metadata : metadata[0] });
+      native.geometryInstances = Array.isArray(instances) ? metadata : metadata[0];
       this._inputInstances = this._inputInstances && new Map(metadata.map(instance => [instance.id, instance]));
     }
-    Object.assign(this, { _geometries: undefined, _createGeometryResults: undefined, _error: error, _state: primitiveState.FAILED });
+    this._geometries = undefined;
+    this._createGeometryResults = undefined;
+    this._error = error;
+    this._state = primitiveState.FAILED;
     if (detached) {
       this._lineFailurePending = true;
     }
     else {
       frameState.afterRender?.push(() => {
         if (!this.isDestroyed())
-          Object.assign(this, { _ready: true });
+          this._ready = true;
         return true;
       });
     }

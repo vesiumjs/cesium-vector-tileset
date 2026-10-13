@@ -1,9 +1,9 @@
 import type Point from '@mapbox/point-geometry';
-
 import type { VectorTileFeature } from '../source/vector-tile-data';
 
+import { Math as CesiumMath } from 'cesium';
+
 import { warnOnce } from '../util/errors';
-import { clamp } from '../util/math';
 import { EXTENT } from './extent';
 
 // These bounds define the minimum and maximum supported coordinate values.
@@ -28,8 +28,8 @@ export function loadGeometry(feature: VectorTileFeature): Point[][] {
       const x = Math.round(point.x * scale);
       const y = Math.round(point.y * scale);
 
-      point.x = clamp(x, MIN, MAX);
-      point.y = clamp(y, MIN, MAX);
+      point.x = CesiumMath.clamp(x, MIN, MAX);
+      point.y = CesiumMath.clamp(y, MIN, MAX);
 
       if (x < point.x || x > point.x + 1 || y < point.y || y > point.y + 1) {
         // warn when exceeding allowed extent except for the 1-px-off case

@@ -466,10 +466,10 @@ function visitLinePath(points: Int16Array, granularity: number, visit?: (x: numb
 export function lineBucketPrimitives(
   bucket: LineBucket,
   tileID: TileID,
-  mode: number,
+  mode?: number,
 ): LinePrimitiveGeometry[] {
   const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
-  const granularity = surfaceGranularity('line', canonical.z, mode);
+  const granularity = mode === undefined ? 1 : surfaceGranularity('line', canonical.z, mode);
   const key = geometryCacheKey(canonical, granularity);
   const cached = lineGeometryCache.get(bucket)?.get(key);
   if (cached) {

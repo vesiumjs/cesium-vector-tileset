@@ -1,7 +1,5 @@
-import type Point from '@mapbox/point-geometry';
 import type { PromoteIdSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { VectorTileFeature } from '../source/vector-tile-data';
-import type { OverscaledTileID } from '../tile/tile-id';
 import type { TransferRegistry } from '../worker/transfer-registry';
 import { normalizeFeatureId } from '../source/vector-tile-data';
 import { FeatureIndexArray } from './array-types.g';
@@ -13,10 +11,6 @@ export const GEOJSON_TILE_LAYER_NAME = '_geojsonTileLayer';
  * An in memory index class to allow fast interaction with features
  */
 export class FeatureIndex {
-  tileID: OverscaledTileID;
-  x: number;
-  y: number;
-  z: number;
   featureIndexArray: FeatureIndexArray;
   promoteId?: PromoteIdSpecification;
   bucketLayerIDs: string[][];
@@ -24,17 +18,13 @@ export class FeatureIndex {
   sourceLayerIds: string[] = [];
   features = new FeatureSnapshot([]);
 
-  constructor(tileID: OverscaledTileID, promoteId?: PromoteIdSpecification | null) {
-    this.tileID = tileID;
-    this.x = tileID.canonical.x;
-    this.y = tileID.canonical.y;
-    this.z = tileID.canonical.z;
+  constructor(promoteId?: PromoteIdSpecification | null) {
     this.featureIndexArray = new FeatureIndexArray();
     this.promoteId = promoteId ?? undefined;
     this.bucketLayerIDs = [];
   }
 
-  insert(_feature: VectorTileFeature, _geometry: Point[][], featureIndex: number, sourceLayerIndex: number, bucketIndex: number, _is3D?: boolean): void {
+  insert(featureIndex: number, sourceLayerIndex: number, bucketIndex: number): void {
     this.featureIndexArray.emplaceBack(featureIndex, sourceLayerIndex, bucketIndex);
   }
 

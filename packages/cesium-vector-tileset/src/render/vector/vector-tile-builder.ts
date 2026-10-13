@@ -459,7 +459,7 @@ function* appendExtrusions(
         yield;
         continue;
       }
-      const attributes = {
+      const attributes: Geometry['attributes'] & Record<string, GeometryAttribute | undefined> = {
         position: new GeometryAttribute({
           componentDatatype: ComponentDatatype.DOUBLE,
           componentsPerAttribute: 3,
