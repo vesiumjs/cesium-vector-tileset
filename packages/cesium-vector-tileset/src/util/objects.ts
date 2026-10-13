@@ -58,7 +58,16 @@ export function filterObject<T extends object>(this: unknown, input: T, iterator
   return output;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null)
+    return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export function deepEqual(a?: unknown, b?: unknown): boolean {
+  if (a === b)
+    return true;
   if (Array.isArray(a)) {
     if (!Array.isArray(b) || a.length !== b.length)
       return false;
@@ -68,19 +77,17 @@ export function deepEqual(a?: unknown, b?: unknown): boolean {
     }
     return true;
   }
-  if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
-    const objectA = a as Record<string, unknown>;
-    const objectB = b as Record<string, unknown>;
+  if (isPlainObject(a) && isPlainObject(b)) {
     const keys = Object.keys(a);
     if (keys.length !== Object.keys(b).length)
       return false;
-    for (const key in a) {
-      if (!deepEqual(objectA[key], objectB[key]))
+    for (const key of keys) {
+      if (!Object.hasOwn(b, key) || !deepEqual(a[key], b[key]))
         return false;
     }
     return true;
   }
-  return a === b;
+  return false;
 }
 
 /**
@@ -89,19 +96,11 @@ export function deepEqual(a?: unknown, b?: unknown): boolean {
 export function clone<T>(input: T): T {
   if (Array.isArray(input))
     return input.map(item => clone(item)) as T;
-  if (typeof input === 'object' && input !== null) {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(input)) {
-      result[key] = clone(value);
-    }
+  if (isPlainObject(input)) {
+    const result = Object.fromEntries(Object.entries(input).map(([key, value]) => [key, clone(value)]));
+    if (Object.getPrototypeOf(input) === null)
+      Object.setPrototypeOf(result, null);
     return result as T;
   }
   return input;
 }
-
-/**
- * A helper to allow require exactly one one property
- */
-export type ExactlyOne<T, Keys extends keyof T = keyof T> = {
-  [K in Keys]: Required<Pick<T, K>> & { [P in Exclude<Keys, K>]?: never }
-}[Keys];
