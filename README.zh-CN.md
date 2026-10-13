@@ -72,6 +72,7 @@ if (!tileset.isDestroyed()) {
 
 - 数据源：MVT、MLT、GeoJSON、栅格瓦片、图片、视频和 canvas。图层：`background`、`fill`、`line`、`circle`、`fill-extrusion`、`symbol` 和 `raster`。
 - 支持 MapLibre 表达式、过滤器、数据驱动样式、虚线、图片图案、文字与图标。当前实现覆盖 MapLibre 的部分渲染能力；不支持 `heatmap`、`hillshade` 和 `raster-dem`，`line-gradient` 会被拒绝。
+- 文字内置阿拉伯连写与双向重排；样式指定的 glyph 字体需要包含相应字形。
 - 场景提供 Cesium vector provider 时，`heightReference` 可让普通填充面贴附。线、点、标注、挤出建筑与图片图案保留椭球高度。文字与图标暂不支持拾取。
 - 从样式 URL 加载时，数据源 URL、瓦片模板、sprite 与 glyphs 的相对地址按样式 URL 解析。远程 GeoJSON `data` 和视频 `urls` 请使用绝对地址。
 - Cesium peer 范围为 `^1.146.0`，已有渲染基线使用 1.146.0。部分渲染集成访问 Cesium 内部接口，声明范围不代表每个后续版本都已测试。

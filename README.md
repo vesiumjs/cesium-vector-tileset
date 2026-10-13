@@ -72,6 +72,7 @@ if (!tileset.isDestroyed()) {
 
 - Sources: MVT, MLT, GeoJSON, raster tiles, images, video, and canvas. Layers: `background`, `fill`, `line`, `circle`, `fill-extrusion`, `symbol`, and `raster`.
 - MapLibre expressions and filters, data-driven styling, dashed lines, image patterns, text, and icons are supported. This is a subset of MapLibre's rendering capabilities; `heatmap`, `hillshade`, and `raster-dem` are unavailable, and `line-gradient` is rejected.
+- Text includes Arabic shaping and bidirectional reordering. The style's glyph fonts must contain the corresponding glyphs.
 - `heightReference` can drape ordinary fill polygons when the scene provides Cesium's vector provider. Lines, points, labels, extrusions, and image patterns keep ellipsoid heights. Label and icon picking is currently unavailable.
 - Style URL loading resolves relative source URLs, tile templates, sprites, and glyphs against the style URL. Use absolute URLs for remote GeoJSON `data` and video `urls`.
 - The Cesium peer range is `^1.146.0`; the recorded rendering baseline uses 1.146.0. Some rendering integrations use Cesium internals, so the declared range does not mean every later release has been tested.
