@@ -6,7 +6,7 @@ import type { SpriteJSON, StyleImage } from './style-image';
 import { getJSON } from '../util/ajax';
 import { browser } from '../util/browser';
 
-import { ImageRequest } from '../util/image-request';
+import { getImage } from '../util/image-request';
 import { ResourceType, transformRequest } from '../util/request';
 import { normalizeSprite } from './sprite';
 
@@ -23,7 +23,7 @@ export function normalizeSpriteURL(url: string, format: string, extension: strin
     return parsed.toString();
   }
   catch {
-    throw new Error(`Invalid sprite URL "${url}", must be absolute. Modify style specification directly or use TransformStyleFunction to correct the issue dynamically`);
+    throw new Error(`Invalid sprite URL "${url}", must be absolute.`);
   }
 }
 
@@ -44,7 +44,7 @@ export async function loadSprite(
     jsonsMap[id] = getJSON<SpriteJSON>(jsonRequestParameters, abortController);
 
     const imageRequestParameters = await transformRequest(normalizeSpriteURL(url, format, '.png'), ResourceType.SpriteImage, requestTransform);
-    imagesMap[id] = ImageRequest.getImage(imageRequestParameters, abortController);
+    imagesMap[id] = getImage(imageRequestParameters, abortController);
   }
 
   await Promise.all([...Object.values(jsonsMap), ...Object.values(imagesMap)]);

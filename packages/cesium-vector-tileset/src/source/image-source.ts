@@ -8,9 +8,9 @@ import type { Tile } from '../tile/tile';
 import type { SourceEventType } from '../util/events';
 import type { WorkerDispatcher } from '../worker/dispatcher';
 import type { CanvasSourceSpecification } from './canvas-source';
-
 import type { Source } from './source';
-import { Bounds } from '../geo/bounds';
+
+import { BoundingRectangle, Cartesian2 } from 'cesium';
 import { MercatorCoordinate } from '../geo/mercator-coordinate';
 import { MAX_TILE_ZOOM } from '../geo/world-bounds';
 import { CanonicalTileID } from '../tile/tile-id';
@@ -19,7 +19,7 @@ import { ensureError } from '../util/errors';
 import { ErrorEvent, Evented } from '../util/evented';
 import { SourceDataEvent } from '../util/events';
 import { isImageBitmap } from '../util/image';
-import { ImageRequest } from '../util/image-request';
+import { getImage } from '../util/image-request';
 import { ResourceType, transformRequest } from '../util/request';
 
 /**
@@ -77,51 +77,11 @@ export interface CanonicalTileRange {
 }
 
 /**
- * A data source containing an image.
- * (See the [Style Specification](https://maplibre.org/maplibre-style-spec/#sources-image) for detailed documentation of options.)
+ * Places an image at four geographical corners, following ImageSourceSpecification.
+ * Configure the source in StyleSpecification.sources and apply changes with CesiumVectorTileset.setStyle.
+ * Replacing or removing an image cancels its pending network request.
  *
- * @group Sources
- *
- * @example
- * ```ts
- * // add to map
- * map.addSource('some id', {
- *    type: 'image',
- *    url: 'https://www.maplibre.org/images/foo.png',
- *    coordinates: [
- *        [-76.54, 39.18],
- *        [-76.52, 39.18],
- *        [-76.52, 39.17],
- *        [-76.54, 39.17]
- *    ]
- * });
- *
- * // update coordinates
- * let mySource = map.getSource('some id');
- * mySource.setCoordinates([
- *     [-76.54335737228394, 39.18579907229748],
- *     [-76.52803659439087, 39.1838364847587],
- *     [-76.5295386314392, 39.17683392507606],
- *     [-76.54520273208618, 39.17876344106642]
- * ]);
- *
- * // update url and coordinates simultaneously
- * mySource.updateImage({
- *    url: 'https://www.maplibre.org/images/bar.png',
- *    coordinates: [
- *        [-76.54335737228394, 39.18579907229748],
- *        [-76.52803659439087, 39.1838364847587],
- *        [-76.5295386314392, 39.17683392507606],
- *        [-76.54520273208618, 39.17876344106642]
- *    ]
- * })
- *
- * // update with an already-decoded image (no network request)
- * const bitmap = await createImageBitmap(myCanvas);
- * mySource.updateImage({image: bitmap});
- *
- * map.removeSource('some id');  // remove
- * ```
+ * @internal
  */
 export class ImageSource extends Evented<SourceEventType> implements Source {
   type: string;
@@ -186,7 +146,7 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
       if (this._request !== requestController || requestController.signal.aborted) {
         return;
       }
-      const image = await ImageRequest.getImage(request, requestController);
+      const image = await getImage(request, requestController);
       if (this._request !== requestController || requestController.signal.aborted) {
         closeImageBitmap(image?.data);
         return;
@@ -278,7 +238,7 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
   }
 
   /**
-   * Sets the image's coordinates and re-renders the map.
+   * Updates the image's corner coordinates and overlapping tile ranges.
    *
    * @param coordinates - Four geographical coordinates,
    * represented as arrays of longitude and latitude numbers, which define the corners of the image.
@@ -297,20 +257,20 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
 
     // Compute the coordinates of the tile we'll use to hold this image's
     // render data
-    this.tileID = getCoordinatesCenterTileID(cornerCoords);
+    const tileID = this.tileID = getCoordinatesCenterTileID(cornerCoords);
 
     // Compute tiles overlapping with the image. We need to know for which
     // terrain tiles we have to render the image.
     this.terrainTileRanges = this._getOverlappingTileRanges(cornerCoords);
 
     // Constrain min/max zoom to our tile's zoom level in order to force
-    // TilePyramid to request this tile (no matter what the map's zoom
+    // TilePyramid to request this tile (no matter what the view's zoom
     // level)
     this.minzoom = this.maxzoom = this.tileID.z;
 
     // Transform the corner coordinates into the coordinate space of our
     // tile.
-    this.tileCoords = cornerCoords.map(coord => this.tileID.getTilePoint(coord)._round());
+    this.tileCoords = cornerCoords.map(coord => tileID.getTilePoint(coord)._round());
     this.flippedWindingOrder = hasWrongWindingOrder(this.tileCoords);
 
     this.fire(new SourceDataEvent('data', { sourceDataType: 'content' }));
@@ -376,7 +336,11 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
   private _getOverlappingTileRanges(
     coords: MercatorCoordinate[],
   ): { [zoom: string]: CanonicalTileRange } {
-    const { minX, minY, maxX, maxY } = Bounds.fromPoints(coords);
+    const bounds = BoundingRectangle.fromPoints(coords.map(point => new Cartesian2(point.x, point.y)));
+    const minX = bounds.x;
+    const minY = bounds.y;
+    const maxX = minX + bounds.width;
+    const maxY = minY + bounds.height;
 
     const ranges: { [zoom: string]: CanonicalTileRange } = {};
 
@@ -419,18 +383,18 @@ function getImageUrl(options: ImageSourceOptions): string | undefined {
  * @internal
  */
 function getCoordinatesCenterTileID(coords: MercatorCoordinate[]): CanonicalTileID {
-  const bounds = Bounds.fromPoints(coords);
+  const bounds = BoundingRectangle.fromPoints(coords.map(point => new Cartesian2(point.x, point.y)));
 
-  const dx = bounds.width();
-  const dy = bounds.height();
+  const dx = bounds.width;
+  const dy = bounds.height;
   const dMax = Math.max(dx, dy);
   const zoom = Math.max(0, Math.floor(-Math.log(dMax) / Math.LN2));
   const tilesAtZoom = 2 ** zoom;
 
   return new CanonicalTileID(
     zoom,
-    Math.floor((bounds.minX + bounds.maxX) / 2 * tilesAtZoom),
-    Math.floor((bounds.minY + bounds.maxY) / 2 * tilesAtZoom),
+    Math.floor((2 * bounds.x + bounds.width) / 2 * tilesAtZoom),
+    Math.floor((2 * bounds.y + bounds.height) / 2 * tilesAtZoom),
   );
 }
 

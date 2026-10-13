@@ -1,6 +1,5 @@
 import type { SourceSpecification } from '@maplibre/maplibre-gl-style-spec';
 
-import type { GeoJSONSourceShouldReloadTileOptions } from '../source/geojson-source';
 import type { OverscaledTileID } from '../tile/tile-id';
 import type { ErrorEvent } from './evented';
 import { Event } from './evented';
@@ -112,12 +111,7 @@ export class SourceDataEvent extends Event {
   /**
    * Resource timing data, if `collectResourceTiming` is enabled for the source.
    */
-  declare resourceTiming?: PerformanceResourceTiming[];
-
-  /**
-   * Options to determine whether a tile should be reloaded.
-   */
-  declare shouldReloadTileOptions: GeoJSONSourceShouldReloadTileOptions;
+  declare resourceTiming?: PerformanceEntryList;
 
   constructor(type: SourceDataEvent['type'], data: Omit<Partial<SourceDataEvent>, 'type' | 'dataType' | 'target'> = {}) {
     super(type, data);

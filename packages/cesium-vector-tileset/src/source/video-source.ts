@@ -12,50 +12,16 @@ import { ResourceType, transformRequest } from '../util/request';
 import { ImageSource } from './image-source';
 
 /**
- * A data source containing video.
- * (See the [Style Specification](https://maplibre.org/maplibre-style-spec/#sources-video) for detailed documentation of options.)
+ * Places video frames at four geographical corners, following VideoSourceSpecification.
+ * Configure the source in StyleSpecification.sources and apply changes with CesiumVectorTileset.setStyle.
+ * Playback requests frames while the video is unpaused; raster-fade-duration controls tile fading.
  *
- * @group Sources
- *
- * @example
- * ```ts
- * // add to map
- * map.addSource('some id', {
- *    type: 'video',
- *    url: [
- *        '/videos/overlay.mp4',
- *        '/videos/overlay.webm'
- *    ],
- *    coordinates: [
- *        [-76.54, 39.18],
- *        [-76.52, 39.18],
- *        [-76.52, 39.17],
- *        [-76.54, 39.17]
- *    ]
- * });
- *
- * // update
- * let mySource = map.getSource('some id');
- * mySource.setCoordinates([
- *     [-76.54335737228394, 39.18579907229748],
- *     [-76.52803659439087, 39.1838364847587],
- *     [-76.5295386314392, 39.17683392507606],
- *     [-76.54520273208618, 39.17876344106642]
- * ]);
- *
- * map.removeSource('some id');  // remove
- * ```
- * @see [Add a video](https://maplibre.org/maplibre-gl-js/docs/examples/video-on-a-map/)
- *
- * Note that when rendered as a raster layer, the layer's `raster-fade-duration` property will cause the video to fade in.
- * This happens when playback is started, paused and resumed, or when the video's coordinates are updated. To avoid this behavior,
- * set the layer's `raster-fade-duration` property to `0`.
+ * @internal
  */
 export class VideoSource extends ImageSource {
   declare options: VideoSourceSpecification;
   urls: string[];
-  video: HTMLVideoElement;
-  roundZoom: boolean;
+  video?: HTMLVideoElement;
 
   /**
    * @internal
@@ -66,9 +32,9 @@ export class VideoSource extends ImageSource {
 
   constructor(id: string, options: VideoSourceSpecification, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super(id, options, dispatcher, eventedParent);
-    this.roundZoom = true;
     this.type = 'video';
     this.options = options;
+    this.urls = options.urls.slice();
   }
 
   async load(): Promise<void> {
@@ -139,7 +105,7 @@ export class VideoSource extends ImageSource {
    *
    * @returns The HTML `video` element.
    */
-  getVideo(): HTMLVideoElement {
+  getVideo(): HTMLVideoElement | undefined {
     return this.video;
   }
 
@@ -160,10 +126,10 @@ export class VideoSource extends ImageSource {
   }
 
   /**
-   * Sets the video's coordinates and re-renders the map.
+   * Publishes video frames to source tiles once frame data is available.
    */
-  prepare(): this {
-    if (Object.keys(this.tiles).length === 0 || this.video.readyState < 2) {
+  prepare(): void {
+    if (Object.keys(this.tiles).length === 0 || !this.video || this.video.readyState < 2) {
       return; // not enough data for current position
     }
 
@@ -191,6 +157,6 @@ export class VideoSource extends ImageSource {
   }
 
   hasTransition(): boolean {
-    return this.video && !this.video.paused;
+    return Boolean(this.video && !this.video.paused);
   }
 }

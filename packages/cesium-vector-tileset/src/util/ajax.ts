@@ -3,6 +3,7 @@ import { MessageType } from '../worker/messages';
 import { isWorker } from '../worker/scope';
 import { AbortError, isAbortError, throwIfAborted } from './abort-error';
 import { ensureError } from './errors';
+import { scheduleRequest } from './request-scheduler';
 
 /**
  * This is used to identify the global dispatcher id when sending a message from the worker without a target map id.
@@ -276,6 +277,7 @@ function makeXMLHttpRequest(requestParameters: RequestParameters, abortControlle
  * @returns a promise resolving to the response, including cache control and expiry data
  */
 export async function makeRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse<unknown>> {
+  throwIfAborted(abortController.signal);
   if (requestParameters.url.includes('://') && !(/^https?:|^file:/.test(requestParameters.url))) {
     const protocolLoadFn = getProtocol(requestParameters.url);
     if (protocolLoadFn) {
@@ -292,15 +294,25 @@ export async function makeRequest(requestParameters: RequestParameters, abortCon
     }
   }
   if (!isFileURL(requestParameters.url)) {
-    if (typeof fetch === 'function' && typeof Request === 'function' && Object.hasOwn(Request.prototype, 'signal')) {
-      return makeFetchRequest(requestParameters, abortController);
-    }
     const scope = globalThis;
+    // Worker-local schedulers cannot share the scene's terrain/imagery slots.
+    // Admit HTTP on the main thread even when the worker supports Fetch.
+    if (isWorker(scope)
+      && /^https?:$/.test(new URL(requestParameters.url, scope.worker.referrer).protocol)) {
+      return scope.worker.channel.sendAsync({ type: MessageType.getResource, data: requestParameters, targetMapId: GLOBAL_DISPATCHER_ID }, abortController);
+    }
+    if (typeof fetch === 'function' && typeof Request === 'function' && Object.hasOwn(Request.prototype, 'signal')) {
+      if (isWorker(scope))
+        return makeFetchRequest(requestParameters, abortController);
+      return scheduleRequest(requestParameters.url, abortController, controller => makeFetchRequest(requestParameters, controller));
+    }
     if (isWorker(scope) && scope.worker.channel) {
       return scope.worker.channel.sendAsync({ type: MessageType.getResource, data: requestParameters, mustQueue: true, targetMapId: GLOBAL_DISPATCHER_ID }, abortController);
     }
   }
-  return makeXMLHttpRequest(requestParameters, abortController);
+  if (isWorker(globalThis))
+    return makeXMLHttpRequest(requestParameters, abortController);
+  return scheduleRequest(requestParameters.url, abortController, controller => makeXMLHttpRequest(requestParameters, controller));
 }
 
 export function getJSON<T>(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse<T>> {

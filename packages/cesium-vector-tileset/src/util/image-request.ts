@@ -1,63 +1,14 @@
 import type { GetResourceResponse, RequestParameters } from './ajax';
 import { getProtocol } from '../source/protocol-crud';
 import { isWorker } from '../worker/scope';
-import { AbortError } from './abort-error';
+import { AbortError, throwIfAborted } from './abort-error';
 import { makeRequest, sameOrigin } from './ajax';
-import { config } from './config';
-import { ensureError } from './errors';
 import { arrayBufferToImage, arrayBufferToImageBitmap, isImageBitmap } from './image';
-
-interface PendingImageRequest {
-  requestParameters: RequestParameters;
-  supportImageRefresh: boolean;
-  imageBitmapOptions?: ImageBitmapOptions;
-  abortController?: AbortController;
-  onError: (error: Error) => void;
-  onSuccess: (response: GetResourceResponse<HTMLImageElement | ImageBitmap | null>) => void;
-}
-
-type HTMLImageElementWithPriority = HTMLImageElement
-  & {
-  // fetchPriority is experimental property supported on Chromium browsers from Version 102
-  // By default images are downloaded with priority low, whereas fetch request downloads with priority high
-  // https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement/fetchPriority
-    fetchPriority?: 'auto' | 'high' | 'low';
-  };
-
-/** Shared concurrency limit for sprite, image-source and raster-tile requests. */
-let imageRequestQueue: PendingImageRequest[] = [];
-let currentParallelImageRequests = 0;
-
-/**
- * Issue queued image requests up to the concurrency limit.
- */
-function processQueue(): void {
-  const maxImageRequests = config.MAX_PARALLEL_IMAGE_REQUESTS;
-
-  // limit concurrent image loads to help with raster sources performance on big screens
-  for (let numImageRequests = currentParallelImageRequests;
-    numImageRequests < maxImageRequests && imageRequestQueue.length > 0;
-    numImageRequests++) {
-    const topItemInQueue = imageRequestQueue.shift();
-    if (!topItemInQueue) {
-      break;
-    }
-    if (!topItemInQueue.abortController || topItemInQueue.abortController.signal.aborted) {
-      numImageRequests--;
-      // The item is discarded before any request is issued, so nothing else
-      // will ever settle its promise. Leaving it pending hangs the caller
-      // (raster tile loads await getImage), which leaves the tile stuck in
-      // the loading state forever.
-      topItemInQueue.onError(new AbortError(topItemInQueue.abortController?.signal.reason));
-      continue;
-    }
-    doImageRequest(topItemInQueue);
-  }
-}
+import { scheduleRequest } from './request-scheduler';
 
 function getImageUsingHtmlImage(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse<HTMLImageElement | ImageBitmap | null>> {
   return new Promise<GetResourceResponse<HTMLImageElement | ImageBitmap | null>>((resolve, reject) => {
-    const image = new Image() as HTMLImageElementWithPriority;
+    const image = new Image();
     const url = requestParameters.url;
     const credentials = requestParameters.credentials;
     if (credentials && credentials === 'include') {
@@ -67,19 +18,23 @@ function getImageUsingHtmlImage(requestParameters: RequestParameters, abortContr
       image.crossOrigin = 'anonymous';
     }
 
-    abortController.signal.addEventListener('abort', () => {
+    const cancel = () => {
       // Set src to '' to actually cancel the request
+      image.onerror = image.onload = null;
       image.src = '';
       reject(new AbortError(abortController.signal.reason));
-    });
+    };
+    abortController.signal.addEventListener('abort', cancel, { once: true });
 
     image.fetchPriority = 'high';
     image.onload = () => {
       image.onerror = image.onload = null;
+      abortController.signal.removeEventListener('abort', cancel);
       resolve({ data: image });
     };
     image.onerror = () => {
       image.onerror = image.onload = null;
+      abortController.signal.removeEventListener('abort', cancel);
       if (abortController.signal.aborted) {
         return;
       }
@@ -89,56 +44,24 @@ function getImageUsingHtmlImage(requestParameters: RequestParameters, abortContr
   });
 }
 
-export function resetRequestQueue(): void {
-  imageRequestQueue = [];
-  currentParallelImageRequests = 0;
-}
-
-/**
- * Request to load an image.
- * @param requestParameters - Request parameters.
- * @param abortController - allows to abort the request.
- * @param supportImageRefresh - `true`, if the image request need to support refresh based on cache headers.
- * @returns - A promise resolved when the image is loaded.
- */
-export function getImage(requestParameters: RequestParameters, abortController: AbortController, supportImageRefresh: boolean = true, imageBitmapOptions?: ImageBitmapOptions): Promise<GetResourceResponse<HTMLImageElement | ImageBitmap | null>> {
-  return new Promise<GetResourceResponse<HTMLImageElement | ImageBitmap | null>>((resolve, reject) => {
-    requestParameters.headers ||= {};
-    requestParameters.headers.accept = 'image/webp,*/*';
-    Object.assign(requestParameters, { type: 'image' });
-    const request: PendingImageRequest = {
-      abortController,
-      requestParameters,
-      supportImageRefresh,
-      imageBitmapOptions,
-      onError: (error: Error) => {
-        reject(error);
-      },
-      onSuccess: (response) => {
-        resolve(response);
-      },
-    };
-
-    imageRequestQueue.push(request);
-    processQueue();
-  });
-}
-
-function arrayBufferToCanvasImageSource(data: ArrayBuffer, imageBitmapOptions?: ImageBitmapOptions): Promise<HTMLImageElement | ImageBitmap | null> {
+function arrayBufferToCanvasImageSource(data: ArrayBuffer): Promise<HTMLImageElement | ImageBitmap | null> {
   const imageBitmapSupported = typeof createImageBitmap === 'function';
   if (imageBitmapSupported) {
-    return arrayBufferToImageBitmap(data, imageBitmapOptions);
+    return arrayBufferToImageBitmap(data);
   }
   else {
     return arrayBufferToImage(data);
   }
 }
 
-async function doImageRequest(itemInQueue: PendingImageRequest) {
-  const { requestParameters, supportImageRefresh, imageBitmapOptions, onError, onSuccess, abortController } = itemInQueue;
-  if (!abortController) {
-    return;
-  }
+/** Loads and decodes an image, retaining metadata for expiring raster tiles. */
+export async function getImage(requestParameters: RequestParameters, abortController: AbortController, supportImageRefresh: boolean = true): Promise<GetResourceResponse<HTMLImageElement | ImageBitmap | null>> {
+  throwIfAborted(abortController.signal);
+  const hasExplicitHeaders = Object.keys(requestParameters.headers ?? {}).length > 0;
+  requestParameters.headers ||= {};
+  if (!Object.keys(requestParameters.headers).some(header => header.toLowerCase() === 'accept'))
+    requestParameters.headers.accept = 'image/webp,*/*';
+  requestParameters.type = 'image';
   // - If refreshExpiredTiles is false, then we can use HTMLImageElement to download raster images.
   // - Fetch/XHR (via MakeRequest API) will be used to download images for following scenarios:
   //      1. Style sprites need decoded pixel data through the fetch/XHR path.
@@ -148,54 +71,31 @@ async function doImageRequest(itemInQueue: PendingImageRequest) {
   //      let makeRequest handle it.
   // - HtmlImageElement request automatically adds accept header for all the browser supported images
   const canUseHTMLImageElement = supportImageRefresh === false
-    && !imageBitmapOptions
     && !isWorker(globalThis)
     && !getProtocol(requestParameters.url)
-    && (!requestParameters.headers
-      || Object.keys(requestParameters.headers).reduce((acc, item) => acc && item === 'accept', true));
-
-  currentParallelImageRequests++;
+    && !hasExplicitHeaders
+    && (!requestParameters.method || requestParameters.method === 'GET')
+    && requestParameters.body === undefined
+    && requestParameters.cache === undefined
+    && requestParameters.referrerPolicy === undefined;
 
   const getImagePromise = canUseHTMLImageElement
-    ? getImageUsingHtmlImage(requestParameters, abortController)
+    ? scheduleRequest(requestParameters.url, abortController, controller => getImageUsingHtmlImage(requestParameters, controller))
     : makeRequest(requestParameters, abortController);
-
-  try {
-    const response = await getImagePromise;
-    delete itemInQueue.abortController;
-    if (response.data instanceof HTMLImageElement || isImageBitmap(response.data)) {
-      // User using addProtocol can directly return HTMLImageElement/ImageBitmap type
-      // If HtmlImageElement is used to get image then response type will be HTMLImageElement
-      onSuccess({ ...response, data: response.data });
-    }
-    else if (response.data instanceof ArrayBuffer) {
-      const img = await arrayBufferToCanvasImageSource(response.data, imageBitmapOptions);
-      onSuccess({ data: img, cacheControl: response.cacheControl, expires: response.expires });
-    }
-    else if (response.data === null || response.data === undefined) {
-      onSuccess({ ...response, data: null });
-    }
-    else {
-      throw new TypeError('Image request returned an unsupported response type.');
-    }
+  const response = await getImagePromise;
+  if (response.data instanceof HTMLImageElement || isImageBitmap(response.data)) {
+    // Custom protocols may return decoded images directly.
+    return { ...response, data: response.data };
   }
-  catch (err) {
-    delete itemInQueue.abortController;
-    onError(ensureError(err));
+  if (response.data instanceof ArrayBuffer) {
+    const image = await arrayBufferToCanvasImageSource(response.data);
+    if (abortController.signal.aborted && isImageBitmap(image))
+      image.close();
+    throwIfAborted(abortController.signal);
+    return { ...response, data: image };
   }
-  finally {
-    currentParallelImageRequests--;
-    processQueue();
+  if (response.data === null || response.data === undefined) {
+    return { ...response, data: null };
   }
+  throw new TypeError('Image request returned an unsupported response type.');
 }
-
-resetRequestQueue();
-
-/**
- * The image request queue, exposed as a single object so callers can reference
- * the queue API (and tests can spy on it) without an ES-module namespace.
- */
-export const ImageRequest = {
-  resetRequestQueue,
-  getImage,
-};

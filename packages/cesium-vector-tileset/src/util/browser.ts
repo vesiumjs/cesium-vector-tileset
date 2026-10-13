@@ -1,8 +1,6 @@
 import { AbortError } from './abort-error';
 import { subscribe } from './evented';
 
-let linkEl;
-
 /** */
 export const browser = {
   /**
@@ -52,12 +50,6 @@ export const browser = {
     canvas.height = img.height;
     context.drawImage(img, 0, 0, img.width, img.height);
     return context;
-  },
-
-  resolveURL(path: string): string {
-    linkEl ||= document.createElement('a');
-    linkEl.href = path;
-    return linkEl.href;
   },
 
   get hardwareConcurrency(): number {

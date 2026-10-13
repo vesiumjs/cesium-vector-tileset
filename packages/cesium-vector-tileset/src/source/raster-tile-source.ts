@@ -16,41 +16,17 @@ import { ensureError } from '../util/errors';
 
 import { ErrorEvent, Evented } from '../util/evented';
 import { SourceDataEvent } from '../util/events';
-import { ImageRequest } from '../util/image-request';
+import { getImage } from '../util/image-request';
 import { pick } from '../util/objects';
 import { ResourceType, transformRequest } from '../util/request';
 import { loadTileJson } from './load-tilejson';
 
 /**
- * A source containing raster tiles (See the [raster source documentation](https://maplibre.org/maplibre-style-spec/sources/#raster) for detailed documentation of options.)
+ * Loads raster tiles, following RasterSourceSpecification.
+ * Configure the source in StyleSpecification.sources and apply changes with CesiumVectorTileset.setStyle.
+ * Set tileSize to the provider's image size; the default is 512 pixels.
  *
- * @group Sources
- *
- * \> ℹ️ **Note:** The default `tileSize` is `512`. If your tile provider (such as OpenStreetMap or Stadia Maps) serves 256px tiles, set `tileSize: 256` manually to avoid blurry rendering due to upscaling.
- *
- * @example
- * ```ts
- * map.addSource('raster-source', {
- *     'type': 'raster',
- *     'tiles': ['https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg'],
- *     'tileSize': 256, // Set this to match tile server output to avoid blurry rendering
- * });
- * ```
- *
- * @example
- * ```ts
- * map.addSource('wms-test-source', {
- *      'type': 'raster',
- * // use the tiles option to specify a WMS tile source URL
- *      'tiles': [
- *          'https://img.nj.gov/imagerywms/Natural2015?bbox={bbox-epsg-3857}&format=image/png&service=WMS&version=1.1.1&request=GetMap&srs=EPSG:3857&transparent=true&width=256&height=256&layers=Natural2015'
- *      ],
- *      'tileSize': 256 // Important for WMS if tiles are 256px
- * });
- * ```
- * @see [Add a raster tile source](https://maplibre.org/maplibre-gl-js/docs/examples/map-tiles/)
- * @see [Add a WMS source](https://maplibre.org/maplibre-gl-js/docs/examples/add-a-wms-source/)
- * @see [Display a satellite map](https://maplibre.org/maplibre-gl-js/docs/examples/display-a-satellite-map/)
+ * @internal
  */
 export class RasterTileSource extends Evented<SourceEventType> implements Source {
   type: 'raster' | 'raster-dem';
@@ -63,14 +39,12 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
 
   bounds?: [number, number, number, number];
   tileBounds?: TileBounds;
-  roundZoom: boolean;
   dispatcher: WorkerDispatcher;
   style?: Style;
   tiles: string[];
 
   _loaded: boolean;
   _options: RasterSourceSpecification | RasterDEMSourceSpecification;
-  _premultiplyAlpha: boolean;
   _tileJSONRequest?: AbortController;
 
   constructor(id: string, options: RasterSourceSpecification | RasterDEMSourceSpecification, dispatcher: WorkerDispatcher, eventedParent: Evented) {
@@ -82,11 +56,9 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
     this.type = options.type;
     this.minzoom = 0;
     this.maxzoom = 22;
-    this.roundZoom = true;
     this.scheme = 'xyz';
     this.tileSize = 512;
     this._loaded = false;
-    this._premultiplyAlpha = true;
     this.tiles = options.tiles ?? [];
     this.url = options.url;
     this.bounds = options.bounds;
@@ -95,7 +67,7 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
     Object.assign(this, pick(options, ['url', 'scheme', 'tileSize']));
   }
 
-  async load(sourceDataChanged: boolean = false): Promise<void> {
+  async load(): Promise<void> {
     this._loaded = false;
     this.fire(new SourceDataEvent('dataloading'));
     const tileJSONRequest = new AbortController();
@@ -110,13 +82,13 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
       if (tileJSON) {
         Object.assign(this, tileJSON);
         this.tileBounds = tileJSON.bounds
-          ? new TileBounds(tileJSON.bounds, this.minzoom, this.maxzoom)
+          ? new TileBounds(tileJSON.bounds)
           : undefined;
 
         // `content` is included here to prevent a race condition where `Style._updateSources` is called
         // before the TileJSON arrives. this makes sure the tiles needed are loaded once TileJSON arrives
         this.fire(new SourceDataEvent('data', { sourceDataType: 'metadata' }));
-        this.fire(new SourceDataEvent('data', { sourceDataType: 'content', sourceDataChanged }));
+        this.fire(new SourceDataEvent('data', { sourceDataType: 'content' }));
       }
     }
     catch (err) {
@@ -151,67 +123,8 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
     }
   }
 
-  setSourceProperty(callback: () => void): void {
-    if (this._tileJSONRequest) {
-      this._tileJSONRequest.abort();
-      this._tileJSONRequest = undefined;
-    }
-
-    callback();
-
-    this.load(true);
-  }
-
-  /**
-   * Sets the source `tiles` property and re-renders the map.
-   *
-   * @param tiles - An array of one or more tile source URLs, as in the raster tiles spec (See the [Style Specification](https://maplibre.org/maplibre-style-spec/)
-   */
-  setTiles(tiles: string[]): this {
-    this.setSourceProperty(() => {
-      this._options.tiles = tiles;
-    });
-
-    return this;
-  }
-
-  /**
-   * Sets the source `url` property and re-renders the map.
-   *
-   * @param url - A URL to a TileJSON resource. Supported protocols are `http:` and `https:`.
-   */
-  setUrl(url: string): this {
-    this.setSourceProperty(() => {
-      this.url = url;
-      this._options.url = url;
-    });
-
-    return this;
-  }
-
   serialize(): RasterSourceSpecification | RasterDEMSourceSpecification {
     return Object.assign({}, this._options);
-  }
-
-  /**
-   * Sets whether alpha premultiplication is applied to raster tile images.
-   * Set to `false` to preserve exact RGBA byte values when alpha carries data instead of opacity.
-   *
-   * @param premultiplyAlpha - If `false`, disables alpha premultiplication for raster tile image decode and texture upload.
-   * @example
-   * ```ts
-   * map.getSource<RasterTileSource>('raster-source').setPremultiplyAlpha(false);
-   * ```
-   */
-  setPremultiplyAlpha(premultiplyAlpha: boolean): this {
-    if (this._premultiplyAlpha === premultiplyAlpha)
-      return this;
-
-    this.setSourceProperty(() => {
-      this._premultiplyAlpha = premultiplyAlpha;
-    });
-
-    return this;
   }
 
   hasTile(tileID: OverscaledTileID): boolean {
@@ -249,8 +162,6 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
    */
   private async _loadTile(tile: Tile): Promise<void> {
     const url = tile.tileID.canonical.url(this.tiles, this.style?.pixelRatio ?? 1, this.scheme);
-    const premultiply = this._premultiplyAlpha;
-    const imageBitmapOptions = premultiply ? undefined : { premultiplyAlpha: 'none' } as const;
     const abortController = new AbortController();
     tile.abortController = abortController;
     try {
@@ -259,16 +170,15 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
       }
       const request = await transformRequest(url, ResourceType.Tile, this.style?.transformRequest);
       // Keep passing the controller through even if abortTile() raced with
-      // transformRequest(). ImageRequest owns the abort-aware fetch path; a
+      // transformRequest(). getImage owns the abort-aware fetch path; a
       // mocked/custom request must still receive the same live controller.
       if (tile.aborted) {
         return;
       }
-      const response = await ImageRequest.getImage(
+      const response = await getImage(
         request,
         abortController,
         this.style?.refreshExpiredTiles ?? false,
-        imageBitmapOptions,
       );
       if (tile.abortController === abortController) {
         delete tile.abortController;

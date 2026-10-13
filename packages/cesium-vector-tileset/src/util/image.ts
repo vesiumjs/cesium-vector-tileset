@@ -1,4 +1,3 @@
-import type { Color } from '@maplibre/maplibre-gl-style-spec';
 import type { TransferRegistry } from '../worker/transfer-registry';
 import { ensureError } from './errors';
 
@@ -35,26 +34,6 @@ function createImage<T extends Partial<ImageDataLike>>(image: T, {
   image.height = height;
   image.data = data;
   return image as T & ImageDataLike;
-}
-
-function resizeImage(image: ImageDataLike, {
-  width,
-  height,
-}: Size, channels: number) {
-  if (width === image.width && height === image.height) {
-    return;
-  }
-
-  const newImage = createImage({}, { width, height }, channels);
-
-  copyImage(image, newImage, { x: 0, y: 0 }, { x: 0, y: 0 }, {
-    width: Math.min(image.width, width),
-    height: Math.min(image.height, height),
-  }, channels);
-
-  image.width = width;
-  image.height = height;
-  image.data = newImage.data;
 }
 
 function copyImage(srcImg: ImageDataLike, dstImg: ImageDataLike, srcPt: Point2D, dstPt: Point2D, size: Size, channels: number) {
@@ -107,10 +86,6 @@ export class AlphaImage {
     this.data = image.data;
   }
 
-  resize(size: Size): void {
-    resizeImage(this, size, 1);
-  }
-
   clone(): AlphaImage {
     return new AlphaImage({ width: this.width, height: this.height }, new Uint8Array(this.data));
   }
@@ -140,10 +115,6 @@ export class RGBAImage {
     this.data = image.data;
   }
 
-  resize(size: Size): void {
-    resizeImage(this, size, 4);
-  }
-
   replace(data: Uint8Array | Uint8ClampedArray, copy?: boolean): void {
     if (copy) {
       this.data.set(data);
@@ -162,14 +133,6 @@ export class RGBAImage {
 
   static copy(srcImg: RGBAImage | ImageData, dstImg: RGBAImage, srcPt: Point2D, dstPt: Point2D, size: Size): void {
     copyImage(srcImg, dstImg, srcPt, dstPt, size, 4);
-  }
-
-  setPixel(row: number, col: number, value: Color): void {
-    const rLocation = (row * this.width + col) * 4;
-    this.data[rLocation + 0] = Math.round(value.r * 255 / value.a);
-    this.data[rLocation + 1] = Math.round(value.g * 255 / value.a);
-    this.data[rLocation + 2] = Math.round(value.b * 255 / value.a);
-    this.data[rLocation + 3] = Math.round(value.a * 255);
   }
 }
 
@@ -203,16 +166,15 @@ export function isImageBitmap(image: unknown): image is ImageBitmap {
  * ArrayBuffers.
  *
  * @param data - Data to convert
- * @param options - The options to use when creating the ImageBitmap.
  * @returns - A  promise resolved when the conversion is finished
  */
-export async function arrayBufferToImageBitmap(data: ArrayBuffer, options?: ImageBitmapOptions): Promise<ImageBitmap> {
+export async function arrayBufferToImageBitmap(data: ArrayBuffer): Promise<ImageBitmap> {
   if (data.byteLength === 0) {
-    return createImageBitmap(new ImageData(1, 1), options);
+    return createImageBitmap(new ImageData(1, 1));
   }
   const blob: Blob = new Blob([new Uint8Array(data)], { type: 'image/png' });
   try {
-    return createImageBitmap(blob, options);
+    return createImageBitmap(blob);
   }
   catch (e) {
     throw new Error(`Could not load image because of ${ensureError(e).message}. Please make sure to use a supported image type such as PNG or JPEG. Note that SVGs are not supported.`);

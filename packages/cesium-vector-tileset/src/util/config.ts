@@ -13,14 +13,12 @@ export type AddProtocolAction = (requestParameters: RequestParameters, abortCont
  * Only serializable data should be stored in it.
  */
 interface Config {
-  MAX_PARALLEL_IMAGE_REQUESTS: number;
   MAX_TILE_CACHE_ZOOM_LEVELS: number;
   REGISTERED_PROTOCOLS: { [x: string]: AddProtocolAction };
   WORKER_URL: string;
 }
 
 export const config: Config = {
-  MAX_PARALLEL_IMAGE_REQUESTS: 16,
   MAX_TILE_CACHE_ZOOM_LEVELS: 5,
   REGISTERED_PROTOCOLS: {},
   WORKER_URL: '',
