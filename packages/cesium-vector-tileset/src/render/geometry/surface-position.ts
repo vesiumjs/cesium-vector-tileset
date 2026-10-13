@@ -63,7 +63,7 @@ export function packSurfacePositions(geometries: Geometry[], appearance: Appeara
     throw new TypeError('surface positions require an appearance');
   const names = ['position2DHigh', 'position2DLow', ...(morph ? ['position3DHigh', 'position3DLow'] : [])];
   const inputs = geometries.map(geometry => names.map((name, track) => {
-    const values = geometry.attributes[name].values as Float32Array;
+    const values = (geometry.attributes as Geometry['attributes'] & Record<string, GeometryAttribute>)[name].values as Float32Array;
     return track % 2 ? new Uint32Array(values.buffer, values.byteOffset, values.length) : values;
   }));
   const descriptors: Cartesian4[] = [];

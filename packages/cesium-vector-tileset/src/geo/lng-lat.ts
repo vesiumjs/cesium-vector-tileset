@@ -1,5 +1,3 @@
-import { wrap } from '../util/math';
-
 /*
 * Approximate radius of the earth in meters.
 * Uses the WGS-84 approximation. The radius at the equator is ~6378137 and at the poles is ~6356752. https://en.wikipedia.org/wiki/World_Geodetic_System#WGS84
@@ -75,73 +73,6 @@ export class LngLat {
   }
 
   /**
-   * Returns a new `LngLat` object whose longitude is wrapped to the range (-180, 180).
-   *
-   * @returns The wrapped `LngLat` object.
-   * @example
-   * ```ts
-   * let ll = new LngLat(286.0251, 40.7736);
-   * let wrapped = ll.wrap();
-   * wrapped.lng; // = -73.9749
-   * ```
-   */
-  wrap(): LngLat {
-    return new LngLat(wrap(this.lng, -180, 180), this.lat);
-  }
-
-  /**
-   * Returns the coordinates represented as an array of two numbers.
-   *
-   * @returns The coordinates represented as an array of longitude and latitude.
-   * @example
-   * ```ts
-   * let ll = new LngLat(-73.9749, 40.7736);
-   * ll.toArray(); // = [-73.9749, 40.7736]
-   * ```
-   */
-  toArray(): [number, number] {
-    return [this.lng, this.lat];
-  }
-
-  /**
-   * Returns the coordinates represent as a string.
-   *
-   * @returns The coordinates represented as a string of the format `'LngLat(lng, lat)'`.
-   * @example
-   * ```ts
-   * let ll = new LngLat(-73.9749, 40.7736);
-   * ll.toString(); // = "LngLat(-73.9749, 40.7736)"
-   * ```
-   */
-  toString(): string {
-    return `LngLat(${this.lng}, ${this.lat})`;
-  }
-
-  /**
-   * Returns the approximate distance between a pair of coordinates in meters
-   * Uses the Haversine Formula (from R.W. Sinnott, "Virtues of the Haversine", Sky and Telescope, vol. 68, no. 2, 1984, p. 159)
-   *
-   * @param lngLat - coordinates to compute the distance to
-   * @returns Distance in meters between the two coordinates.
-   * @example
-   * ```ts
-   * let new_york = new LngLat(-74.0060, 40.7128);
-   * let los_angeles = new LngLat(-118.2437, 34.0522);
-   * new_york.distanceTo(los_angeles); // = 3935751.690893987, "true distance" using a non-spherical approximation is ~3966km
-   * ```
-   */
-  distanceTo(lngLat: LngLat): number {
-    const rad = Math.PI / 180;
-    const lat1 = this.lat * rad;
-    const lat2 = lngLat.lat * rad;
-    const a = Math.sin(lat1) * Math.sin(lat2) + Math.cos(lat1) * Math.cos(lat2) * Math.cos((lngLat.lng - this.lng) * rad);
-
-    // Antipodal points round to slightly below -1, and Math.acos returns NaN
-    // outside [-1, 1].
-    return earthRadius * Math.acos(Math.min(1, Math.max(-1, a)));
-  }
-
-  /**
    * Converts an array of two numbers or an object with `lng` and `lat` or `lon` and `lat` properties
    * to a `LngLat` object.
    *
@@ -165,8 +96,7 @@ export class LngLat {
     }
     if (!Array.isArray(input) && typeof input === 'object' && input !== null) {
       return new LngLat(
-        // flow can't refine this to have one of lng or lat, so we have to cast to any
-        Number('lng' in input ? (input as any).lng : (input as any).lon),
+        Number('lng' in input ? input.lng : input.lon),
         Number(input.lat),
       );
     }

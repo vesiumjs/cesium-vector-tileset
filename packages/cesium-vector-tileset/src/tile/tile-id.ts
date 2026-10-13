@@ -2,7 +2,6 @@ import type { ICanonicalTileID, IMercatorCoordinate } from '@maplibre/maplibre-g
 import type { TransferRegistry } from '../worker/transfer-registry';
 import Point from '@mapbox/point-geometry';
 import { EXTENT } from '../data/extent';
-import { MercatorCoordinate } from '../geo/mercator-coordinate';
 import { isInBoundsForTileZoomXY, MAX_TILE_ZOOM, MIN_TILE_ZOOM } from '../geo/world-bounds';
 
 /**
@@ -51,7 +50,7 @@ export class CanonicalTileID implements ICanonicalTileID {
     return dz > 0 && parent.x === (this.x >> dz) && parent.y === (this.y >> dz);
   }
 
-  getTilePoint(coord: IMercatorCoordinate): Point {
+  getTilePoint(coord: Pick<IMercatorCoordinate, 'x' | 'y'>): Point {
     const tilesAtZoom = 2 ** this.z;
     return new Point(
       (coord.x * tilesAtZoom - this.x) * EXTENT,
@@ -61,22 +60,6 @@ export class CanonicalTileID implements ICanonicalTileID {
 
   toString(): string {
     return `${this.z}/${this.x}/${this.y}`;
-  }
-}
-
-/**
- * An unwrapped tile identifier
- * @internal
- */
-export class UnwrappedTileID {
-  wrap: number;
-  canonical: CanonicalTileID;
-  key: string;
-
-  constructor(wrap: number, canonical: CanonicalTileID) {
-    this.wrap = wrap;
-    this.canonical = canonical;
-    this.key = calculateTileKey(wrap, canonical.z, canonical.z, canonical.x, canonical.y);
   }
 }
 
@@ -104,10 +87,6 @@ export class OverscaledTileID {
     this.key = calculateTileKey(wrap, overscaledZ, z, x, y);
   }
 
-  clone(): OverscaledTileID {
-    return new OverscaledTileID(this.overscaledZ, this.wrap, this.canonical.z, this.canonical.x, this.canonical.y);
-  }
-
   equals(id: OverscaledTileID): boolean {
     return this.overscaledZ === id.overscaledZ && this.wrap === id.wrap && this.canonical.equals(id.canonical);
   }
@@ -130,10 +109,6 @@ export class OverscaledTileID {
     else {
       return new OverscaledTileID(targetZ, this.wrap, targetZ, this.canonical.x >> zDifference, this.canonical.y >> zDifference);
     }
-  }
-
-  isOverscaled(): boolean {
-    return (this.overscaledZ > this.canonical.z);
   }
 
   /*
@@ -192,25 +167,6 @@ export class OverscaledTileID {
     ];
   }
 
-  isLessThan(rhs: OverscaledTileID): boolean {
-    if (this.wrap < rhs.wrap)
-      return true;
-    if (this.wrap > rhs.wrap)
-      return false;
-
-    if (this.overscaledZ < rhs.overscaledZ)
-      return true;
-    if (this.overscaledZ > rhs.overscaledZ)
-      return false;
-
-    if (this.canonical.x < rhs.canonical.x)
-      return true;
-    if (this.canonical.x > rhs.canonical.x)
-      return false;
-
-    return this.canonical.y < rhs.canonical.y;
-  }
-
   wrapped(): OverscaledTileID {
     return new OverscaledTileID(this.overscaledZ, 0, this.canonical.z, this.canonical.x, this.canonical.y);
   }
@@ -223,68 +179,8 @@ export class OverscaledTileID {
     return 2 ** (this.overscaledZ - this.canonical.z);
   }
 
-  toUnwrapped(): UnwrappedTileID {
-    return new UnwrappedTileID(this.wrap, this.canonical);
-  }
-
   toString(): string {
     return `${this.overscaledZ}/${this.canonical.x}/${this.canonical.y}`;
-  }
-
-  getTilePoint(coord: MercatorCoordinate): Point {
-    return this.canonical.getTilePoint(new MercatorCoordinate(coord.x - this.wrap, coord.y));
-  }
-
-  /**
-   * Maps tile-local coordinates that may fall outside the `[0, extent)` range
-   * to the correct neighbor tile and the corresponding in-tile position.
-   *
-   * Coordinates can exceed tile bounds when geometry (e.g. symbol labels along
-   * lines) extends across tile edges. This method resolves such coordinates to
-   * the appropriate adjacent tile, wrapping horizontally across world boundaries
-   * and returning `null` when the target falls beyond the polar tile-grid limits.
-   *
-   * When the coordinates are already in bounds, the original tile ID is returned.
-   *
-   * @param x - x coordinate relative to this tile, may be outside `[0, extent)`
-   * @param y - y coordinate relative to this tile, may be outside `[0, extent)`
-   * @param extent - tile coordinate extent, default {@link EXTENT}
-   * @returns the resolved tile ID and in-tile coordinates, or `null` if the
-   *          target is beyond the tile grid (e.g. past the poles)
-   */
-  normalizeCoordinates(x: number, y: number, extent: number = EXTENT): { tileID: OverscaledTileID; x: number; y: number } | null {
-    if (x >= 0 && x < extent && y >= 0 && y < extent) {
-      return { tileID: this, x, y };
-    }
-
-    const tileOffsetX = Math.floor(x / extent);
-    const tileOffsetY = Math.floor(y / extent);
-    const newX = x - tileOffsetX * extent;
-    const newY = y - tileOffsetY * extent;
-
-    const z = this.canonical.z;
-    const dim = 1 << z;
-    const newCanonicalY = this.canonical.y + tileOffsetY;
-
-    if (newCanonicalY < 0 || newCanonicalY >= dim)
-      return null;
-
-    let newCanonicalX = this.canonical.x + tileOffsetX;
-    let newWrap = this.wrap;
-    if (newCanonicalX < 0) {
-      newWrap -= Math.ceil(-newCanonicalX / dim);
-      newCanonicalX = ((newCanonicalX % dim) + dim) % dim;
-    }
-    else if (newCanonicalX >= dim) {
-      newWrap += Math.floor(newCanonicalX / dim);
-      newCanonicalX = newCanonicalX % dim;
-    }
-
-    return {
-      tileID: new OverscaledTileID(this.overscaledZ, newWrap, z, newCanonicalX, newCanonicalY),
-      x: newX,
-      y: newY,
-    };
   }
 }
 

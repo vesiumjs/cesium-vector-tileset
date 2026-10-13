@@ -1,10 +1,19 @@
+import type { Rectangle } from 'cesium';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
-import { BoundingSphere, Ellipsoid, Rectangle } from 'cesium';
-import { latFromMercatorY, lngFromMercatorX } from '../../geo/mercator-coordinate';
+import { BoundingSphere, Ellipsoid, WebMercatorTilingScheme } from 'cesium';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
-const DEG_TO_RAD = Math.PI / 180;
+const tilingScheme = new WebMercatorTilingScheme({ ellipsoid: Ellipsoid.WGS84 });
+
+/** Canonical Mercator tile footprint, shared by ECEF and projected bounds. */
+export function tileRectangle(tileID: TileID): Rectangle {
+  // ECEF positions are wrap-invariant (tileLocalToMercatorFraction shifts
+  // longitude by whole world widths, which sin/cos fold away), so the
+  // canonical rectangle contains every world copy by construction.
+  const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
+  return tilingScheme.tileXYToRectangle(canonical.x, canonical.y, canonical.z);
+}
 
 /**
  * Bounding sphere for a tile rectangle on the WGS84 ellipsoid surface.
@@ -18,20 +27,7 @@ const DEG_TO_RAD = Math.PI / 180;
  * separately account for heights, buffered geometry and pixel-sized symbols.
  */
 export function tileBoundingSphere(tileID: TileID): BoundingSphere {
-  // ECEF positions are wrap-invariant (tileLocalToMercatorFraction shifts
-  // longitude by whole world widths, which sin/cos fold away), so the
-  // canonical rectangle contains every world copy by construction.
-  const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
-  const worldSize = 2 ** canonical.z;
-  const west = (lngFromMercatorX(canonical.x / worldSize)) * DEG_TO_RAD;
-  const east = (lngFromMercatorX((canonical.x + 1) / worldSize)) * DEG_TO_RAD;
-  const north = (latFromMercatorY(canonical.y / worldSize)) * DEG_TO_RAD;
-  const south = (latFromMercatorY((canonical.y + 1) / worldSize)) * DEG_TO_RAD;
-  const sphere = BoundingSphere.fromRectangle3D(
-    Rectangle.fromRadians(west, south, east, north),
-    Ellipsoid.WGS84,
-    0,
-  );
+  const sphere = BoundingSphere.fromRectangle3D(tileRectangle(tileID), Ellipsoid.WGS84, 0);
   sphere.radius = sphere.radius * 1.001 + 1;
   return sphere;
 }

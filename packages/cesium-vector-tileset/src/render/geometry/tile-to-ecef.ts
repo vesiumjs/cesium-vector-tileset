@@ -1,35 +1,10 @@
+import { Cartesian3, Ellipsoid } from 'cesium';
 import { EXTENT } from '../../data/extent';
 import { latFromMercatorY, lngFromMercatorX } from '../../geo/mercator-coordinate';
 
-/**
- * WGS84 ellipsoid parameters, matching Cesium's Ellipsoid.WGS84
- * (semi-major axis a = 6378137, flattening f = 1/298.257223563).
- */
-export const WGS84_A = 6378137.0;
-export const WGS84_F = 1 / 298.257223563;
-
-/**
- * Convert a WGS84 lon/lat (radians) to ECEF, using the same geodetic
- * equations as Cesium's Ellipsoid#cartographicToCartesian. Pure math so the
- * tile geometry extraction can run inside the web worker without importing
- * Cesium.
- */
-export function wgs84CartographicToCartesian(
-  lngRad: number,
-  latRad: number,
-  height = 0,
-): { x: number; y: number; z: number } {
-  const e2 = WGS84_F * (2 - WGS84_F);
-  const sinLat = Math.sin(latRad);
-  const cosLat = Math.cos(latRad);
-  const n = WGS84_A / Math.sqrt(1 - e2 * sinLat * sinLat);
-  const radius = n + height;
-  return {
-    x: radius * cosLat * Math.cos(lngRad),
-    y: radius * cosLat * Math.sin(lngRad),
-    z: (n * (1 - e2) + height) * sinLat,
-  };
-}
+/** WGS84 dimensions shared with Cesium's explicit ellipsoid. */
+export const WGS84_A = Ellipsoid.WGS84.radii.x;
+export const WGS84_F = (WGS84_A - Ellipsoid.WGS84.radii.z) / WGS84_A;
 
 /**
  * The mercator fraction of a local point inside a canonical tile.
@@ -42,7 +17,7 @@ export function tileLocalToMercatorFraction(
   localY: number,
 ): { x: number; y: number } {
   const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
-  const wrap = 'wrap' in tileID ? tileID.wrap : 0;
+  const wrap = 'wrap' in tileID ? tileID.wrap ?? 0 : 0;
   const worldSize = 2 ** canonical.z;
   // A bucket is built from the canonical tile, but a Cesium scene can display
   // an unwrapped world copy. Keep the wrap in the mercator coordinate instead
@@ -86,5 +61,5 @@ export function tileLocalToWgs84Ecef(
   localY: number,
 ): { x: number; y: number; z: number } {
   const { lng, lat } = tileLocalToCartographic(tileID, localX, localY);
-  return wgs84CartographicToCartesian(lng, lat);
+  return Cartesian3.fromRadians(lng, lat, 0, Ellipsoid.WGS84);
 }

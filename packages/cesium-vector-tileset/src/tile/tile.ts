@@ -17,7 +17,6 @@ import { CollisionBoxArray } from '../data/array-types.g';
 import { deserialize as deserializeBucket } from '../data/bucket';
 import { SymbolBucket } from '../data/bucket-runtime';
 import { GEOJSON_TILE_LAYER_NAME } from '../data/feature-index';
-import { rtlMainThreadPluginFactory } from '../source/rtl-text-plugin-main-thread';
 import { AbortError } from '../util/abort-error';
 import { parseCacheControl } from '../util/ajax';
 
@@ -116,12 +115,11 @@ export class Tile {
     reject: (reason?: unknown) => void;
   }>;
 
-  resourceTiming: PerformanceResourceTiming[];
+  resourceTiming: PerformanceEntryList;
   queryPadding: number;
 
   symbolFadeHoldUntil?: number;
   hasSymbolBuckets: boolean;
-  hasRTLText: boolean;
   dependencies: Record<string, Record<string, true>>;
 
   featureStateRevision: number;
@@ -138,7 +136,6 @@ export class Tile {
     this.buckets = {};
     this.queryPadding = 0;
     this.hasSymbolBuckets = false;
-    this.hasRTLText = false;
     this.dependencies = {};
     this.collisionBoxArray = new CollisionBoxArray();
     this.aborted = false;
@@ -247,20 +244,6 @@ export class Tile {
       }
     }
 
-    this.hasRTLText = false;
-    if (this.hasSymbolBuckets) {
-      for (const id in this.buckets) {
-        const bucket = this.buckets[id];
-        if (bucket instanceof SymbolBucket) {
-          if (bucket.hasRTLText) {
-            this.hasRTLText = true;
-            rtlMainThreadPluginFactory().lazyLoad();
-            break;
-          }
-        }
-      }
-    }
-
     if (data.imageAtlas) {
       this.imageAtlas = data.imageAtlas;
     }
@@ -284,7 +267,6 @@ export class Tile {
     this.latestFeatureIndex = undefined;
     this.featureStateRevision = -1;
     this.hasSymbolBuckets = false;
-    this.hasRTLText = false;
     this.queryPadding = 0;
     this.collisionBoxArray = new CollisionBoxArray();
     this.state = 'unloaded';

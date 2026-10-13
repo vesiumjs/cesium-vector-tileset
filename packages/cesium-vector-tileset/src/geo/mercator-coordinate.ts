@@ -1,4 +1,3 @@
-import type { IMercatorCoordinate } from '@maplibre/maplibre-gl-style-spec';
 import type { LngLatLike } from '../geo/lng-lat';
 import { earthRadius, LngLat } from '../geo/lng-lat';
 
@@ -53,65 +52,58 @@ function mercatorScale(lat: number): number {
 }
 
 /**
- * A `MercatorCoordinate` object represents a projected three dimensional position.
+ * A `MercatorCoordinate` object represents a projected two dimensional position.
  *
  * `MercatorCoordinate` uses the web mercator projection ([EPSG:3857](https://epsg.io/3857)) with slightly different units:
  *
  * - the size of 1 unit is the width of the projected world instead of the "mercator meter"
  * - the origin of the coordinate space is at the north-west corner instead of the middle
  *
- * For example, `MercatorCoordinate(0, 0, 0)` is the north-west corner of the mercator world and
- * `MercatorCoordinate(1, 1, 0)` is the south-east corner. If you are familiar with
+ * For example, `MercatorCoordinate(0, 0)` is the north-west corner of the mercator world and
+ * `MercatorCoordinate(1, 1)` is the south-east corner. If you are familiar with
  * vector tiles, it may be helpful to think
  * of the coordinate space as the `0/0/0` tile with an extent of `1`.
- *
- * The `z` dimension of `MercatorCoordinate` is conformal. A cube in the mercator coordinate space would be rendered as a cube.
  *
  * @group Geography and Geometry
  *
  * @example
  * ```ts
- * let nullIsland = new MercatorCoordinate(0.5, 0.5, 0);
+ * let nullIsland = new MercatorCoordinate(0.5, 0.5);
  * ```
  * @see [Add a custom style layer](https://maplibre.org/maplibre-gl-js/docs/examples/add-a-custom-style-layer/)
  * @see [Add a 3D model using three.js](https://maplibre.org/maplibre-gl-js/docs/examples/add-a-3d-model-using-threejs/)
  * @see [Add a simple custom layer on a globe](https://maplibre.org/maplibre-gl-js/docs/examples/add-a-simple-custom-layer-on-a-globe/)
  */
-export class MercatorCoordinate implements IMercatorCoordinate {
+export class MercatorCoordinate {
   x: number;
   y: number;
-  z: number;
 
   /**
    * @param x - The x component of the position.
    * @param y - The y component of the position.
-   * @param z - The z component of the position.
    */
-  constructor(x: number, y: number, z: number = 0) {
+  constructor(x: number, y: number) {
     this.x = +x;
     this.y = +y;
-    this.z = +z;
   }
 
   /**
    * Project a `LngLat` to a `MercatorCoordinate`.
    *
    * @param lngLatLike - The location to project.
-   * @param altitude - The altitude in meters of the position.
    * @returns The projected mercator coordinate.
    * @example
    * ```ts
-   * let coord = MercatorCoordinate.fromLngLat({ lng: 0, lat: 0}, 0);
-   * coord; // MercatorCoordinate(0.5, 0.5, 0)
+   * let coord = MercatorCoordinate.fromLngLat({ lng: 0, lat: 0});
+   * coord; // MercatorCoordinate(0.5, 0.5)
    * ```
    */
-  static fromLngLat(lngLatLike: LngLatLike, altitude: number = 0): MercatorCoordinate {
+  static fromLngLat(lngLatLike: LngLatLike): MercatorCoordinate {
     const lngLat = LngLat.convert(lngLatLike);
 
     return new MercatorCoordinate(
       mercatorXfromLng(lngLat.lng),
       mercatorYfromLat(lngLat.lat),
-      mercatorZfromAltitude(altitude, lngLat.lat),
     );
   }
 
@@ -121,7 +113,7 @@ export class MercatorCoordinate implements IMercatorCoordinate {
    * @returns The `LngLat` object.
    * @example
    * ```ts
-   * let coord = new MercatorCoordinate(0.5, 0.5, 0);
+   * let coord = new MercatorCoordinate(0.5, 0.5);
    * let lngLat = coord.toLngLat(); // LngLat(0, 0)
    * ```
    */
@@ -130,20 +122,6 @@ export class MercatorCoordinate implements IMercatorCoordinate {
       lngFromMercatorX(this.x),
       latFromMercatorY(this.y),
     );
-  }
-
-  /**
-   * Returns the altitude in meters of the coordinate.
-   *
-   * @returns The altitude in meters.
-   * @example
-   * ```ts
-   * let coord = new MercatorCoordinate(0, 0, 0.02);
-   * coord.toAltitude(); // 6914.281956295339
-   * ```
-   */
-  toAltitude(): number {
-    return altitudeFromMercatorZ(this.z, this.y);
   }
 
   /**

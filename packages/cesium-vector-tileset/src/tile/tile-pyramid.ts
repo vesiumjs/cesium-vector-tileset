@@ -1,6 +1,5 @@
-import type { FeatureState, ICanonicalTileID, SourceSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { FeatureState, SourceSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { CanvasSourceSpecification } from '../source/canvas-source';
-import type { GeoJSONSourceShouldReloadTileOptions } from '../source/geojson-source';
 import type { Source } from '../source/source';
 import type { LoadTileResult } from '../source/vector-tile-source';
 import type { Style } from '../style/style';
@@ -349,15 +348,8 @@ export class TilePyramid extends Evented<SourceEventType> {
     return this._state.revision !== featureStateRevision;
   }
 
-  /**
-   * Return all tile ids ordered with z-order, and cast to numbers
-   */
-  getIds(): string[] {
-    return this._activeTiles.getAllIds(true);
-  }
-
-  getRenderableIds(symbolLayer?: boolean): string[] {
-    return this._activeTiles.getRenderableIds(0, symbolLayer);
+  getRenderableIds(): string[] {
+    return this._activeTiles.getRenderableIds();
   }
 
   /**
@@ -365,30 +357,15 @@ export class TilePyramid extends Evented<SourceEventType> {
    * Render data events are already keyed by tile id, so this is the hot path
    * used by the Cesium adapter when a worker result arrives.
    */
-  isRenderableId(id: string, symbolLayer = false): boolean {
-    return this._activeTiles.isIdRenderable(id, symbolLayer);
-  }
-
-  hasRenderableParent(tileID: OverscaledTileID): boolean {
-    const parentZ = tileID.overscaledZ - 1;
-    if (parentZ >= this._source.minzoom) {
-      const parentTile = this.getLoadedTile(tileID.scaledTo(parentZ));
-      if (parentTile) {
-        return this._activeTiles.isIdRenderable(parentTile.tileID.key);
-      }
-    }
-    return false;
+  isRenderableId(id: string): boolean {
+    return this._activeTiles.isIdRenderable(id);
   }
 
   /**
    * Reload tiles based on the current state of the source.
    * @param sourceDataChanged - If `true`, reload all tiles using a state of 'expired' (errored tiles use 'loading' since they have nothing to show yet), otherwise reload only non-errored tiles using state of 'reloading'.
-   * @param shouldReloadTileOptions - Set of options associated with a `MapSourceDataChangedEvent` that can be passed back to the associated `Source` determine whether a tile should be reloaded.
    */
-  reload(
-    sourceDataChanged?: boolean,
-    shouldReloadTileOptions?: GeoJSONSourceShouldReloadTileOptions,
-  ): void {
+  reload(sourceDataChanged?: boolean): void {
     if (this._paused) {
       this._shouldReloadOnResume = true;
       return;
@@ -401,11 +378,7 @@ export class TilePyramid extends Evented<SourceEventType> {
       if (!tile) {
         continue;
       }
-      if (shouldReloadTileOptions && this._source.shouldReloadTile
-        && !this._source.shouldReloadTile(tile, shouldReloadTileOptions)) {
-        continue;
-      }
-      else if (sourceDataChanged) {
+      if (sourceDataChanged) {
         this.reloadTile(id, tile.state === 'errored' ? 'loading' : 'expired');
       }
       else if (tile.state !== 'errored') {
@@ -629,14 +602,6 @@ export class TilePyramid extends Evented<SourceEventType> {
     for (const id of generationIDs)
       coverage += 4 ** (ancestor.canonical.z - id.canonical.z);
     return coverage === 1;
-  }
-
-  /**
-   * Get an active tile with data; cached tiles are excluded.
-   * @returns the active tile if it has data, undefined otherwise.
-   */
-  getLoadedTile(tileID: OverscaledTileID): Tile | undefined {
-    return this._activeTiles.getLoadedTile(tileID);
   }
 
   /**
@@ -875,15 +840,6 @@ export class TilePyramid extends Evented<SourceEventType> {
     }
   }
 
-  releaseSymbolFadeTiles(): void {
-    for (const id of this._activeTiles.getAllIds()) {
-      const tile = this._activeTiles.getTileById(id);
-      if (tile?.holdingForSymbolFade()) {
-        this.removeTile(id);
-      }
-    }
-  }
-
   /**
    * Set tiles to be retained on update of the source. For ideal tiles that do not have data, retain their loaded
    * children so they can be displayed as substitutes pending load of each ideal tile (to reduce flickering).
@@ -1092,24 +1048,6 @@ export class TilePyramid extends Evented<SourceEventType> {
   }
 
   /**
-   * Reload any currently renderable tiles that are match one of the incoming `tileId` x/y/z
-   */
-  refreshTiles(tileIds: ICanonicalTileID[]): void {
-    for (const id of this._activeTiles.getAllIds()) {
-      const tile = this._activeTiles.getTileById(id);
-      if (!tile) {
-        continue;
-      }
-      if (!this._activeTiles.isIdRenderable(id) && tile.state !== 'errored') {
-        continue;
-      }
-      if (tileIds.some(tid => tid.equals(tile.tileID.canonical))) {
-        this.reloadTile(id, 'expired');
-      }
-    }
-  }
-
-  /**
    * Remove a tile, given its id, from the pyramid
    * @internal
    */
@@ -1210,7 +1148,7 @@ export class TilePyramid extends Evented<SourceEventType> {
       return;
     }
 
-    this.reload(e.sourceDataChanged, e.shouldReloadTileOptions);
+    this.reload(e.sourceDataChanged);
     if (this._covering) {
       this.update(this._covering);
     }
@@ -1276,17 +1214,6 @@ export class TilePyramid extends Evented<SourceEventType> {
     this._lastUpdate = undefined;
   }
 
-  /**
-   * Search through our current tiles and attempt to find the tiles that
-   * cover the given bounds.
-   * @returns the visible tile coordinates in ascending zoom order.
-   */
-  getVisibleCoordinates(): OverscaledTileID[] {
-    return this.getRenderableIds()
-      .map(id => this._activeTiles.getTileById(id)?.tileID)
-      .filter((tileID): tileID is OverscaledTileID => tileID !== undefined);
-  }
-
   hasTransition(): boolean {
     return this._source.hasTransition();
   }
@@ -1337,14 +1264,5 @@ export class TilePyramid extends Evented<SourceEventType> {
       }
     }
     this._tileCache.filter(tile => !tile.hasDependency(namespaces, keys));
-  }
-
-  areTilesLoaded(): boolean {
-    for (const tile of this._activeTiles.getAllTiles()) {
-      if (!(tile.state === 'loaded' || tile.state === 'errored')) {
-        return false;
-      }
-    }
-    return true;
   }
 }
