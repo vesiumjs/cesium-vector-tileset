@@ -3,13 +3,14 @@ import type { RenderFrameState } from '../render-frame';
 import type { TilesetRenderer } from '../tileset-renderer';
 import Point from '@mapbox/point-geometry';
 import * as Cesium from 'cesium';
-import { BufferPolygonCollection, Cartesian3, Event, GeographicTilingScheme, Rectangle, WebMercatorProjection, WebMercatorTilingScheme } from 'cesium';
+import { BufferPolygonCollection, Cartesian3, Event, GeographicTilingScheme, Intersect, Rectangle, WebMercatorProjection, WebMercatorTilingScheme } from 'cesium';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CesiumVectorTileset } from '../../../cesium-vector-tileset';
 import { FillBucket } from '../../../data/bucket/fill-bucket';
 import { EvaluationParameters } from '../../../style/evaluation-parameters';
 import { Tile } from '../../../tile/tile';
 import { OverscaledTileID } from '../../../tile/tile-id';
+import { tileBoundingSphere } from '../../geometry/tile-bounding-sphere';
 import { buildVectorTile } from '../../vector/__test__/vector-tile-helper';
 import { drawBatchForOwner } from '../draw-batch';
 import { zoomForFrame } from '../render-frame';
@@ -214,16 +215,56 @@ describe('rendered globe and cached surface coverage', () => {
     finally { covering.destroy(); }
   });
 
+  it('resolves a coarse rendered rectangle only where the frame can see it', () => {
+    // A rendered rectangle stands for its whole ground extent, however little of
+    // it is on screen: this z10 rectangle is far wider than the 3000 m view and
+    // would resolve to all 64 of its z13 tiles. The frame's frustum test, wired
+    // here through the real SceneTileCovering, is what holds the covering to the
+    // visible part.
+    const frame = cameraFrame({
+      projection: new WebMercatorProjection(),
+      longitude: 121.483,
+      latitude: 31.226,
+      height: 3000,
+      heading: 0,
+      pitch: -Math.PI / 2,
+      width: 1569,
+      heightPixels: 906,
+      fovY: 36.87511294314776 * Math.PI / 180,
+    });
+    frame.cullingVolume = frame.camera.frustum.computeCullingVolume(frame.camera.positionWC, frame.camera.directionWC, frame.camera.upWC);
+    // The z10 ancestor of the tile the camera is over.
+    const ancestor = new OverscaledTileID(10, 0, 10, 13721 >> 4, 6694 >> 4);
+    const globe = { _surface: { _tilesToRender: [terrain(ancestor)] } };
+    const scene = Object.assign(frame.camera._scene!, { mode: frame.mode, globe, preRender: new Event(), postRender: new Event(), _frameState: frame });
+    const source = { type: 'vector', minzoom: 0, maxzoom: 14, tileSize: 512 };
+    const pyramid = { getSource: () => source, getLoadedTileIDs: () => [] };
+    const covering = new SceneTileCovering(() => {});
+    covering.observe(scene);
+    try {
+      const selected = covering.covering(pyramid, frame, 0)!;
+      expect(selected.idealTileIDs.length).toBeGreaterThan(0);
+      expect(selected.idealTileIDs.length).toBeLessThan(32);
+      const offScreen = selected.idealTileIDs.filter(id => frame.cullingVolume!.computeVisibility(tileBoundingSphere(id)) === Intersect.OUTSIDE);
+      expect(offScreen).toEqual([]);
+      // An entirely off-screen rectangle authorizes nothing at all.
+      globe._surface._tilesToRender = [terrain(awayID)];
+      scene.postRender.raiseEvent();
+      expect(covering.covering(pyramid, frame, 0)!.idealTileIDs).toEqual([]);
+    }
+    finally { covering.destroy(); }
+  });
+
   it('restores four uploaded cached children on the first return frame while Globe still selects their uploaded ancestor', async () => {
     const owner = await coverageOwner();
     const children = parentID.children(14);
+    const tileIds = children.map(id => `world/${id.key}`);
     try {
-      expect(owner.render()).toEqual([owner.tileId]);
       await loadCoverageTiles(owner, children);
+      expect(owner.render()).toEqual([owner.tileId]);
       owner.globe._surface._tilesToRender = children.map(terrain);
       owner.render();
       owner.render();
-      const tileIds = children.map(id => `world/${id.key}`);
       expect(owner.render().sort()).toEqual([...tileIds].sort());
       const surfaces = tileIds.map(id => owner.vector.getTileCollections(id)[0]!);
       changeHeight(owner, 6000);
@@ -254,7 +295,9 @@ describe('rendered globe and cached surface coverage', () => {
       for (const surface of surfaces)
         expect(owner.tileset.contains(surface)).toBe(true);
       changeHeight(owner, 6000);
-      expect(owner.render()).toEqual([owner.tileId]);
+      // The first frame keeps the last confirmed view's own tiles; the next
+      // one samples the coarser level the new pose needs.
+      owner.render();
       expect(owner.render()).toEqual([owner.tileId]);
       expect(owner.pyramid._covering!.idealTileIDs).toEqual([parentID]);
       expect(owner.tileset.contains(owner.surface)).toBe(true);
@@ -267,8 +310,8 @@ describe('rendered globe and cached surface coverage', () => {
     const owner = await coverageOwner();
     const children = parentID.children(14).slice(0, 3);
     try {
-      owner.render();
       await loadCoverageTiles(owner, children);
+      owner.render();
       owner.globe._surface._tilesToRender = children.map(terrain);
       owner.render();
       owner.render();
@@ -301,13 +344,20 @@ describe('rendered globe and cached surface coverage', () => {
       owner.globe._surface._tilesToRender = [terrain(awayID)];
       owner.render();
       owner.render();
+      // Both settled views legitimately refine their rectangle to the level the
+      // camera needs; what this case pins starts at the unconfirmed view below.
+      owner.load.mockClear();
       owner.position(unloaded);
       expect(owner.render()).toEqual([]);
       expect(owner.load).not.toHaveBeenCalled();
       owner.globe._surface._tilesToRender = [terrain(unloaded)];
       owner.scene.postRender.raiseEvent();
       expect(owner.render()).toEqual([]);
-      expect(owner.load.mock.calls.map(([tile]) => tile.tileID.key)).toEqual([unloaded.key]);
+      // The completed Globe authorizes the area; its level still comes from the
+      // camera, so the view requests the four tiles the LOD wants, not the
+      // rectangle's own coarser tile.
+      expect(owner.load.mock.calls.map(([tile]) => tile.tileID.key).sort())
+        .toEqual(unloaded.children(14).map(id => id.key).sort());
     }
     finally { owner.tileset.destroy(); }
   });
@@ -321,6 +371,7 @@ describe('rendered globe and cached surface coverage', () => {
       owner.globe._surface._tilesToRender = [terrain(awayID)];
       owner.render();
       owner.render();
+      owner.load.mockClear();
       owner.position(child);
       owner.globe._surface._tilesToRender = [terrain(child)];
       owner.scene.postRender.raiseEvent();

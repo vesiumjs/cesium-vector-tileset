@@ -188,6 +188,12 @@ async function uploadedWaterLifecycle() {
         break;
       expect(renderScene.render().renderError).toBeUndefined();
     }
+    // The settled camera wants the four z14 tiles under this z13 rectangle and
+    // dispatches them once, keeping the uploaded ancestor as their fallback.
+    expect(load.mock.calls.map(([tile]) => tile.tileID.key).sort())
+      .toEqual(tileID.children(14).map(id => id.key).sort());
+    // Past that first dispatch, no later idle tick requests anything.
+    load.mockClear();
     quiet();
     expect(renderScene.render().rendered).toBe(false);
   }

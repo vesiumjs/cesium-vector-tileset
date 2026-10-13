@@ -155,13 +155,19 @@ export class SourceTileLod {
     }
   }
 
+  /**
+   * The level the LOD wants at this candidate's closest point, MapLibre's
+   * coveringTiles node value. A covering splits a tile while its level stays
+   * below this and emits the tile as soon as it does not.
+   */
+  desiredZoom(id: OverscaledTileID): number {
+    const { canonicalZoom, x, y } = this._clampedID(id);
+    return this._desiredZoom(canonicalZoom, x, y, id.wrap);
+  }
+
   /** Walk this candidate's ancestors with the same stopping rule as coveringTiles. */
   select(id: OverscaledTileID): OverscaledTileID | undefined {
-    const capped = (this._reparse ? id.canonical.z : id.overscaledZ) > this._maxZoom;
-    const canonicalZoom = capped ? Math.min(id.canonical.z, this._maxZoom) : id.canonical.z;
-    const overscaledZoom = capped ? this._maxZoom : id.overscaledZ;
-    const x = id.canonical.x >> (id.canonical.z - canonicalZoom);
-    const y = id.canonical.y >> (id.canonical.z - canonicalZoom);
+    const { canonicalZoom, x, y } = this._clampedID(id);
     // Constant LOD first stops at its desired zoom; variable LOD must still
     // inspect every authorized ancestor, sharing work with nearby candidates.
     const firstZoom = this._camera?.variable ? 0 : this._desiredZoom(0, 0, 0, id.wrap);
@@ -173,8 +179,19 @@ export class SourceTileLod {
     }
     if (canonicalZoom < this._minZoom)
       return undefined;
-    // Canonical and overscaled zoom are separate: reaching a source's
-    // terminal canonical footprint does not authorize every parsed generation.
+    return this.resolve(id);
+  }
+
+  /**
+   * The tile a candidate resolves to once its own level is known to be at or
+   * beyond the desired zoom there, MapLibre's coveringTiles emission. Canonical
+   * and overscaled zoom are separate: reaching a source's terminal canonical
+   * footprint does not authorize every parsed generation, so a candidate
+   * stopping at that footprint is named at the generation the source is asked
+   * for. Every other level keeps the candidate's own generation.
+   */
+  resolve(id: OverscaledTileID): OverscaledTileID {
+    const { canonicalZoom, overscaledZoom, x, y } = this._clampedID(id);
     const terminal = Math.max(canonicalZoom, this._desiredZoom(canonicalZoom, x, y, id.wrap));
     if (this._reparse) {
       const parsedZoom = canonicalZoom === this._maxZoom ? terminal : canonicalZoom;
@@ -188,6 +205,22 @@ export class SourceTileLod {
 
   allows(id: OverscaledTileID): boolean {
     return this.select(id)?.equals(id) ?? false;
+  }
+
+  /**
+   * A candidate resolved into the source's own zoom limits, in the copy
+   * `_desiredZoom` expects.
+   * @internal
+   */
+  private _clampedID(id: OverscaledTileID): { canonicalZoom: number; overscaledZoom: number; x: number; y: number } {
+    const capped = (this._reparse ? id.canonical.z : id.overscaledZ) > this._maxZoom;
+    const canonicalZoom = capped ? Math.min(id.canonical.z, this._maxZoom) : id.canonical.z;
+    return {
+      canonicalZoom,
+      overscaledZoom: capped ? this._maxZoom : id.overscaledZ,
+      x: id.canonical.x >> (id.canonical.z - canonicalZoom),
+      y: id.canonical.y >> (id.canonical.z - canonicalZoom),
+    };
   }
 
   /**

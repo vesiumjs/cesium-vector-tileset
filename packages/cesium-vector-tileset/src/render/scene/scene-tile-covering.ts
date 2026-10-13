@@ -219,7 +219,13 @@ export class SceneTileCovering {
       const retained = deferred && !confirmed;
       primaryTileIds = retained
         ? cached!.primaryTileIds
-        : globeVisibleTileIDs(this._renderedGlobe, minZoom, selectionZoom, confirmed ? cached!.lod : lod);
+        : globeVisibleTileIDs(
+            this._renderedGlobe,
+            minZoom,
+            selectionZoom,
+            confirmed ? cached!.lod : lod,
+            frameState.cullingVolume ? id => this._isVisible(id, frameState) : undefined,
+          );
       // Retain only Globe-authorized requests across unconfirmed poses.
       // Loaded refinements are rechecked below, never promoted into requests.
       const selected = primaryTileIds.slice();
