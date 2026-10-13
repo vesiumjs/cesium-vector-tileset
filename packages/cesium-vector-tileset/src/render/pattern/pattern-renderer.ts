@@ -2,26 +2,26 @@ import type { ImageAtlas } from '../../assets/image-atlas';
 import type { Bucket } from '../../data/bucket';
 import type { FeatureIndex } from '../../data/feature-index';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
-
 import type { Budget } from '../scene/frame-budget';
+
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
+import type { RetainedSurface } from '../scene/scene-collections';
 import type { RadialOffsetCache } from '../vector/tile-conversion';
 import type { PatternAtlasRect } from './pattern-geometry';
 import type { PatternStyleLayer } from './pattern-layer';
 import {
-  ArcType,
   BoundingSphere,
   Cartesian2,
-  Cartesian3,
   Cartesian4,
+  Color,
+  ColorGeometryInstanceAttribute,
   ComponentDatatype,
   EllipsoidSurfaceAppearance,
   Geometry,
   GeometryAttribute,
   GeometryInstance,
+  GeometryInstanceAttribute,
   Material,
-  PolylineGeometry,
-  PolylineMaterialAppearance,
   Primitive,
   PrimitiveCollection,
   PrimitiveType,
@@ -30,14 +30,20 @@ import {
   TextureMinificationFilter,
 } from 'cesium';
 import {
-  atlasLayoutHash,
+  atlasLayoutKey,
   SharedAtlasTextures,
 } from '../../assets/shared-atlas-textures';
 import { FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
-import { EXTENT } from '../../data/extent';
 import { geometryBytes } from '../geometry/geometry-bytes';
+import { GeometryPrimitive } from '../geometry/geometry-primitive';
+import { lineAppearanceForMode } from '../line/line-appearance-mode';
+import { createLineGeometry } from '../line/line-geometry';
+import { lineGroundScale } from '../line/line-ground-scale';
+import { linePages, linePaintUniforms, PatternLineAppearance } from '../line/line-renderer';
+import { LineTileClip } from '../line/line-tile-clip';
 import { RASTER_SURFACE_OFFSET_M } from '../raster/raster-geometry';
-import { registerDrawBatch } from '../scene/draw-batch';
+import { linePaintForOwner, registerDrawBatch, registerLinePaint } from '../scene/draw-batch';
+import { LayerCollections } from '../scene/layer-collections';
 import { RetiredPool } from '../scene/retired-pool';
 import { fillBucketPrimitives, lineBucketPrimitives } from '../vector/bucket-geometry';
 import { extrusionBucketPrimitives } from '../vector/extrusion-geometry';
@@ -73,7 +79,7 @@ export interface PatternTileUpdate {
   removedMaterials: Material[];
   tileId?: string;
   parents?: ReadonlyMap<Primitive, PrimitiveCollection>;
-  retained?: { parents: ReadonlyMap<Primitive, PrimitiveCollection>; release: () => void };
+  retained?: RetainedSurface;
 }
 
 interface PatternPrimitiveEntry {
@@ -129,7 +135,7 @@ interface PatternAtlasEntry {
  * identical names + versions guarantee identical pixels.
  */
 export function patternAtlasKey(atlas: ImageAtlas): string {
-  return `pattern/${atlasLayoutHash(atlas.patternPositions)}`;
+  return `pattern/${atlasLayoutKey(atlas.patternPositions)}`;
 }
 
 interface PendingPatternEntry {
@@ -302,16 +308,12 @@ function createAtlasCanvas(width: number, height: number): PatternImageSource {
 
 function createAtlasSource(atlas: ImageAtlas): PatternImageSource {
   const canvas = createAtlasCanvas(atlas.image.width, atlas.image.height);
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
   if (!context) {
     throw new Error('A 2D canvas context is required to upload pattern atlases');
   }
-  const data = new Uint8ClampedArray(
-    atlas.image.data.buffer,
-    atlas.image.data.byteOffset,
-    atlas.image.data.byteLength,
-  );
-  context.putImageData(new ImageData(data as never, atlas.image.width, atlas.image.height), 0, 0);
+  const data = new Uint8ClampedArray(atlas.image.data);
+  context.putImageData(new ImageData(data, atlas.image.width, atlas.image.height), 0, 0);
   return canvas;
 }
 
@@ -455,76 +457,25 @@ function surfaceGeometry(
 }
 
 function patternPrimitive(
-  group: PatternGeometryGroup,
-  line: boolean,
+  instances: GeometryInstance[],
+  material: Material,
   extrusion3D: boolean,
 ): Primitive {
-  const primitive = new Primitive({
-    geometryInstances: group.geometryInstances,
-    appearance: line
-      ? new PolylineMaterialAppearance({
-          material: group.material,
-          translucent: true,
-        })
-      : new EllipsoidSurfaceAppearance({
-          aboveGround: true,
-          faceForward: true,
-          flat: true,
-          material: group.material,
-          translucent: true,
-          renderState: extrusion3D ? { cull: { enabled: true } } : undefined,
-        }),
+  return new Primitive({
+    geometryInstances: instances,
+    appearance: new EllipsoidSurfaceAppearance({
+      aboveGround: true,
+      faceForward: true,
+      flat: true,
+      material,
+      translucent: true,
+      renderState: extrusion3D ? { cull: { enabled: true } } : undefined,
+    }),
     allowPicking: true,
     asynchronous: false,
-    // Global repeat counts exceed the normalized range of Cesium's UV packer.
     compressVertices: false,
     releaseGeometryInstances: true,
   });
-  primitive.show = group.opacity > 0;
-  return primitive;
-}
-
-function lineRepeatX(tilePositions: Float64Array, rect: PatternAtlasRect, tileID: TileID): number {
-  let length = 0;
-  for (let index = 2; index < tilePositions.length; index += 2) {
-    length += Math.hypot(tilePositions[index] - tilePositions[index - 2], tilePositions[index + 1] - tilePositions[index - 1]);
-  }
-  const patternWidth = (rect.tlbr[2] - rect.tlbr[0]) / rect.pixelRatio;
-  const overscale = 'overscaledZ' in tileID
-    ? 2 ** (tileID.overscaledZ - tileID.canonical.z)
-    : 1;
-  return patternWidth > 0
-    ? Math.max(length * TILE_SIZE_PX / EXTENT * overscale / patternWidth, 0.0001)
-    : 1;
-}
-
-function linePositions(positions: Float64Array): Cartesian3[] {
-  const result: Cartesian3[] = [];
-  for (let i = 0; i < positions.length; i += 3) {
-    result.push(Cartesian3.fromElements(positions[i], positions[i + 1], positions[i + 2]));
-  }
-  return result;
-}
-
-/** Bake the feature's pattern repeat into its ST coordinates before merging. */
-export function patternLineGeometry(
-  positions: Float64Array,
-  width: number,
-  repeatX: number,
-): Geometry | undefined {
-  const geometry = PolylineGeometry.createGeometry(new PolylineGeometry({
-    arcType: ArcType.NONE,
-    positions: linePositions(positions),
-    vertexFormat: PolylineMaterialAppearance.VERTEX_FORMAT,
-    width,
-  }));
-  const st = geometry?.attributes.st?.values;
-  if (st) {
-    for (let i = 0; i < st.length; i += 2) {
-      st[i] *= repeatX;
-    }
-  }
-  return geometry;
 }
 
 /**
@@ -535,9 +486,13 @@ export function patternLineGeometry(
  * global image atlas instead of one texture per material.
  */
 export class PatternTileRenderer {
-  private _layerCollections = new Map<string, PrimitiveCollection>();
+  private readonly _layerCollections = new LayerCollections();
 
   private _tiles = new Map<string, PatternPrimitiveEntry[]>();
+
+  private readonly _builds = new Set<PatternBuildState>();
+
+  private readonly _retainedSurfaces = new Set<RetainedSurface & { tileId: string; entries: PatternPrimitiveEntry[] }>();
 
   private _hiddenTiles = new Set<string>();
 
@@ -557,11 +512,30 @@ export class PatternTileRenderer {
   pixelRatio = 1;
 
   get collections(): ReadonlyMap<string, PrimitiveCollection> {
-    return this._layerCollections;
+    return this._layerCollections.collections;
   }
 
   get tileIds(): ReadonlyArray<string> {
     return this._tileIdsCache ??= [...this._tiles.keys()];
+  }
+
+  /** Detached cache entries and staged builds still need their layer parents. */
+  collectUnusedLayerCollections(): PrimitiveCollection[] {
+    if (!this._layerCollections.hasUnused)
+      return [];
+    const retained = new Set<PrimitiveCollection>();
+    for (const entries of this._retired.values()) {
+      for (const entry of entries)
+        retained.add(entry.collection);
+    }
+    for (const state of this._builds) {
+      for (const layer of state.layers) {
+        const collection = this._layerCollections.collections.get(layer.id);
+        if (collection)
+          retained.add(collection);
+      }
+    }
+    return this._layerCollections.collectUnused(retained);
   }
 
   /** Toggle only this tile's live primitives without changing their paint visibility. */
@@ -586,7 +560,7 @@ export class PatternTileRenderer {
     return {
       tiles: this._tiles.size,
       retiredTiles: this._retired.size,
-      layerCollections: this._layerCollections.size,
+      layerCollections: this._layerCollections.collections.size,
     };
   }
 
@@ -597,33 +571,31 @@ export class PatternTileRenderer {
    * (attached to the scene); only pooled retired tiles are evictable.
    */
   visitMemoryEntries(visit: MemoryBudgetVisitor): void {
-    const bytesOf = (tileEntries: PatternPrimitiveEntry[]): number => {
+    const seen = new Set<Primitive>();
+    const bytesOf = (entries: readonly PatternPrimitiveEntry[]): number => {
       let bytes = 0;
-      const seen = new Set<Primitive>();
-      for (const entry of tileEntries) {
-        if (seen.has(entry.primitive)) {
+      for (const entry of entries) {
+        if (seen.has(entry.primitive))
           continue;
-        }
         seen.add(entry.primitive);
         bytes += entry.bytes ?? 0;
       }
       return bytes;
     };
-    for (const [tileId, tileEntries] of this._tiles) {
-      visit(tileId, bytesOf(tileEntries), true);
-    }
-    for (const [tileId, tileEntries] of this._retired.entries()) {
-      visit(tileId, bytesOf(tileEntries));
-    }
+    const pinned = new Map<string, number>();
+    for (const [tileId, entries] of this._tiles)
+      pinned.set(tileId, bytesOf(entries));
+    for (const retained of this._retainedSurfaces)
+      pinned.set(retained.tileId, (pinned.get(retained.tileId) ?? 0) + bytesOf(retained.entries));
+    for (const [tileId, bytes] of pinned)
+      visit(tileId, bytes, true);
+    for (const [tileId, entries] of this._retired.entries())
+      visit(tileId, bytesOf(entries));
   }
 
   setLayers(layers: readonly PatternStyleLayer[], layerOrder?: ReadonlyMap<string, number>): PatternTileUpdate {
     const update: PatternTileUpdate = { removed: [], added: [], removedMaterials: [] };
-    for (const layer of layers) {
-      if (!this._layerCollections.has(layer.id)) {
-        this._layerCollections.set(layer.id, new PrimitiveCollection({ destroyPrimitives: false }));
-      }
-    }
+    this._layerCollections.setLayers(layers.map(layer => layer.id));
     // Deleted layers have no successor. Layers changing render track keep
     // their current primitives until the tile's new vector stage is ready.
     if (layerOrder) {
@@ -649,17 +621,31 @@ export class PatternTileRenderer {
    * Transfer replaced entries to the scene handoff without detaching them.
    * @internal
    */
-  private _retainEntries(entries: PatternPrimitiveEntry[]): NonNullable<PatternTileUpdate['retained']> | undefined {
-    if (entries.length === 0) {
+  private _retainEntries(entries: PatternPrimitiveEntry[]): PatternTileUpdate['retained'] {
+    if (entries.length === 0)
       return undefined;
-    }
-    return {
+    const retained: RetainedSurface & { tileId: string; entries: PatternPrimitiveEntry[] } = {
+      tileId: entries[0].tileId,
+      entries,
       parents: new Map(entries.map(entry => [entry.primitive, entry.collection])),
+      get visible() {
+        return entries.some(entry => !entry.primitive.isDestroyed() && entry.primitive.show);
+      },
+      setVisible: (visible, hiddenLayers) => {
+        if (!this._retainedSurfaces.has(retained))
+          return;
+        for (const entry of entries)
+          entry.primitive.show = visible && entry.paintVisible && !hiddenLayers?.has(entry.id.layerId);
+      },
       release: () => {
+        if (!this._retainedSurfaces.delete(retained))
+          return;
         const removed = this._retireEntries(entries);
         destroyPatternResources({ ...removed, added: [] });
       },
     };
+    this._retainedSurfaces.add(retained);
+    return retained;
   }
 
   takeDisplacedTile(tileId: string, layers: readonly PatternStyleLayer[]): PatternTileUpdate['retained'] {
@@ -839,8 +825,7 @@ export class PatternTileRenderer {
     styleMutationRevision = styleRevision,
     transitions = false,
   }: PatternBuildInput): PatternBuildBegun {
-    // Image patterns bake width, opacity and extrusion dimensions.
-    styleZoom = styleZoom === undefined ? undefined : Math.floor(styleZoom);
+    // Composite paint uses continuous map zoom; texture repeats use tile coordinates.
     const layerKey = layers.map(layer => layer.id).join('|');
     const atlasVersion = atlas ? String(atlas.revision ?? 0) : '';
     const existing = this._tiles.get(tileId);
@@ -877,7 +862,7 @@ export class PatternTileRenderer {
         const layer = entry.styleRevision === styleRevision
           ? entry.layer
           : layers.find(candidate => candidate.id === entry.id.layerId);
-        if (!bucket || !layer || !isPatternBucket(bucket)) {
+        if (!bucket || !layer || !atlas || !isPatternBucket(bucket)) {
           return false;
         }
         const paintRevision = bucket.programConfigurations.paintRevision;
@@ -922,33 +907,32 @@ export class PatternTileRenderer {
     const entries: PatternPrimitiveEntry[] = [];
     const addedPrimitives = new Set<Primitive>();
     const staged: PatternStagedLayer[] = [];
-    return {
-      status: 'resumable',
-      state: {
-        radialOffsetCache: new WeakMap(),
-        patternGeometry: new Map(),
-        tileId,
-        tileID,
-        tileFeatureIndex,
-        buckets,
-        atlas,
-        layers: [...layers],
-        layerOrder,
-        sourceId,
-        styleZoom,
-        mode,
-        layerKey,
-        atlasVersion,
-        styleRevision,
-        styleMutationRevision,
-        atlasState,
-        layerIndex: 0,
-        layerResume: undefined,
-        entries,
-        staged,
-        addedPrimitives,
-      },
+    const state: PatternBuildState = {
+      radialOffsetCache: new WeakMap(),
+      patternGeometry: new Map(),
+      tileId,
+      tileID,
+      tileFeatureIndex,
+      buckets,
+      atlas,
+      layers: [...layers],
+      layerOrder,
+      sourceId,
+      styleZoom,
+      mode,
+      layerKey,
+      atlasVersion,
+      styleRevision,
+      styleMutationRevision,
+      atlasState,
+      layerIndex: 0,
+      layerResume: undefined,
+      entries,
+      staged,
+      addedPrimitives,
     };
+    this._builds.add(state);
+    return { status: 'resumable', state };
   }
 
   /**
@@ -971,7 +955,7 @@ export class PatternTileRenderer {
       first = false;
       const layer = state.layers[state.layerIndex];
       const bucket = state.buckets[layer.id];
-      const collection = this._layerCollections.get(layer.id);
+      const collection = this._layerCollections.collections.get(layer.id);
       if (!isPatternBucket(bucket) || !collection) {
         destroyPendingPatternGroups(state.atlasState, state.layerResume);
         state.layerIndex++;
@@ -1009,7 +993,7 @@ export class PatternTileRenderer {
         state.atlasVersion,
         state.styleRevision,
         state.styleMutationRevision,
-        state.radialOffsetCache,
+        state.radialOffsetCache ??= new WeakMap(),
         state.layerResume,
         budget,
       );
@@ -1046,7 +1030,7 @@ export class PatternTileRenderer {
       this._hiddenTiles.add(state.tileId);
     }
     for (const staged of state.staged) {
-      const collection = this._layerCollections.get(staged.layerId);
+      const collection = this._layerCollections.collections.get(staged.layerId);
       if (!collection) {
         // The layer left the style mid-build: release its staged primitives.
         for (let i = 0; i < staged.staging.length; i++) {
@@ -1113,6 +1097,7 @@ export class PatternTileRenderer {
     state.layerResume = undefined;
     state.radialOffsetCache = undefined;
     state.atlasState = undefined;
+    this._builds.delete(state);
     return update;
   }
 
@@ -1150,6 +1135,7 @@ export class PatternTileRenderer {
     state.layerResume = undefined;
     state.radialOffsetCache = undefined;
     state.atlasState = undefined;
+    this._builds.delete(state);
   }
 
   /**
@@ -1274,19 +1260,31 @@ export class PatternTileRenderer {
         if (!rect) {
           continue;
         }
-        const lineGeometry = patternLineGeometry(
-          radialOffsetPositions(geometry.positions, offset, radialOffsetCache),
-          Math.max(1, Math.min(255, style.widthPx * this.pixelRatio)),
-          lineRepeatX(geometry.tilePositions, rect, tileID),
-        );
+        const layout = bucket.featureLineJoinCaps[geometry.featureIndex] ?? bucket.lineJoinCap;
+        const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
+        const lineGeometry = createLineGeometry(geometry.positions, {
+          ...layout,
+          widthPx: style.widthPx,
+          textureDistance: true,
+        }, planar, { tileID: canonical, tilePositions: geometry.tilePositions });
         if (!lineGeometry) {
           continue;
         }
+        const patternWidth = (rect.tlbr[2] - rect.tlbr[0]) / rect.pixelRatio;
+        const zoom = 'overscaledZ' in tileID ? tileID.overscaledZ : tileID.z;
+        const distances = (lineGeometry.attributes as Geometry['attributes'] & { a_linesofar: GeometryAttribute }).a_linesofar.values as Float32Array;
+        const scale = TILE_SIZE_PX * 2 ** zoom / patternWidth;
+        for (let index = 0; index < distances.length; index++) distances[index] *= scale;
         const material = materialFor(rect, opacity);
         addToGroup({
           geometryInstance: new GeometryInstance({
             geometry: lineGeometry,
             id,
+            attributes: {
+              color: ColorGeometryInstanceAttribute.fromColor(Color.WHITE),
+              lineWidth: new GeometryInstanceAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 1, value: [style.widthPx] }),
+              lineMiterLimit: new GeometryInstanceAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 1, value: [layout.join === 'bevel' ? 1.05 : layout.miterLimit] }),
+            },
           }),
           material: material.material,
           materialKey: material.key,
@@ -1330,44 +1328,53 @@ export class PatternTileRenderer {
 
     const paintRevision = bucket.programConfigurations.paintRevision;
     const zoomDependentPaint = bucket.programConfigurations.hasCompositeProperties();
+    const clip = bucket instanceof LineBucket ? new LineTileClip('canonical' in tileID ? tileID.canonical : tileID) : undefined;
     for (const group of groups.values()) {
-      const primitive = patternPrimitive(group, bucket instanceof LineBucket, bucket instanceof FillExtrusionBucket && !planar);
-      registerDrawBatch(primitive, {
-        layerId: layer.id,
-        tileId,
-        kind: bucket instanceof FillExtrusionBucket ? 'extrusion' : 'pattern',
-      });
-      collection.add(primitive);
-      // One byte count per group: every entry of the group shares the same
-      // primitive and geometries.
-      let groupBytes = 0;
-      for (const instance of group.geometryInstances) {
-        if (instance.geometry) {
-          groupBytes += geometryBytes(instance.geometry);
-        }
-      }
-      for (const pending of group.entries) {
-        entries.push({
-          primitive,
-          paintVisible: primitive.show,
-          material: group.material,
-          materialKey: group.materialKey,
-          atlasKey: atlasState.key,
-          atlasVersion,
+      const pages = bucket instanceof LineBucket ? linePages(group.geometryInstances) : [group.geometryInstances];
+      let first = true;
+      let pendingOffset = 0;
+      for (const instances of pages) {
+        if (!first)
+          atlasState.materials.get(group.materialKey)!.refs++;
+        first = false;
+        const primitive = bucket instanceof LineBucket
+          ? new GeometryPrimitive({ geometryInstances: instances, appearance: new PatternLineAppearance(group.material) }, 'line', offset, lineAppearanceForMode)
+          : patternPrimitive(instances, group.material, bucket instanceof FillExtrusionBucket && !planar);
+        primitive.show = group.opacity > 0;
+        if (clip)
+          registerLinePaint(primitive, linePaintUniforms(clip, 1, Color.WHITE, offset, styleZoom ?? bucket.zoom));
+        registerDrawBatch(primitive, {
+          layerId: layer.id,
           tileId,
-          collection,
-          id: pending.id,
-          layer,
-          styleZoom,
-          styleRevision,
-          styleMutationRevision,
-          paintRevision,
-          zoomDependentPaint,
-          mode,
-          layerKey,
-          styleSignature: pending.styleSignature,
-          bytes: groupBytes,
+          kind: bucket instanceof FillExtrusionBucket ? 'extrusion' : 'pattern',
         });
+        collection.add(primitive);
+        const groupBytes = instances.reduce((bytes, instance) => bytes + geometryBytes(instance.geometry), 0);
+        const pendingEntries = group.entries.slice(pendingOffset, pendingOffset + instances.length);
+        pendingOffset += instances.length;
+        for (const pending of pendingEntries) {
+          entries.push({
+            primitive,
+            paintVisible: primitive.show,
+            material: group.material,
+            materialKey: group.materialKey,
+            atlasKey: atlasState.key,
+            atlasVersion,
+            tileId,
+            collection,
+            id: pending.id,
+            layer,
+            styleZoom,
+            styleRevision,
+            styleMutationRevision,
+            paintRevision,
+            zoomDependentPaint,
+            mode,
+            layerKey,
+            styleSignature: pending.styleSignature,
+            bytes: groupBytes,
+          });
+        }
       }
     }
     return { entries };
@@ -1582,15 +1589,29 @@ export class PatternTileRenderer {
   }
 
   hasPickObject(id: PatternPrimitiveID): boolean {
-    return this._tiles.get(id.tileId)?.some(entry => entry.id === id) ?? false;
+    return this._tiles.get(id.tileId)?.some(entry => entry.id === id)
+      || [...this._retainedSurfaces].some(retained => retained.tileId === id.tileId
+        && retained.entries.some(entry => entry.id === id));
   }
 
-  /** Adopt shared atlas textures before Native creates each material's texture. */
-  update(context: unknown): void {
+  /** Refresh live and retained line widths before Native submits their commands. */
+  update(context: unknown, zoom: number): void {
+    const metersPerPixel = lineGroundScale(zoom);
+    for (const collection of this._layerCollections.collections.values()) {
+      for (let index = 0; index < collection.length; index++) {
+        const paint = linePaintForOwner(collection.get(index));
+        if (paint) {
+          paint.metersPerPixel = metersPerPixel;
+          paint.width = this.pixelRatio;
+        }
+      }
+    }
     this._shared.adopt(context as { [key: string]: unknown } | undefined);
   }
 
   clear(): PatternTileUpdate {
+    for (const retained of this._retainedSurfaces)
+      retained.release();
     const result: PatternTileUpdate = { removed: [], added: [], removedMaterials: [] };
     for (const tileId of [...this._tiles.keys()]) {
       const update = this.removeTile(tileId);

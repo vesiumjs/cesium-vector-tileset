@@ -1,21 +1,12 @@
-import type { Property } from '../../style/properties';
 import type { LineStyleLayer } from '../../style/style-layer/line-style-layer';
 import type { LineFeatureStyle } from '../vector/feature-attributes';
+import { Math as CesiumMath, EasingFunction } from 'cesium';
 import { EvaluationParameters } from '../../style/evaluation-parameters';
 import { PossiblyEvaluatedPropertyValue, PropertyValue } from '../../style/properties';
-import { easeCubicInOut } from '../../util/math';
 import { clone } from '../../util/objects';
 import { straightAlphaColor } from '../vector/feature-attributes';
 
-// Transitioning stores these nodes at runtime. Its public _values annotation
-// describes the next evaluation stage rather than this transition tree.
-interface PaintTransition {
-  property: Property<unknown, unknown>;
-  value: PropertyValue<unknown, unknown>;
-  prior?: PaintTransition;
-  begin: number;
-  end: number;
-}
+type PaintTransition = LineStyleLayer['_transitioningPaint']['_values']['line-width'];
 
 export type FrozenLineCameraPaint = (zoom: number) => LineFeatureStyle;
 
@@ -29,7 +20,7 @@ function freezeProperty(node: PaintTransition, now: number): (zoom: number) => u
   const prior = freezeProperty(node.prior, now);
   if (now < node.begin)
     return prior;
-  const amount = easeCubicInOut((now - node.begin) / (node.end - node.begin));
+  const amount = EasingFunction.CUBIC_IN_OUT(CesiumMath.clamp((now - node.begin) / (node.end - node.begin), 0, 1));
   const property = node.property;
   return zoom => property.interpolate(prior(zoom), evaluate(zoom), amount);
 }
@@ -42,10 +33,10 @@ function unwrap(value: unknown): unknown {
 export function freezeLineCameraPaint(layer: LineStyleLayer): FrozenLineCameraPaint {
   const now = layer.paint.get('line-width').parameters.now;
   const transitions = layer._transitioningPaint._values;
-  const width = freezeProperty(transitions['line-width'] as unknown as PaintTransition, now);
-  const color = freezeProperty(transitions['line-color'] as unknown as PaintTransition, now);
-  const opacity = freezeProperty(transitions['line-opacity'] as unknown as PaintTransition, now);
-  const layerOpacity = freezeProperty(transitions['line-layer-opacity'] as unknown as PaintTransition, now);
+  const width = freezeProperty(transitions['line-width'], now);
+  const color = freezeProperty(transitions['line-color'], now);
+  const opacity = freezeProperty(transitions['line-opacity'], now);
+  const layerOpacity = freezeProperty(transitions['line-layer-opacity'], now);
   return (zoom) => {
     const rgba = unwrap(color(zoom)) as { r: number; g: number; b: number; a: number };
     const result = straightAlphaColor(rgba.r, rgba.g, rgba.b, rgba.a);

@@ -211,7 +211,7 @@ export class DashMaterial {
         : document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const canvasContext = canvas.getContext('2d');
+      const canvasContext = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
       if (!canvasContext)
         throw new Error('A 2D canvas context is required to upload the dash atlas');
       const rgba = new Uint8ClampedArray(width * height * 4);

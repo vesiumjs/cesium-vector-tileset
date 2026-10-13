@@ -1,6 +1,7 @@
-import type { Color, GeometryInstance, Primitive } from 'cesium';
+import type { Color, GeometryInstance } from 'cesium';
 import type { LineBucket } from '../../data/bucket-runtime';
 import type { LineStyleLayer } from '../../style/style-layer/line-style-layer';
+import type { GeometryBatchTable } from '../geometry/geometry-primitive';
 import type { LinePaintUniforms } from '../scene/draw-batch';
 import type { ReplayDrawCommand } from '../scene/draw-command-replay';
 import type { LineFeatureStyle } from '../vector/feature-attributes';
@@ -10,6 +11,7 @@ import * as Cesium from 'cesium';
 import { Cartesian4, Color as CesiumColor, ColorGeometryInstanceAttribute } from 'cesium';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { registerDrawBatch, registerLinePaint, registerUniformLineExtent } from '../scene/draw-batch';
+import { DrawCommandReplay } from '../scene/draw-command-replay';
 import { sharePrimitiveBytes } from '../scene/resource-memory';
 import { layerFor, lineStyleForFeature } from '../vector/feature-attributes';
 import { freezeLineCameraPaint } from './frozen-line-paint';
@@ -20,29 +22,16 @@ interface BatchAttribute {
   functionName: string;
 }
 
-interface BatchTable {
-  readonly attributes: BatchAttribute[];
-  readonly numberOfInstances: number;
-  _batchValues: Uint8Array | Float32Array;
-  _batchValuesDirty: boolean;
-  setBatchedAttribute: (instance: number, attribute: number, value: number | Cartesian4) => void;
-  getUniformMapCallback: () => (uniforms: Record<string, () => unknown>) => Record<string, () => unknown>;
-  update: (frameState: unknown) => void;
-  destroy: () => void;
-}
-
 interface LineFrame {
   commandList?: ReplayDrawCommand[];
   context?: { createPickId: (object: object) => { color: Color; destroy: () => void } };
 }
 
 interface CesiumRuntime {
-  BatchTable: new (context: unknown, attributes: BatchAttribute[], instances: number) => BatchTable;
-  DrawCommand: { shallowClone: (source: ReplayDrawCommand, target?: ReplayDrawCommand) => ReplayDrawCommand };
+  BatchTable: new (context: unknown, attributes: BatchAttribute[], instances: number) => GeometryBatchTable;
 }
 
 const BatchTable = (Cesium as unknown as CesiumRuntime).BatchTable;
-const DrawCommand = (Cesium as unknown as CesiumRuntime).DrawCommand;
 
 interface UniformLineStyle {
   paint: LineStyleLayer['paint'];
@@ -56,7 +45,7 @@ const appliedUniformStyles = new WeakMap<LinePaintUniforms, LineFeatureStyle>();
 /** Uniform owners share scalar paint from the same evaluated StyleLayer. */
 export function updateLineUniforms(uniforms: LinePaintUniforms, bucket: LineBucket, featureIndex: number, layerId: string, zoom: number): void {
   uniforms.metersPerPixel = lineGroundScale(zoom);
-  const layer = layerFor(bucket, layerId) as LineStyleLayer;
+  const layer = layerFor(bucket, layerId);
   let cached = uniformLineStyles.get(layer);
   // Style.update retains paint on steady frames; recalculate replaces it for
   // camera, style/global-state mutations and every active transition step.
@@ -85,7 +74,7 @@ interface LayerPaint {
   layer: LineFamilyLayer;
   uniforms: LinePaintUniforms;
   owner: object;
-  table?: BatchTable;
+  table?: GeometryBatchTable;
   pickIds: Array<{ destroy: () => void }>;
   held?: { evaluate: FrozenLineCameraPaint; zoom?: number };
   committedInstances?: ReadonlyMap<number, LineFeatureStyle>;
@@ -93,44 +82,9 @@ interface LayerPaint {
 }
 
 interface CommandClone {
-  command: ReplayDrawCommand;
+  replay: DrawCommandReplay;
   baseUniformMap?: ReplayDrawCommand['uniformMap'];
   uniformMap?: ReplayDrawCommand['uniformMap'];
-}
-
-/** Cesium DrawCommand clone fields, with replay ownership and uniforms kept local. */
-function updateReplayCommand(source: ReplayDrawCommand, target: ReplayDrawCommand): void {
-  // Native setters invalidate derivatives only when the corresponding field
-  // changes. Keep each replay's dirty state, shadow epoch and derivatives.
-  target.boundingVolume = source.boundingVolume;
-  target.orientedBoundingBox = source.orientedBoundingBox;
-  target.modelMatrix = source.modelMatrix;
-  target.primitiveType = source.primitiveType;
-  target.vertexArray = source.vertexArray;
-  target.count = source.count;
-  target.offset = source.offset;
-  target.instanceCount = source.instanceCount;
-  target.shaderProgram = source.shaderProgram;
-  target.renderState = source.renderState;
-  target.framebuffer = source.framebuffer;
-  target.pass = source.pass;
-  target.debugOverlappingFrustums = source.debugOverlappingFrustums;
-  target.pickId = source.pickId;
-  target.snapId = source.snapId;
-  target.pickedMetadataInfo = source.pickedMetadataInfo;
-  target.cull = source.cull;
-  target.occlude = source.occlude;
-  target.executeInClosestFrustum = source.executeInClosestFrustum;
-  target.debugShowBoundingVolume = source.debugShowBoundingVolume;
-  target.castShadows = source.castShadows;
-  target.receiveShadows = source.receiveShadows;
-  target.pickOnly = source.pickOnly;
-  target.depthForTranslucentClassification = source.depthForTranslucentClassification;
-  // Native exposes metadata permission through a getter without a setter.
-  if (target._pickMetadataAllowed !== source._pickMetadataAllowed) {
-    target._pickMetadataAllowed = source._pickMetadataAllowed;
-    target.dirty = true;
-  }
 }
 
 interface InstanceId {
@@ -152,7 +106,7 @@ function paintUniforms(clip: LineTileClip, offset: number, zoom: number): LinePa
   return uniforms;
 }
 
-function setColor(table: BatchTable, instance: number, attribute: number, color: Color, bytes: Uint8Array, value: Cartesian4): void {
+function setColor(table: GeometryBatchTable, instance: number, attribute: number, color: Color, bytes: Uint8Array, value: Cartesian4): void {
   ColorGeometryInstanceAttribute.toValue(color, bytes);
   value.x = bytes[0];
   value.y = bytes[1];
@@ -164,7 +118,7 @@ function setColor(table: BatchTable, instance: number, attribute: number, color:
 /** One uploaded strip chunk, replayed by each style layer in its bucket family. */
 export class LineFamilyChunk {
   show = true;
-  readonly primitive: Primitive;
+  readonly primitive: GeometryPrimitive;
 
   private readonly _layers: LayerPaint[];
 
@@ -205,7 +159,7 @@ export class LineFamilyChunk {
     }, 'line', Math.max(...layers.map(layer => Math.abs(layer.offsetMeters))), lineAppearanceForMode);
     registerDrawBatch(this.primitive, { layerId: layers[0].layerId, tileId, kind: 'line' });
     sharePrimitiveBytes(this, this.primitive);
-    this._layers = layers.map((layer, index) => {
+    this._layers = layers.map((layer, index): LayerPaint => {
       const owner = index === 0 ? this.primitive : {};
       const uniforms = paintUniforms(clip, layer.offsetMeters, zoom);
       registerDrawBatch(owner, { layerId: layer.layerId, tileId, kind: 'line' });
@@ -235,7 +189,7 @@ export class LineFamilyChunk {
     const frame = frameState as LineFrame;
     const commands = frame.commandList;
     const first = commands?.length ?? 0;
-    (this.primitive as unknown as { update: (state: unknown) => void }).update(frameState);
+    this.primitive.update(frameState as Parameters<GeometryPrimitive['update']>[0]);
     // Native submits its first complete commands before afterRender ready.
     // Initialize and upload current family paint before those commands draw.
     if (!commands || commands.length === first) {
@@ -252,9 +206,8 @@ export class LineFamilyChunk {
       const clones = this._clones.get(original) ?? [];
       for (let index = 1; index < this._layers.length; index++) {
         const paint = this._layers[index];
-        const entry = clones[index - 1] ?? { command: DrawCommand.shallowClone(original) };
-        const clone = entry.command;
-        updateReplayCommand(original, clone);
+        const entry = clones[index - 1] ?? { replay: new DrawCommandReplay(original) };
+        const clone = entry.replay.update(original);
         if (entry.baseUniformMap !== original.uniformMap) {
           entry.baseUniformMap = original.uniformMap;
           entry.uniformMap = {
@@ -342,7 +295,7 @@ export class LineFamilyChunk {
    * @internal
    */
   private _initialize(frame: LineFrame): void {
-    const base = (this.primitive as Primitive & { _batchTable?: BatchTable })._batchTable;
+    const base = this.primitive._batchTable;
     if (!base || !frame.context) {
       throw new TypeError('Cesium line Primitive did not create a batch table');
     }

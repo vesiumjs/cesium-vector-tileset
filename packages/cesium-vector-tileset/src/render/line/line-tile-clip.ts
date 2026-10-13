@@ -1,8 +1,7 @@
 import type { MapProjection } from 'cesium';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { RenderFrameState } from '../scene/render-frame';
-import { Cartesian3, Cartesian4, Cartographic, Matrix4 } from 'cesium';
-import { wgs84CartographicToCartesian } from '../geometry/tile-to-ecef';
+import { Cartesian3, Cartesian4, Cartographic, Ellipsoid, Matrix4 } from 'cesium';
 
 /** Clip canonical geographic tile boundaries in both scene modes. */
 export const LINE_TILE_CLIP_FRAGMENT = `
@@ -130,10 +129,7 @@ export class LineTileClip {
       : [this._longitudePlane(canonical.x, dimension), this._longitudePlane(canonical.x + 1, dimension)];
     this._planes = [...longitudePlanes, ...this._planarPlanes];
     this._eyePlanes = this._planes.map(() => new Cartesian4());
-    this._origins = [this._south, this._north].map((latitude) => {
-      const position = wgs84CartographicToCartesian(0, latitude);
-      return new Cartesian3(position.x, position.y, position.z);
-    });
+    this._origins = [this._south, this._north].map(latitude => Cartesian3.fromRadians(0, latitude, 0, Ellipsoid.WGS84));
     this._eyeOrigins = this._origins.map(() => new Cartesian3());
     this._shapes = [this._south, this._north].map((latitude, index) => new Cartesian4(
       1,

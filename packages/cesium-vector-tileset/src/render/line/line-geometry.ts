@@ -21,6 +21,8 @@ export interface LineGeometryOptions {
   widthPx: number;
   dashFrom?: DashAtlasRow;
   dashTo?: DashAtlasRow;
+  /** Emit world-fraction path distances for texture sampling. */
+  textureDistance?: boolean;
 }
 
 const MIN_SEGMENT_LENGTH_METERS = 1e-8;
@@ -45,7 +47,7 @@ export function lineLayoutKey(options: LineGeometryOptions): string {
   const { dashFrom, dashTo } = options;
   const dashKey = dashFrom && dashTo
     ? `d${dashFrom.y},${dashFrom.height},${dashFrom.width}|${dashTo.y},${dashTo.height},${dashTo.width}`
-    : 's';
+    : options.textureDistance ? 'p' : 's';
   const fanSegments = options.join === 'round' ? roundFanSegments(options.widthPx) : 0;
   return `${options.join}|${options.cap}|${options.miterLimit}|${options.roundLimit}|${fanSegments}|${dashKey}`;
 }
@@ -189,7 +191,7 @@ export function* compileLineGeometry(
   const planarSource = planar && source;
   const longitudes = source ? new Float64Array(n) : undefined;
   const dashed = options.dashFrom !== undefined && options.dashTo !== undefined;
-  const linesofar = dashed ? new Float64Array(n) : undefined;
+  const linesofar = dashed || options.textureDistance ? new Float64Array(n) : undefined;
   let perimeter = 0;
   if (linesofar || longitudes) {
     const projection = source ? undefined : new WebMercatorProjection();
@@ -299,7 +301,7 @@ export function* compileLineGeometry(
 
   const expanded = new Float64Array(vertexCount * 3);
   const flags = new Uint8Array(vertexCount);
-  const lineDistances = dashed ? new Float32Array(vertexCount) : undefined;
+  const lineDistances = linesofar ? new Float32Array(vertexCount) : undefined;
   const dashFrom = dashed ? new Float32Array(vertexCount * 3) : undefined;
   const dashTo = dashed ? new Float32Array(vertexCount * 3) : undefined;
   const indices = createIndices(vertexCount, indexCount);
@@ -320,8 +322,9 @@ export function* compileLineGeometry(
       role = 7 + fanParameter;
     }
     flags[result] = (side + 1) | (usePrev ? 4 : 0) | (role << 3);
-    if (dashFrom && dashTo && lineDistances) {
+    if (lineDistances)
       lineDistances[result] = distance;
+    if (dashFrom && dashTo) {
       dashFrom[result * 3] = options.dashFrom!.y;
       dashFrom[result * 3 + 1] = options.dashFrom!.height;
       dashFrom[result * 3 + 2] = options.dashFrom!.width;
@@ -432,8 +435,9 @@ export function* compileLineGeometry(
   const attributes: Record<string, GeometryAttribute> = {};
   attributes.position = new GeometryAttribute({ componentDatatype: ComponentDatatype.DOUBLE, componentsPerAttribute: 3, values: expanded });
   attributes.a_lineFlags = new GeometryAttribute({ componentDatatype: ComponentDatatype.UNSIGNED_BYTE, componentsPerAttribute: 1, values: flags });
-  if (dashFrom && dashTo) {
+  if (lineDistances)
     attributes.a_linesofar = new GeometryAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 1, values: lineDistances });
+  if (dashFrom && dashTo) {
     attributes.a_dashFrom = new GeometryAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 3, values: dashFrom });
     attributes.a_dashTo = new GeometryAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 3, values: dashTo });
   }

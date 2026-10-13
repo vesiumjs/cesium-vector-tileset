@@ -59,6 +59,8 @@ function* lineInstance(instance: GeometryInstance, projection: MapProjection, re
     throw new TypeError('line geometry requires source coordinates');
   let positions = input.positions;
   let sphere = source.boundingSphere;
+  if (!sphere)
+    throw new TypeError('Line geometry requires a spatial bounding sphere');
   const transformed = !Matrix4.equals(instance.modelMatrix, Matrix4.IDENTITY);
   if (transformed) {
     // Native's multi-mode contract uses world coordinates. Transform only
@@ -92,6 +94,7 @@ function* lineInstance(instance: GeometryInstance, projection: MapProjection, re
       yield;
   }
   const encoded = { high: 0, low: 0 };
+  const planarCenter = new Cartesian3();
   let maximumSpatialErrorSquared = 0;
   let maximumProjectionErrorSquared = 0;
   for (let point = 0; point < pointCount; point++) {
@@ -101,9 +104,11 @@ function* lineInstance(instance: GeometryInstance, projection: MapProjection, re
     const prior = input.closed ? (point + pointCount - 1) % pointCount : Math.max(0, point - 1);
     const following = input.closed ? (point + 1) % pointCount : Math.min(pointCount - 1, point + 1);
     // Read the DOUBLE planar scratch before overwriting it with final words.
-    const planarX = projected?.[point * 6];
-    const planarY = projected?.[point * 6 + 1];
-    const planarZ = projected?.[point * 6 + 2];
+    if (projected) {
+      planarCenter.x = projected[point * 6];
+      planarCenter.y = projected[point * 6 + 1];
+      planarCenter.z = projected[point * 6 + 2];
+    }
     let projectionErrorSquared = 0;
     let spatialErrorSquared = 0;
     for (let component = 0; component < 3; component++) {
@@ -118,11 +123,12 @@ function* lineInstance(instance: GeometryInstance, projection: MapProjection, re
       const next = !input.closed && point === pointCount - 1 ? center + (center - positions[prior * 3 + component]) : positions[following * 3 + component];
       records.spatial[output + 6] = previous - center;
       records.spatial[output + 9] = next - center;
-      if (records.planar) {
-        EncodedCartesian3.encode(component === 0 ? planarX : component === 1 ? planarY : planarZ, encoded);
+      if (records.planar && projected) {
+        const planarValue = component === 0 ? planarCenter.x : component === 1 ? planarCenter.y : planarCenter.z;
+        EncodedCartesian3.encode(planarValue, encoded);
         records.planar[output] = encoded.high === 0 ? 0 : encoded.high / 65536;
         records.planar[output + 3] = encoded.low;
-        const delta = records.planar[output] * 65536 + records.planar[output + 3] - (component === 0 ? planarX : component === 1 ? planarY : planarZ);
+        const delta = records.planar[output] * 65536 + records.planar[output + 3] - planarValue;
         projectionErrorSquared += delta * delta;
       }
     }
@@ -184,8 +190,18 @@ export function* prepareLineInstances(instances: GeometryInstance[], projection:
   const prepared: GeometryInstance[] = [];
   let recordOffset = 0;
   for (const instance of instances) {
+    const input = lineInputs.get(instance.geometry);
+    if (!input)
+      throw new TypeError('Line geometry requires source coordinates');
     prepared.push(yield* lineInstance(instance, projection, records, recordOffset));
-    recordOffset += lineInputs.get(instance.geometry).positions.length / 3;
+    recordOffset += input.positions.length / 3;
   }
-  return { instances: prepared, records, spheresCV: records.planar ? prepared.map(instance => (instance.geometry as Geometry & { boundingSphereCV: BoundingSphere }).boundingSphereCV) : undefined };
+  return { instances: prepared, records, spheresCV: records.planar
+    ? prepared.map((instance) => {
+        const sphere = (instance.geometry as Geometry & { boundingSphereCV?: BoundingSphere }).boundingSphereCV;
+        if (!sphere)
+          throw new TypeError('Projected line geometry requires a planar bounding sphere');
+        return sphere;
+      })
+    : undefined };
 }

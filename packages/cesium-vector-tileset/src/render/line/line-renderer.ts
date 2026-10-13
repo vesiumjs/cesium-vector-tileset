@@ -187,7 +187,9 @@ vec3 lineHeightEC(vec3 positionMC)
 `;
 }
 
-function lineStripShader(dash: boolean): string {
+function lineStripShader(kind: 'solid' | 'dash' | 'pattern'): string {
+  const dash = kind === 'dash';
+  const textured = kind !== 'solid';
   return `
 ${LINE_COMMON_SHADER}
 ${lineHeightShader()}
@@ -206,7 +208,8 @@ uniform vec4 u_line_color;
 uniform float u_line_meters_per_pixel;
 uniform float u_line_mercator_projection;
 ${LINE_FAN_PARAMETER_SHADER}
-${dash ? 'in float a_linesofar;\nin vec3 a_dashFrom;\nin vec3 a_dashTo;' : ''}
+${textured ? 'in float a_linesofar;' : ''}
+${dash ? 'in vec3 a_dashFrom;\nin vec3 a_dashTo;' : ''}
 in vec4 color;
 in float batchId;
 
@@ -221,7 +224,8 @@ flat out vec2 v_capExtent;
 out vec3 v_lineClip3DEye;
 out vec3 v_lineClip2DEye;
 #endif
-${dash ? 'out float v_linesofar;\nout vec3 v_dashFrom;\nout vec3 v_dashTo;' : ''}
+${textured ? 'out float v_linesofar;' : ''}
+${dash ? 'out vec3 v_dashFrom;\nout vec3 v_dashTo;' : ''}
 
 void main()
 {
@@ -240,7 +244,8 @@ void main()
     v_color = color * u_line_color;
     v_color.a *= step(0.001, width);
     v_width = width;
-${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
+${textured ? '    v_linesofar = a_linesofar;' : ''}
+${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
 
     vec4 position3DEC = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 prev3DEC = position3DEC;
@@ -480,8 +485,8 @@ ${dash ? '    v_linesofar = a_linesofar;\n    v_dashFrom = a_dashFrom;\n    v_da
 `;
 }
 
-export const LINE_STRIP_VS = lineStripShader(true);
-export const LINE_AA_VS = lineStripShader(false);
+export const LINE_STRIP_VS = lineStripShader('dash');
+export const LINE_AA_VS = lineStripShader('solid');
 
 const LINE_COVERAGE_SHADER = `
 ${LINE_TILE_CLIP_FRAGMENT}
@@ -619,6 +624,39 @@ export class DashLineAppearance extends PolylineMaterialAppearance {
       material: options.material,
       vertexShaderSource: lineTileShader(LINE_STRIP_VS),
       fragmentShaderSource: lineTileShader(DASH_LINE_FS),
+      renderState: { cull: { enabled: false } },
+    });
+  }
+}
+
+/** Image lines use the same ground strip and edge coverage as solid lines. */
+export class PatternLineAppearance extends PolylineMaterialAppearance {
+  constructor(material: Material) {
+    super({
+      material,
+      translucent: true,
+      vertexShaderSource: lineTileShader(lineStripShader('pattern')),
+      fragmentShaderSource: lineTileShader(`
+in vec4 v_color;
+in vec2 v_lineDistance;
+in float v_gamma_scale;
+in float v_width;
+in float v_linesofar;
+flat in vec3 v_capTangent;
+flat in vec3 v_capDenominator;
+flat in vec2 v_capExtent;
+${LINE_COVERAGE_SHADER}
+void main()
+{
+    float coverage = lineCoverage();
+    czm_materialInput materialInput;
+    materialInput.positionToEyeEC = vec3(0.0);
+    materialInput.normalEC = vec3(0.0, 0.0, 1.0);
+    materialInput.st = vec2(v_linesofar, v_lineDistance.x / max(v_width, czm_epsilon7) + 0.5);
+    czm_material material = czm_getMaterial(materialInput);
+    out_FragColor = vec4(material.diffuse + material.emission, material.alpha * v_color.a * coverage);
+}
+`),
       renderState: { cull: { enabled: false } },
     });
   }
@@ -908,7 +946,7 @@ function* lineChunks(instances: GeometryInstance[], planar: boolean): Generator<
 }
 
 /** Representation limits, rather than cold work quanta, bound permanent pages. */
-function* linePages(instances: GeometryInstance[]): Generator<GeometryInstance[]> {
+export function* linePages(instances: GeometryInstance[]): Generator<GeometryInstance[]> {
   const maximumTextureSize = (Cesium as unknown as { ContextLimits: { maximumTextureSize: number } }).ContextLimits.maximumTextureSize;
   // Each centerline record occupies twelve uint32 values per track. Planar
   // scenes need both tracks; before a Native context exists, only the FLOAT
@@ -980,7 +1018,7 @@ function linePaintMode(bucket: Bucket | undefined, layerId: string): 'uniform' |
   return properties.some(property => !!configuration.getAttributeArray(property)) ? 'instance' : 'uniform';
 }
 
-function lineUniforms(clip: LineTileClip, width = 1, color: Color = CesiumColor.WHITE, offset = 0, zoom = 0): LinePaintUniforms {
+export function linePaintUniforms(clip: LineTileClip, width = 1, color: Color = CesiumColor.WHITE, offset = 0, zoom = 0): LinePaintUniforms {
   const uniforms = {
     clip,
     width,
@@ -1027,7 +1065,7 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
         geometryInstances: instances,
         appearance: fillOutlineAppearance,
       }, 'native', layer.offsetMeters);
-      registerLinePaint(primitive, lineUniforms(state.clip, 1, CesiumColor.WHITE, layer.offsetMeters));
+      registerLinePaint(primitive, linePaintUniforms(state.clip, 1, CesiumColor.WHITE, layer.offsetMeters));
       lineGroups.set(primitive, {
         kind: 'outline',
         instanceIds: instances.map(instance => instance.id as LineInstanceId),
@@ -1077,7 +1115,7 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
       const style = layer.paintMode === 'uniform' && bucket
         ? lineFeatureStyle(bucket, first.featureIndex, layer.layerId, state.zoom)
         : undefined;
-      const uniforms = lineUniforms(
+      const uniforms = linePaintUniforms(
         state.clip,
         style ? lineWidth(style.widthPx) : 1,
         style?.color,
