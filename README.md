@@ -1,6 +1,6 @@
 # cesium-vector-tileset [![npm version](https://img.shields.io/npm/v/cesium-vector-tileset.svg)](https://www.npmjs.com/package/cesium-vector-tileset)
 
-English | [简体中文](./README.zh-CN.md)
+English | [简体中文](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/README.zh-CN.md)
 
 Add a styled vector map to your Cesium scene: roads, land and water, points, labels, and extruded buildings. Use MapLibre-style JSON to control the map's appearance alongside your existing Cesium content.
 
@@ -82,4 +82,4 @@ Report problems through [GitHub issues](https://github.com/vesiumjs/cesium-vecto
 
 ## License and credits
 
-Licensed under the [MIT License](./LICENSE). The implementation adapts MapLibre GL JS code and designs and uses Cesium for rendering. Distributed builds include third-party notices; dependencies and map data retain their own licenses. Display the attribution required by your map provider.
+Licensed under the [MIT License](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/LICENSE). The implementation adapts MapLibre GL JS code and designs and uses Cesium for rendering. Distributed builds include third-party notices; dependencies and map data retain their own licenses. Display the attribution required by your map provider.

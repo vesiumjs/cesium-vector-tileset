@@ -2,13 +2,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
-export function preparePackage(): void {
+export function writeThirdPartyNotices(): void {
   const packageRequire = createRequire(import.meta.url);
-
-  for (const name of ['README.md', 'README.zh-CN.md']) {
-    const readme = readFileSync(new URL(`../../../${name}`, import.meta.url), 'utf8');
-    writeFileSync(new URL(`../${name}`, import.meta.url), readme);
-  }
 
   // These dependencies are bundled into the main and Worker modules. Keep their
   // original notices alongside the derived MapLibre code, even after minification.

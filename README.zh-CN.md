@@ -1,6 +1,6 @@
 # cesium-vector-tileset [![npm 版本](https://img.shields.io/npm/v/cesium-vector-tileset.svg)](https://www.npmjs.com/package/cesium-vector-tileset)
 
-[English](./README.md) | 简体中文
+[English](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/README.md) | 简体中文
 
 为 Cesium 场景添加可定制的矢量地图，显示道路、陆地与水域、点、文字标注和挤出建筑。通过 MapLibre 风格的 JSON 样式控制地图外观，与已有 Cesium 内容一起使用。
 
@@ -82,4 +82,4 @@ if (!tileset.isDestroyed()) {
 
 ## 许可与致谢
 
-项目采用 [MIT License](./LICENSE)。实现复用 MapLibre GL JS 的代码与设计，使用 Cesium 渲染。发布产物包含第三方许可声明；依赖与地图数据保留各自许可。应用需要展示地图提供方要求的署名。
+项目采用 [MIT License](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/LICENSE)。实现复用 MapLibre GL JS 的代码与设计，使用 Cesium 渲染。发布产物包含第三方许可声明；依赖与地图数据保留各自许可。应用需要展示地图提供方要求的署名。

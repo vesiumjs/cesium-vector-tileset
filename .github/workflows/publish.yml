@@ -38,6 +38,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build library
+        run: pnpm build:ci
+
+      - name: Prepare npm package documentation
+        run: cp README.md LICENSE packages/cesium-vector-tileset/
+
       - name: Setup npm with Trusted Publishing support
         run: npm install --global npm@12.2.0
 

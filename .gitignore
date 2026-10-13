@@ -14,9 +14,9 @@ dist-ssr
 
 dist.zip
 
-# Package documentation copied by the library build
+# Package documentation copied by the publish workflow
 /packages/cesium-vector-tileset/README.md
-/packages/cesium-vector-tileset/README.zh-CN.md
+/packages/cesium-vector-tileset/LICENSE
 
 # Editor directories and files
 .vscode/*
