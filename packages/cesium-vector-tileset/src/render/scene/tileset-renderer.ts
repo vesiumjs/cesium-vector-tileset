@@ -1,10 +1,9 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type {
   Event,
 } from 'cesium';
 import type { Style } from '../../style/style';
 import type { Tile } from '../../tile/tile';
-import type { CesiumVectorTilesetOptions } from '../../tileset-options';
+import type { CesiumVectorTilesetOptions, TilesetStyleSpecification as StyleSpecification } from '../../tileset-options';
 import type { TilesetImage, TilesetImageOptions, TilesetStats } from '../../tileset-types';
 import type { SourceDataEvent, StyleDataEvent } from '../../util/events';
 import type { RequestTransformFunction } from '../../util/request';
@@ -142,6 +141,7 @@ export class TilesetRenderer {
         }
         return paint.ready;
       },
+      collection => this.vector.releaseCollection(collection),
     );
     this.covering = new SceneTileCovering(() => {
       if (!this._destroyed && this.root.show && this._ready) {
@@ -331,6 +331,8 @@ export class TilesetRenderer {
   ): void {
     this._assertNotDestroyed();
     const previous = this.style.getImage(id);
+    if (!previous)
+      throw new Error(`An image named "${id}" does not exist.`);
     this.style.updateImage(id, {
       ...previous,
       data: new RGBAImage({ width: image.width, height: image.height }, image.data),
@@ -401,15 +403,16 @@ export class TilesetRenderer {
    */
   setStyle(nextStyle: StyleSpecification): void {
     this._assertNotDestroyed();
-    const previousStyle = this.style.serialize()!;
     const cameraPaint = this.vector.captureLivePaint();
     // Style preflights unsupported operations before applying the diff.
     // Failures reach the caller without silently discarding a working scene.
-    if (!this.style.setState(nextStyle)) {
+    const change = this.style.setState(nextStyle);
+    if (!change) {
       return;
     }
-    this._styleSpec = nextStyle;
-    const { changes, paintOnly } = classifyStyleChange(previousStyle, nextStyle, this.style);
+    const { previous: previousStyle, next } = change;
+    this._styleSpec = next;
+    const { changes, paintOnly } = classifyStyleChange(change, this.style);
     if (paintOnly) {
       // Existing paint updaters own material/attribute changes and request
       // continuation when a write needs a GPU upload. Geometry stays resident.
@@ -421,8 +424,8 @@ export class TilesetRenderer {
     this.publishQueue.clear();
     this.layerIndex.rebuildIndex();
     this.collections.flushRemovals();
-    const sourceIds = new Set(Object.keys(nextStyle.sources));
-    const addedSourceIds = new Set(nextStyle.layers.flatMap(layer => 'source' in layer && !(layer.source in previousStyle.sources) ? [layer.source] : []));
+    const sourceIds = new Set(Object.keys(next.sources));
+    const addedSourceIds = new Set(next.layers.flatMap(layer => 'source' in layer && !(layer.source in previousStyle.sources) ? [layer.source] : []));
     this.residency.reconcileSources(sourceIds, addedSourceIds, new Map(previousStyle.layers.map((layer, index) => [layer.id, index])));
     for (const sourceId in this.style._updatedSources) {
       if (this.style._updatedSources[sourceId] === 'reload'
@@ -449,6 +452,9 @@ export class TilesetRenderer {
     // Surviving source tiles need new scene geometry for the new style.
     this._buildRasterLayers();
     this._buildPatternLayers();
+    if (this.collections.flushRemovals())
+      this._memoryBudgetDirty = true;
+    this._collectUnusedLayerCollections();
 
     // Style diffing keeps unchanged source tiles in TilePyramid caches. They
     // do not emit a new tile event merely because this tileset renderer was
@@ -481,6 +487,13 @@ export class TilesetRenderer {
     this.collections.applyPatternUpdate(this.pattern.setLayers([...this.layerIndex.patternLayers], this.layerIndex.order));
     for (const collection of this.pattern.collections.values()) {
       this.collections.add(collection);
+    }
+  }
+
+  private _collectUnusedLayerCollections(): void {
+    for (const collection of [...this.raster.collectUnusedLayerCollections(), ...this.pattern.collectUnusedLayerCollections()]) {
+      this.collections.detach(collection);
+      collection.destroy();
     }
   }
 
@@ -597,7 +610,9 @@ export class TilesetRenderer {
       this.wake.afterRender = frameState.afterRender;
       this.vector.setDraping(frameState.camera._scene?.vectorProvider, this._heightReference);
     }
-    this.collections.flushRemovals();
+    if (this.collections.flushRemovals())
+      this._memoryBudgetDirty = true;
+    this._collectUnusedLayerCollections();
     if (this._destroyed || !this.root.show || !this._ready) {
       this._lastSubmittedCommands = 0;
       if (!this._destroyed) {
@@ -775,7 +790,7 @@ export class TilesetRenderer {
       fadeOpacityOf,
     );
     this.collections.applyRasterUpdate(rasterUpdate);
-    if (rasterUpdate.added.length > 0 || rasterUpdate.removed.length > 0) {
+    if (rasterUpdate.added.length > 0 || rasterUpdate.removed.length > 0 || rasterUpdate.textureChanged) {
       this._memoryBudgetDirty = true;
     }
     if (rasterUpdate.fading) {
@@ -784,7 +799,7 @@ export class TilesetRenderer {
       this.wake.request();
     }
     this.pattern.pixelRatio = pixelRatio;
-    this.pattern.update(frameState.context);
+    this.pattern.update(frameState.context, this.evaluation.zoom);
     this.vector.dashMaterial?.update(
       frameState.context,
       this.evaluation.zoom,

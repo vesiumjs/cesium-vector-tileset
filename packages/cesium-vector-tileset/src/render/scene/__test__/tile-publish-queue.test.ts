@@ -398,7 +398,7 @@ describe('detached vector preparation on idle ticks', () => {
     await loadTransferredVectors(state, true, true);
     try {
       const tileId = `source/${state.tile.tileID.key}`;
-      const oldIndex = state.tile.latestFeatureIndex = new FeatureIndex(state.tile.tileID);
+      const oldIndex = state.tile.latestFeatureIndex = new FeatureIndex();
       state.queue.enqueue('source', state.tile);
       state.queue.drain(UNBOUNDED_BUDGET, 100);
       state.queue.drain(UNBOUNDED_BUDGET, 100);
@@ -408,7 +408,7 @@ describe('detached vector preparation on idle ticks', () => {
       expect(oldOwners).toHaveLength(4);
       expect(oldOwners.every(collection => root.contains(collection) && collection.show)).toBe(true);
       state.published.length = 0;
-      const nextIndex = state.tile.latestFeatureIndex = new FeatureIndex(state.tile.tileID);
+      const nextIndex = state.tile.latestFeatureIndex = new FeatureIndex();
       const { build, publication, lines } = advanceToLines(state);
       expect(publication.previousVector).toEqual(oldOwners);
       expect(publication.retainPreviousGeneration).toBe(true);

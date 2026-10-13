@@ -8,7 +8,8 @@ import type { SymbolTileRenderer } from '../symbol/symbol-renderer';
 import type { VectorPaintFrame } from '../vector/vector-paint-updater';
 import type { VectorTileRenderer } from '../vector/vector-tile-renderer';
 import type { SceneCollection, SceneCollections } from './scene-collections';
-import type { TilePublicationProgress, TilePublishQueue, TilePublishResult } from './tile-publish-queue';
+import type { TileGeneration } from './tile-generation';
+import type { TilePublishQueue, TilePublishResult } from './tile-publish-queue';
 import { compareTileId } from '../../tile/tile-id';
 import { allDrawLayersHidden, drawLayersForOwner } from './draw-batch';
 import { GpuMemoryBudget } from './gpu-memory-budget';
@@ -30,16 +31,8 @@ interface SceneTile {
   sourceId: string;
   tileID: OverscaledTileID;
   live: boolean;
-  generationId?: number;
-  featureIndex?: FeatureIndex;
-  previousGenerationId?: number;
-  previousFeatureIndex?: FeatureIndex;
-  publication?: TilePublicationProgress;
-  publicationBuckets?: Tile['buckets'];
-  publicationStyleRevision?: number;
-  publicationMode?: SceneMode;
-  /** A completed generation actually published drawable symbol resources. */
-  hasSymbols?: boolean;
+  generation?: TileGeneration;
+  previousGeneration?: TileGeneration;
 }
 
 interface SourceReplacement {
@@ -267,15 +260,8 @@ export class TileResidency {
       sourceId,
       tileID,
       live: true,
-      generationId: previous?.generationId,
-      featureIndex: previous?.featureIndex,
-      previousGenerationId: previous?.previousGenerationId,
-      previousFeatureIndex: previous?.previousFeatureIndex,
-      publication: previous?.publication,
-      publicationBuckets: previous?.publicationBuckets,
-      publicationStyleRevision: previous?.publicationStyleRevision,
-      publicationMode: previous?.publicationMode,
-      hasSymbols: previous?.hasSymbols,
+      generation: previous?.generation,
+      previousGeneration: previous?.previousGeneration,
     });
   }
 
@@ -306,32 +292,25 @@ export class TileResidency {
   private _setFeatureIndex(result: TilePublishResult): void {
     const tile = this._tiles.get(result.tileId);
     if (tile) {
-      tile.publication = { ...result.progress };
-      tile.publicationBuckets = result.buckets;
-      tile.publicationStyleRevision = result.styleRevision;
-      tile.publicationMode = result.mode;
-      if (result.progress.symbol) {
-        tile.hasSymbols = this._symbolRenderer.getTileCollections(result.tileId).length > 0;
+      const generation = result.generation;
+      if (generation.publication.symbol) {
+        generation.publishedSymbols(this._symbolRenderer.getTileCollections(result.tileId).length > 0);
       }
       if (result.retainPreviousGeneration || this._sceneCollections.hasPendingReplacement(result.tileId)) {
-        // A vector stage may be superseded before symbols finish. Keep the
-        // oldest generation, which is the one still visible in the scene.
-        if (tile.generationId !== result.generationId && tile.previousGenerationId === undefined) {
-          tile.previousGenerationId = tile.generationId;
-          tile.previousFeatureIndex = tile.featureIndex;
+        // Superseded preparations must not replace the oldest still-visible picks.
+        if (tile.generation?.id !== generation.id && !tile.previousGeneration) {
+          tile.previousGeneration = tile.generation;
         }
       }
       else {
-        tile.previousGenerationId = undefined;
-        tile.previousFeatureIndex = undefined;
+        tile.previousGeneration = undefined;
       }
-      tile.generationId = result.generationId;
-      tile.featureIndex = result.featureIndex;
-      if (tile.previousGenerationId === undefined) {
-        this._pendingFeatureIndexRelease.delete(result.tileId);
+      tile.generation = generation;
+      if (tile.previousGeneration) {
+        this._pendingFeatureIndexRelease.add(result.tileId);
       }
       else {
-        this._pendingFeatureIndexRelease.add(result.tileId);
+        this._pendingFeatureIndexRelease.delete(result.tileId);
       }
     }
   }
@@ -342,20 +321,19 @@ export class TileResidency {
   private _clearFeatureIndex(tileId: string): void {
     const tile = this._tiles.get(tileId);
     if (tile) {
-      tile.generationId = undefined;
-      tile.featureIndex = undefined;
-      tile.previousGenerationId = undefined;
-      tile.previousFeatureIndex = undefined;
+      if (tile.generation)
+        tile.generation.featureIndex = undefined;
+      tile.previousGeneration = undefined;
       this._pendingFeatureIndexRelease.delete(tileId);
     }
   }
 
   featureIndex(tileId: string, generationId: number): FeatureIndex | undefined {
     const tile = this._tiles.get(tileId);
-    if (tile?.generationId === generationId) {
-      return tile.featureIndex;
+    if (tile?.generation?.id === generationId) {
+      return tile.generation.featureIndex;
     }
-    return tile?.previousGenerationId === generationId ? tile.previousFeatureIndex : undefined;
+    return tile?.previousGeneration?.id === generationId ? tile.previousGeneration.featureIndex : undefined;
   }
 
   releaseReplacedFeatureIndices(): void {
@@ -365,8 +343,7 @@ export class TileResidency {
       }
       const tile = this._tiles.get(tileId);
       if (tile) {
-        tile.previousGenerationId = undefined;
-        tile.previousFeatureIndex = undefined;
+        tile.previousGeneration = undefined;
       }
       this._pendingFeatureIndexRelease.delete(tileId);
     }
@@ -392,7 +369,7 @@ export class TileResidency {
   get featureIndexCount(): number {
     let count = 0;
     for (const tile of this._tiles.values()) {
-      if (tile.featureIndex) {
+      if (tile.generation?.featureIndex) {
         count++;
       }
     }
@@ -514,7 +491,10 @@ export class TileResidency {
    */
   private _syncCollections(sourceId: string, renderableIds: readonly string[], held: Set<string>, mode: SceneMode): void {
     const inView = new Set(renderableIds.map(tileId => renderTileId(sourceId, tileId)));
-    const replacements = renderableIds.flatMap(key => this._tiles.get(renderTileId(sourceId, key))?.tileID ?? []);
+    const replacements = renderableIds.flatMap((key): OverscaledTileID[] => {
+      const tileID = this._tiles.get(renderTileId(sourceId, key))?.tileID;
+      return tileID ? [tileID] : [];
+    });
     for (const [tileId, tile] of this._tiles) {
       if (tile.sourceId !== sourceId) {
         continue;
@@ -665,7 +645,7 @@ export class TileResidency {
       }
       const tilePyramid = sync.pyramid;
       const renderableIds = new Set(sync.renderableIds);
-      const replacements = sync.renderableIds.flatMap((tileKey) => {
+      const replacements = sync.renderableIds.flatMap((tileKey): { tileId: string; tileID: OverscaledTileID; surfaceReady: boolean }[] => {
         const tile = tilePyramid.getTileByID(tileKey);
         const tileId = renderTileId(sourceId, tileKey);
         if (!tile || Object.keys(tile.buckets).length === 0) {
@@ -915,10 +895,8 @@ export class TileResidency {
       let symbolStale = false;
       let restoredOther = false;
       const published = this._tiles.get(tileId);
-      const matchingPublication = !!published?.publication
-        && published.publicationBuckets === tile.buckets
-        && published.publicationStyleRevision === this._paintFrame().styleRevision
-        && published.publicationMode === mode;
+      const generation = published?.generation;
+      const matchingPublication = generation?.matches(tile, this._paintFrame().styleRevision ?? 0, mode) === true;
       const cancelled = matchingPublication ? this._symbolRenderer.cancelFade(tileId, tile.buckets) : undefined;
       restoredOther = cancelled?.live ?? false;
       if (cancelled && !cancelled.live) {
@@ -957,21 +935,8 @@ export class TileResidency {
         }
         hydrated.add(tileKey);
         this.published(sourceId, tile.tileID);
-        const record = this._tiles.get(tileId)!;
-        // Symbol resources retire independently of vector geometry. A cache
-        // miss invalidates only a detail stage that actually drew symbols.
-        if (record.publication?.symbol && record.hasSymbols
-          && this._symbolRenderer.getTileCollections(tileId).length === 0) {
-          record.publication.symbol = false;
-        }
-        // Cached vector completion says nothing about its later publication
-        // stages. Resume cancelled details within the same generation;
-        // only an unfinished vector stage needs full conversion again.
-        if (record.publication?.vector !== 'complete') {
-          this._tilePublishQueue.enqueueDetails(sourceId, tile, record.generationId!, record.publication!);
-        }
-        else if (!record.publication.pattern || !record.publication.symbol) {
-          this._tilePublishQueue.enqueueDetails(sourceId, tile, record.generationId!, record.publication);
+        if (generation && generation.resume(tile, true, this._symbolRenderer.getTileCollections(tileId).length > 0)) {
+          this._tilePublishQueue.enqueueDetails(sourceId, tile, generation);
         }
         continue;
       }
@@ -980,11 +945,9 @@ export class TileResidency {
       // instead: TilePublishQueue spreads the builds across frames within
       // its per-frame budget. Marking hydrated now is safe — the diff above
       // re-queues a tile whose key leaves the renderable set before publish.
-      if (matchingPublication && published!.generationId !== undefined) {
-        const progress = { ...published!.publication!, vector: 'pending' as const };
-        if (published!.hasSymbols && this._symbolRenderer.getTileCollections(tileId).length === 0)
-          progress.symbol = false;
-        this._tilePublishQueue.enqueueDetails(sourceId, tile, published!.generationId, progress);
+      if (generation && matchingPublication) {
+        generation.resume(tile, false, this._symbolRenderer.getTileCollections(tileId).length > 0);
+        this._tilePublishQueue.enqueueDetails(sourceId, tile, generation);
       }
       else {
         this._tilePublishQueue.enqueue(sourceId, tile);

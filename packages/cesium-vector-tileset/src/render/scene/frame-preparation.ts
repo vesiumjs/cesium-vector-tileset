@@ -65,7 +65,7 @@ export class FramePreparation {
   }
 
   admit(frameState: RenderFrameState, generation: number): SceneFrameWork {
-    const work = this.bind(frameState.camera._scene).frame(frameState.frameNumber);
+    const work = this.bind(frameState.camera._scene).frame(frameState.frameNumber, frameState.newFrame === false);
     // Budget identity, rather than frameNumber, also covers Native's date-line viewports.
     if (this.frameRecord?.budget !== work.tileBudget) {
       this.frameRecord = {
@@ -154,7 +154,7 @@ export class FramePreparation {
     if (!cpuAllowed) {
       this.wake.request();
     }
-    const frameWork = this.bind(frameState.camera._scene).frame(frameState.frameNumber);
+    const frameWork = this.bind(frameState.camera._scene).frame(frameState.frameNumber, frameState.newFrame === false);
     const runnable = {
       upload: (cpuAllowed && cpuUpload) || resources,
       build: cpuAllowed && builds.runnable,

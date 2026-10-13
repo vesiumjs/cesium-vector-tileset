@@ -1,4 +1,5 @@
 import type { Camera, CullingVolume, MapProjection, Scene } from 'cesium';
+import type { OverscaledTileID } from '../../tile/tile-id';
 import type { TileCovering } from '../../tile/tile-pyramid';
 import type { VectorDrapingProvider } from '../vector/vector-tile-renderer';
 import type { CameraFocus } from './camera-focus';
@@ -327,7 +328,12 @@ export function planarCoveringForFrame(tilePyramid: CoveringTilePyramid, frame: 
   const source = tilePyramid.getSource();
   const sourceZoom = mapZoomToSourceZoom(camera.zoom, source.tileSize);
   const selectedZoom = (source.type === 'raster' ? Math.round : Math.floor)(sourceZoom);
-  const selected = selectedZoom < (source.minzoom ?? 0) ? [] : planarTileIDs(camera.bounds, Math.min(zoom.zoom, lod.maxZoom)).flatMap(id => lod.select(id) ?? []);
+  const selected = selectedZoom < (source.minzoom ?? 0)
+    ? []
+    : planarTileIDs(camera.bounds, Math.min(zoom.zoom, lod.maxZoom)).flatMap((id): OverscaledTileID[] => {
+        const selected = lod.select(id);
+        return selected ? [selected] : [];
+      });
   const sameTiles = previous && previous.covering.idealTileIDs.length === selected.length
     && previous.covering.idealTileIDs.every((tile, index) => tile.key === selected[index].key);
   const idealTileIDs = sameTiles ? previous.covering.idealTileIDs : selected;

@@ -47,7 +47,7 @@ export class DrawCommandReplay {
     this.command = DrawCommand.shallowClone(source);
   }
 
-  update(source: ReplayDrawCommand, bounds: BoundingSphere): ReplayDrawCommand {
+  update(source: ReplayDrawCommand, bounds = source.boundingVolume): ReplayDrawCommand {
     // Compare Native's inputs, not the submitted command: final preparation
     // can replace its pass, depth state and uniforms without changing Native.
     // Static accesses keep Native's getters monomorphic on this per-command path.
@@ -156,8 +156,8 @@ export class DrawCommandReplay {
       this.command._pickMetadataAllowed = source._pickMetadataAllowed;
       this.command.dirty = true;
     }
-    // The raw sphere never passes through the retained command after creation.
-    // Stable expanded spheres remain live when their values change in place.
+    // The submitted replay owns its bounds; stable expanded spheres remain
+    // live when their values change in place.
     this.command.boundingVolume = bounds;
     return this.command;
   }

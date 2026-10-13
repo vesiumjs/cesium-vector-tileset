@@ -16,6 +16,7 @@ import { drawBatchForOwner, registerDrawLayers } from '../render/scene/draw-batc
 import { UNBOUNDED_BUDGET } from '../render/scene/frame-budget';
 import { zoomForFrame } from '../render/scene/render-frame';
 import { SceneCollections } from '../render/scene/scene-collections';
+import { TileGeneration } from '../render/scene/tile-generation';
 import { buildVectorTile } from '../render/vector/__test__/vector-tile-helper';
 import { EvaluationParameters } from '../style/evaluation-parameters';
 import { FillStyleLayer } from '../style/style-layer/fill-style-layer';
@@ -115,9 +116,7 @@ async function uploadedWaterLifecycle() {
     generationId: internals.vector.tileBuildLayers(tileId)!.generationId,
     stage: 'complete',
     progress: { vector: 'complete', pattern: true, symbol: true },
-    buckets: data.buckets,
-    styleRevision: internals.style.styleRevision,
-    mode: state.mode!,
+    generation: new TileGeneration(data, internals.style.styleRevision, state.mode!, internals.vector.tileBuildLayers(tileId)!.generationId, { vector: 'complete', pattern: true, symbol: true }),
     featureIndex: data.latestFeatureIndex,
     retainPreviousGeneration: false,
     previousVector: [],

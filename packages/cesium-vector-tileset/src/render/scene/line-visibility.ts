@@ -42,18 +42,18 @@ export class LineVisibility {
     }
     const frustum = frame.camera.frustum;
     if (frustum instanceof PerspectiveFrustum) {
-      if (frustum.xOffset !== 0 || frustum.yOffset !== 0 || !Number.isFinite(frustum.fov) || frustum.fov <= 0 || frustum.fov >= Math.PI)
+      if (frustum.xOffset !== 0 || frustum.yOffset !== 0 || frustum.fov === undefined || !Number.isFinite(frustum.fov) || frustum.fov <= 0 || frustum.fov >= Math.PI)
         return;
     }
     else if (frustum instanceof OrthographicFrustum) {
-      if (!Number.isFinite(frustum.width) || frustum.width <= 0)
+      if (frustum.width === undefined || !Number.isFinite(frustum.width) || frustum.width <= 0)
         return;
     }
     else {
       return;
     }
     if (!Number.isFinite(frustum.near) || frustum.near <= 0 || !Number.isFinite(frustum.far) || frustum.far <= frustum.near
-      || !Number.isFinite(frustum.aspectRatio) || frustum.aspectRatio <= 0) {
+      || frustum.aspectRatio === undefined || !Number.isFinite(frustum.aspectRatio) || frustum.aspectRatio <= 0) {
       return;
     }
     const position = frame.camera.positionWC;

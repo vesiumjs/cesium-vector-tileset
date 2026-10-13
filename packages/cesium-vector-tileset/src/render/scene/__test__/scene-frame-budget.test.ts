@@ -39,25 +39,60 @@ function renderFixture(prefix = 0) {
   return { scene, time: (value: number) => now = value, advance: (value: number) => now += value };
 }
 
-describe('complete idle Scene allowance', () => {
-  it('shares one physical tick across owners and renews it while the render frame number stays unchanged', () => {
+describe('shared idle Scene allowance', () => {
+  it('reserves mandatory idle work that runs after postUpdate', async () => {
+    const { scene, time, advance } = renderFixture();
+    const owner = acquireSceneFrameBudget(scene, {});
+    try {
+      scene.render(true, () => {
+        owner.frame(1, true);
+        advance(2);
+      }, 10);
+      await Promise.resolve();
+      time(100);
+      scene.render(true, () => {
+        const work = owner.frame(1, true);
+        work.measure(() => advance(2));
+        expect(work.tileBudget.exhausted).toBe(true);
+      });
+    }
+    finally { owner.release(); }
+  });
+
+  it('leaves the host render method intact while owners acquire and release budgets', () => {
+    const { scene } = renderFixture();
+    const render = scene.render;
+    const first = acquireSceneFrameBudget(scene, {});
+    const second = acquireSceneFrameBudget(scene, {});
+    try {
+      expect(scene.render).toBe(render);
+    }
+    finally {
+      first.release();
+      second.release();
+    }
+    expect(scene.render).toBe(render);
+  });
+
+  it('shares one physical tick across owners and renews it while the render frame number stays unchanged', async () => {
     const { scene, time } = renderFixture();
     const first = acquireSceneFrameBudget(scene, {});
     const second = acquireSceneFrameBudget(scene, {});
     let previous: ReturnType<typeof first.frame> | undefined;
     scene.render(true, () => {
-      previous = first.frame(1);
+      previous = first.frame(1, true);
       time(50);
       const stages = { upload: false, build: true, paint: false, placement: false };
       const quota = previous.continuation('build', stages)!;
       expect(quota.takeMinimumProgress?.()).toBe(true);
-      expect(second.frame(1).continuation('build', stages)).toBeUndefined();
+      expect(second.frame(1, true).continuation('build', stages)).toBeUndefined();
     });
+    await Promise.resolve();
     time(100);
     scene.render(true, () => {
       const stages = { upload: false, build: true, paint: false, placement: false };
-      expect(second.frame(1).continuation('build', stages)).toBeDefined();
-      expect(first.frame(1).continuation('build', stages)).toBeUndefined();
+      expect(second.frame(1, true).continuation('build', stages)).toBeDefined();
+      expect(first.frame(1, true).continuation('build', stages)).toBeUndefined();
     });
     first.release();
     second.release();
@@ -116,7 +151,7 @@ describe('complete scene preparation allowance', () => {
     second.release();
   });
 
-  it('caps preparation at the physical tick even when mandatory work exceeds its reserve', () => {
+  it('caps preparation at the observed scene tick even when mandatory work exceeds its reserve', () => {
     const { scene, time, advance } = renderFixture(2);
     const first = acquireSceneFrameBudget(scene, {});
     const second = acquireSceneFrameBudget(scene, {});
@@ -124,10 +159,11 @@ describe('complete scene preparation allowance', () => {
     time(100);
     scene.render(false, () => {
       const work = first.frame(scene._frameState.frameNumber);
-      // The trained reserve is 3ms. The early prefix and body spent 12ms.
+      // Public preUpdate observes the tick after earlier listeners. The body
+      // spends 10ms; its elapsed time still caps both preparation stages.
       advance(10);
       work.measure(() => {
-        advance(FRAME_CPU_TARGET_MS - 2 - 12 - 0.01);
+        advance(FRAME_CPU_TARGET_MS - 2 - 10 - 0.01);
         expect(work.tileBudget.exhausted).toBe(false);
         advance(0.02);
         expect(work.tileBudget.exhausted).toBe(true);

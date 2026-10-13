@@ -11,6 +11,8 @@ import type { SymbolBuildState, SymbolTileRenderer } from '../symbol/symbol-rend
 import type { VectorTileBuildState } from '../vector/vector-tile-builder';
 import type { VectorCollection, VectorTileRenderer } from '../vector/vector-tile-renderer';
 import type { Budget } from './frame-budget';
+import type { RetainedSurface } from './scene-collections';
+import type { TileGenerationData, TilePublicationProgress } from './tile-generation';
 import { Math as CesiumMath } from 'cesium';
 import { MercatorCoordinate } from '../../geo/mercator-coordinate';
 import { browser } from '../../util/browser';
@@ -18,33 +20,11 @@ import { isPatternStyleLayer } from '../pattern/pattern-layer';
 import { paintRevision } from '../vector/feature-attributes';
 import { tileZoomOf } from '../vector/vector-tile-builder';
 import { MAX_LATITUDE } from './globe-covering';
+import { TileGeneration } from './tile-generation';
 
 type SurfacePhase = 'surface' | 'surface-ready' | 'vector' | 'lines-ready' | 'vector-ready' | 'pattern' | 'done';
 type SymbolPhase = 'pending' | 'ready' | 'done';
 type PublishTrack = 'surfaces' | 'symbols';
-
-/** CPU publications of one generation; Native readiness remains owned by the scene. */
-export interface TilePublicationProgress {
-  vector: 'pending' | 'surface' | 'complete';
-  pattern: boolean;
-  symbol: boolean;
-}
-
-type TileData = Pick<Tile, 'tileID' | 'buckets' | 'textureData' | 'collisionBoxArray'
-  | 'glyphAtlasImage' | 'imageAtlas' | 'dashRows' | 'latestFeatureIndex'>;
-
-function snapshot(tile: Tile): TileData {
-  return {
-    tileID: tile.tileID,
-    buckets: tile.buckets,
-    textureData: tile.textureData,
-    collisionBoxArray: tile.collisionBoxArray,
-    glyphAtlasImage: tile.glyphAtlasImage,
-    imageAtlas: tile.imageAtlas,
-    dashRows: tile.dashRows,
-    latestFeatureIndex: tile.latestFeatureIndex,
-  };
-}
 
 function prioritize<T>(jobs: Iterable<T>, tileID: (job: T) => Tile['tileID'], viewpoint?: MercatorCoordinate): T[] {
   const ordered = [...jobs];
@@ -66,14 +46,10 @@ function prioritize<T>(jobs: Iterable<T>, tileID: (job: T) => Tile['tileID'], vi
 interface PublishJob {
   sourceId: string;
   tile: Tile;
-  data: TileData;
+  generation: TileGeneration;
   tileId: string;
   surfaces: SurfacePhase;
   symbols: SymbolPhase;
-  progress: TilePublicationProgress;
-  styleRevision: number;
-  mode: SceneMode;
-  generationId?: number;
   excludedLayerIds?: Set<string>;
   patternLayers?: readonly PatternStyleLayer[];
   vectorBuild?: VectorTileBuildState;
@@ -103,10 +79,9 @@ export interface TilePublishResult {
   tileID: Tile['tileID'];
   generationId: number;
   stage: 'surface' | 'lines' | 'vector' | 'pattern' | 'symbol' | 'complete';
-  progress: TilePublicationProgress;
-  buckets: Tile['buckets'];
-  styleRevision: number;
-  mode: SceneMode;
+  /** Immutable observation of this commit; continuing work uses generation instead. */
+  progress: Readonly<TilePublicationProgress>;
+  generation: TileGeneration;
   pattern?: PatternTileUpdate;
   /** Keep picks from the still-visible old symbols until the detail stage swaps them. */
   retainPreviousGeneration: boolean;
@@ -118,7 +93,7 @@ export interface TilePublishResult {
   addedSymbols: readonly PrimitiveCollection[];
   firstUpdateSymbols: readonly PrimitiveCollection[];
   retainedSymbols?: { collections: readonly PrimitiveCollection[]; release: () => void };
-  retainedSurfaces?: Array<NonNullable<PatternTileUpdate['retained']>>;
+  retainedSurfaces?: RetainedSurface[];
   featureIndex: Tile['latestFeatureIndex'];
 }
 
@@ -230,26 +205,26 @@ export class TilePublishQueue {
       || pixelRatio <= 0) {
       return { jobs: [], renderNeeded: true };
     }
-    const revisions = new Map<TileData['buckets'][string], number>();
+    const revisions = new Map<TileGenerationData['buckets'][string], number>();
     const jobs: PublishJob[] = [];
     let renderNeeded = false;
     for (const job of this._jobs.values()) {
       const inputs = job.vectorInputs;
       const build = job.vectorBuild;
-      const data = job.data;
+      const data = job.generation.data;
       // Unbegun work, symbols, patterns, commits and cancellation keep their
       // original real-render path. Their siblings retain independent CPU
       // admission when all of their own construction inputs are unchanged.
       if (job.symbols !== 'done' || (job.surfaces !== 'surface' && job.surfaces !== 'vector')
         || !build || !inputs || !this._isCurrent(job)
-        || job.styleRevision !== style.styleRevision || job.mode !== mode
+        || job.generation.styleRevision !== style.styleRevision || job.generation.mode !== mode
         || inputs.style !== style || inputs.renderRevision !== style.renderRevision
         || inputs.zoom !== zoom || inputs.lightRevision !== lightRevision
         || inputs.pixelRatio !== pixelRatio || inputs.layerOrder !== layerOrder
         || data.buckets !== job.tile.buckets || data.textureData !== job.tile.textureData
         || data.collisionBoxArray !== job.tile.collisionBoxArray || data.glyphAtlasImage !== job.tile.glyphAtlasImage
         || data.imageAtlas !== job.tile.imageAtlas || data.dashRows !== job.tile.dashRows
-        || data.latestFeatureIndex !== job.tile.latestFeatureIndex) {
+        || job.generation.featureIndex !== job.tile.latestFeatureIndex) {
         renderNeeded = true;
         continue;
       }
@@ -301,8 +276,8 @@ export class TilePublishQueue {
   }
 
   /** Resume unpublished tracks of an already reserved, partially committed generation. */
-  enqueueDetails(sourceId: string, tile: Tile, generationId: number, progress: TilePublicationProgress): void {
-    this._enqueue(sourceId, tile, generationId, progress);
+  enqueueDetails(sourceId: string, tile: Tile, generation: TileGeneration): void {
+    this._enqueue(sourceId, tile, generation);
   }
 
   /** Visibility changes only prepare content missing from a resident generation. */
@@ -337,7 +312,7 @@ export class TilePublishQueue {
           pending.symbolBuild = undefined;
         }
         pending.symbols = 'pending';
-        pending.progress.symbol = false;
+        pending.generation.publication.symbol = false;
         this._options.requestRender();
       }
       return;
@@ -351,14 +326,22 @@ export class TilePublishQueue {
     else if (layers.some(layer => layer.type === 'symbol' && !this._options.symbol.hasTileLayer(tileId, layer.id))) {
       // Symbols have an independent publication stage. Reuse the completed
       // vector generation instead of re-converting its fills, lines and points.
-      this.enqueueDetails(sourceId, tile, vector.generationId, { vector: 'complete', pattern: false, symbol: false });
+      const generation = this._options.vector.tileGeneration(tileId);
+      if (generation) {
+        generation.publication.pattern = false;
+        generation.publication.symbol = false;
+        this.enqueueDetails(sourceId, tile, generation);
+      }
+      else {
+        this.enqueue(sourceId, tile);
+      }
     }
   }
 
   /**
    * @internal
    */
-  private _enqueue(sourceId: string, tile: Tile, generationId?: number, progress?: TilePublicationProgress): void {
+  private _enqueue(sourceId: string, tile: Tile, generation?: TileGeneration): void {
     // A structural style change reparses the worker payload. Its old buckets
     // and atlas still cover the scene, but must not publish as the new style.
     if (tile.state === 'reloading') {
@@ -367,8 +350,8 @@ export class TilePublishQueue {
     const tileId = `${sourceId}/${tile.tileID.key}`;
     const existing = this._jobs.get(tileId);
     if (existing?.tile === tile
-      && existing.data.buckets === tile.buckets
-      && existing.data.textureData === tile.textureData) {
+      && existing.generation.data.buckets === tile.buckets
+      && existing.generation.data.textureData === tile.textureData) {
       return;
     }
     if (existing) {
@@ -378,14 +361,10 @@ export class TilePublishQueue {
     this._jobs.set(tileId, {
       sourceId,
       tile,
-      data: snapshot(tile),
+      generation: generation ?? new TileGeneration(tile, this._options.style().styleRevision, this._options.sceneMode()),
       tileId,
-      surfaces: progress?.vector === 'complete' ? progress.pattern ? 'done' : 'pattern' : 'surface',
-      symbols: progress?.symbol ? 'done' : 'pending',
-      progress: progress ? { ...progress } : { vector: 'pending', pattern: false, symbol: false },
-      styleRevision: this._options.style().styleRevision,
-      mode: this._options.sceneMode(),
-      generationId,
+      surfaces: generation?.publication.vector === 'complete' ? generation.publication.pattern ? 'done' : 'pattern' : 'surface',
+      symbols: generation?.publication.symbol ? 'done' : 'pending',
     });
     this._options.requestRender();
   }
@@ -493,7 +472,7 @@ export class TilePublishQueue {
     }
     if (minimumProgress && maxCommits > 0)
       return this._drainMinimum(budget, maxCommits);
-    const jobs = prioritize(this._jobs.values(), job => job.data.tileID, viewpoint);
+    const jobs = prioritize(this._jobs.values(), job => job.generation.data.tileID, viewpoint);
     // Alternate the first eligible track across physical frames. Within the
     // surface track, every newer fill still precedes older road conversion.
     const tracks: PublishTrack[] = this._nextTrack === 'surfaces'
@@ -640,7 +619,7 @@ export class TilePublishQueue {
   /**
    * @internal
    */
-  private _excludedLayers(data: TileData): Set<string> {
+  private _excludedLayers(data: TileGenerationData): Set<string> {
     const style = this._options.style();
     const excluded = new Set<string>();
     for (const layerId of Object.keys(data.buckets)) {
@@ -657,8 +636,8 @@ export class TilePublishQueue {
    */
   private _isCurrent(job: PublishJob): boolean {
     return job.tile.state !== 'reloading'
-      && this._options.isRenderable(job.sourceId, job.data.tileID.key)
-      && job.tile.tileID.key === job.data.tileID.key;
+      && this._options.isRenderable(job.sourceId, job.generation.data.tileID.key)
+      && job.tile.tileID.key === job.generation.data.tileID.key;
   }
 
   /**
@@ -668,24 +647,24 @@ export class TilePublishQueue {
   private _begin(job: PublishJob): void {
     if (job.symbols === 'pending' && !job.symbolBuild && this._options.symbolLayers(job.sourceId).length === 0) {
       job.symbols = 'done';
-      job.progress.symbol = true;
+      job.generation.publication.symbol = true;
     }
-    if (job.vectorBuild || job.progress.vector === 'complete')
+    if (job.vectorBuild || job.generation.publication.vector === 'complete')
       return;
-    job.excludedLayerIds ??= this._excludedLayers(job.data);
+    job.excludedLayerIds ??= this._excludedLayers(job.generation.data);
     job.vectorBuild = this._options.vector.beginTileBuild({
       tileId: job.tileId,
-      generationId: job.generationId,
-      buckets: job.data.buckets,
-      tileID: job.data.tileID,
+      generationId: job.generation.reservedId,
+      buckets: job.generation.data.buckets,
+      tileID: job.generation.data.tileID,
       sourceId: job.sourceId,
       layerOrder: this._options.layerOrder(),
       skipLayerIds: job.excludedLayerIds,
       styleZoom: this._options.styleZoom(),
-      mode: job.mode,
-      styleRevision: job.styleRevision,
+      mode: job.generation.mode,
+      styleRevision: job.generation.styleRevision,
       lightRevision: this._options.lightRevision(),
-      dashRows: job.data.dashRows,
+      dashRows: job.generation.data.dashRows,
     });
     // Reuse the builder's actual paint stamp instead of rescanning its buckets.
     job.vectorInputs = {
@@ -696,7 +675,7 @@ export class TilePublishQueue {
       pixelRatio: this._options.vector.pixelRatio,
       layerOrder: this._options.layerOrder(),
     };
-    job.generationId = job.vectorBuild.generationId;
+    job.generation.reserve(job.vectorBuild.generationId);
   }
 
   /**
@@ -729,12 +708,12 @@ export class TilePublishQueue {
     const retiredVector = job.surfacePublished ? [] : vector.takeRetired(tileId);
     const addedVector = job.surfacePublished
       ? vector.appendTileBuild(job.vectorBuild!)
-      : (vector.commitTileBuild(job.vectorBuild!) ? [...vector.getTileCollections(tileId)] : []);
+      : (vector.commitTileBuild(job.vectorBuild!, job.generation) ? [...vector.getTileCollections(tileId)] : []);
     job.surfaces = complete ? 'pattern' : 'vector';
-    job.progress.vector = complete ? 'complete' : 'surface';
-    if (complete && (job.progress.pattern || this._options.patternLayers(sourceId).length === 0)) {
+    job.generation.publication.vector = complete ? 'complete' : 'surface';
+    if (complete && (job.generation.publication.pattern || this._options.patternLayers(sourceId).length === 0)) {
       job.surfaces = 'done';
-      job.progress.pattern = true;
+      job.generation.publication.pattern = true;
     }
     this._publish(job, stage, {
       previousVector,
@@ -760,8 +739,8 @@ export class TilePublishQueue {
     const source = this._options.rasterSource(job.sourceId);
     return this._options.raster.addTile(
       job.tileId,
-      job.data.tileID,
-      job.data.textureData,
+      job.generation.data.tileID,
+      job.generation.data.textureData,
       this._options.rasterLayers(job.sourceId),
       source.dynamic,
       source.tileCoords,
@@ -781,14 +760,14 @@ export class TilePublishQueue {
     if (job.patternLayers.length > 0) {
       job.patternBuild ??= pattern.beginPatternBuild({
         tileId: job.tileId,
-        tileID: job.data.tileID,
-        tileFeatureIndex: job.data.latestFeatureIndex,
-        buckets: job.data.buckets,
-        atlas: job.data.imageAtlas,
+        tileID: job.generation.data.tileID,
+        tileFeatureIndex: job.generation.featureIndex,
+        buckets: job.generation.data.buckets,
+        atlas: job.generation.data.imageAtlas,
         layers: job.patternLayers,
         layerOrder: this._options.layerOrder(),
         sourceId: job.sourceId,
-        styleZoom: tileZoomOf(job.data.tileID),
+        styleZoom: tileZoomOf(job.generation.data.tileID),
         mode: this._options.sceneMode(),
         styleRevision: style.renderRevision,
         styleMutationRevision: style.styleRevision,
@@ -804,7 +783,7 @@ export class TilePublishQueue {
       job.patternBuild = undefined;
     }
     job.surfaces = 'done';
-    job.progress.pattern = true;
+    job.generation.publication.pattern = true;
     this._publish(job, 'pattern', { pattern: update });
     return true;
   }
@@ -816,18 +795,18 @@ export class TilePublishQueue {
     if (job.symbols === 'ready')
       return true;
     const { symbol } = this._options;
-    job.excludedLayerIds ??= this._excludedLayers(job.data);
+    job.excludedLayerIds ??= this._excludedLayers(job.generation.data);
     const layers = this._options.symbolLayers(job.sourceId);
     if (layers.length > 0) {
       job.symbolBuild ??= symbol.beginBuild({
         tileId: job.tileId,
-        tileKey: job.data.tileID.key,
-        tileID: job.data.tileID,
-        buckets: job.data.buckets,
-        collisionBoxArray: job.data.collisionBoxArray,
+        tileKey: job.generation.data.tileID.key,
+        tileID: job.generation.data.tileID,
+        buckets: job.generation.data.buckets,
+        collisionBoxArray: job.generation.data.collisionBoxArray,
         layers: [...layers],
-        glyphAtlasImage: job.data.glyphAtlasImage,
-        iconAtlas: job.data.imageAtlas,
+        glyphAtlasImage: job.generation.data.glyphAtlasImage,
+        iconAtlas: job.generation.data.imageAtlas,
         pixelRatio: browser.devicePixelRatio,
         layerOrder: this._options.layerOrder(),
         skipLayerIds: job.excludedLayerIds,
@@ -848,7 +827,7 @@ export class TilePublishQueue {
     // Atlas holds have transferred to the committed renderer entry.
     job.symbolBuild = undefined;
     job.symbols = 'done';
-    job.progress.symbol = true;
+    job.generation.publication.symbol = true;
     this._publish(job, 'symbol', {
       removedSymbols: built?.removed ?? this._removeUnusedSymbols(job.sourceId, job.tileId),
       addedSymbols: built?.added ?? [],
@@ -866,13 +845,11 @@ export class TilePublishQueue {
     this._options.publish({
       sourceId: job.sourceId,
       tileId: job.tileId,
-      tileID: job.data.tileID,
-      generationId: job.generationId!,
+      tileID: job.generation.data.tileID,
+      generationId: job.generation.id,
       stage,
-      progress: { ...job.progress },
-      buckets: job.data.buckets,
-      styleRevision: job.styleRevision,
-      mode: job.mode,
+      progress: { ...job.generation.publication },
+      generation: job.generation,
       retainPreviousGeneration: stage !== 'complete',
       previousVector: [],
       retiredVector: [],
@@ -881,7 +858,7 @@ export class TilePublishQueue {
       removedSymbols: [],
       addedSymbols: [],
       firstUpdateSymbols: [],
-      featureIndex: job.data.latestFeatureIndex,
+      featureIndex: job.generation.featureIndex,
       ...(stage === 'complete' && this._options.symbolLayers(job.sourceId).length === 0
         ? { removedSymbols: this._removeUnusedSymbols(job.sourceId, job.tileId) }
         : {}),

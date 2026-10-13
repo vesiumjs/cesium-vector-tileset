@@ -2,7 +2,6 @@ import type { LayerFeatureStates } from '../source/source-state';
 import type { Style } from '../style/style';
 import type { Tile } from './tile';
 import type { OverscaledTileID } from './tile-id';
-import Point from '@mapbox/point-geometry';
 import { compareTileId } from './tile-id';
 
 /** Tiles retained by a pyramid for loading, fallback coverage or fading, excluding its cache. */
@@ -12,8 +11,6 @@ export class ActiveTiles {
   private _allTilesCache?: Tile[];
 
   private _renderableCache?: {
-    bearingInRadians: number;
-    symbolLayer: boolean;
     ids: string[];
     snapshots: Map<string, {
       tileID: string;
@@ -57,10 +54,7 @@ export class ActiveTiles {
     return this._allTilesCache ??= Object.values(this._tiles);
   }
 
-  public getAllIds(sorted = false): string[] {
-    if (sorted) {
-      return Object.values(this._tiles).map(tile => tile.tileID).sort(compareTileId).map(id => id.key);
-    }
+  public getAllIds(): string[] {
     return Object.keys(this._tiles);
   }
 
@@ -91,16 +85,13 @@ export class ActiveTiles {
     return undefined;
   }
 
-  public isIdRenderable(id: string, symbolLayer: boolean = false): boolean {
-    return this.getTileById(id)?.isRenderable(symbolLayer) ?? false;
+  public isIdRenderable(id: string): boolean {
+    return this.getTileById(id)?.isRenderable(false) ?? false;
   }
 
-  public getRenderableIds(bearingInRadians: number = 0, symbolLayer?: boolean): string[] {
-    const useSymbolLayer = symbolLayer ?? false;
+  public getRenderableIds(): string[] {
     const cached = this._renderableCache;
-    if (cached
-      && cached.bearingInRadians === bearingInRadians
-      && cached.symbolLayer === useSymbolLayer) {
+    if (cached) {
       let unchanged = true;
       let tileCount = 0;
       for (const id in this._tiles) {
@@ -141,26 +132,12 @@ export class ActiveTiles {
         fadeOpacity: tile.fadeOpacity,
         symbolFadeHoldUntil: tile.symbolFadeHoldUntil,
       });
-      if (tile && tile.isRenderable(symbolLayer ?? false)) {
+      if (tile && tile.isRenderable(false)) {
         renderables.push(tile);
       }
     }
-    let ids: string[];
-    if (symbolLayer) {
-      ids = renderables.sort((a_: Tile, b_: Tile) => {
-        const a = a_.tileID;
-        const b = b_.tileID;
-        const rotatedA = (new Point(a.canonical.x, a.canonical.y))._rotate(-bearingInRadians);
-        const rotatedB = (new Point(b.canonical.x, b.canonical.y))._rotate(-bearingInRadians);
-        return a.overscaledZ - b.overscaledZ || rotatedB.y - rotatedA.y || rotatedB.x - rotatedA.x;
-      }).map(tile => tile.tileID.key);
-    }
-    else {
-      ids = renderables.map(tile => tile.tileID).sort(compareTileId).map(id => id.key);
-    }
+    const ids = renderables.map(tile => tile.tileID).sort(compareTileId).map(id => id.key);
     this._renderableCache = {
-      bearingInRadians,
-      symbolLayer: useSymbolLayer,
       ids,
       snapshots,
     };

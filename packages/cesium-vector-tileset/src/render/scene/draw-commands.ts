@@ -385,7 +385,7 @@ export class DrawCommands {
           // Decide the final pass once. Resetting a stable OVERLAY command to
           // OPAQUE first invalidates Native's cached derivatives every frame.
           let symbolPass = pass.OPAQUE;
-          if (promoteSymbols) {
+          if (promoteSymbols && scene?.isVisible) {
             if (!scene.isVisible(frameState.cullingVolume, command, occluder))
               continue;
             if (record.promotionLayer > lastGeometryLayer)

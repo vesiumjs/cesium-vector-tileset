@@ -26,7 +26,7 @@ function append(index: Map<string, string[]>, sourceId: string, layerId: string)
 
 function rasterOpacity(layer: RasterStyleLayer): number {
   const value = constantValue(
-    layer as unknown as { paint: { get: (property: string) => unknown } },
+    layer,
     'raster-opacity',
   );
   return typeof value === 'number' && Number.isFinite(value) ? value : 1;
@@ -91,17 +91,13 @@ export class RenderLayerIndex {
     this._allPattern = [];
     for (const layer of layers) {
       if (isRasterStyleLayer(layer)) {
-        if (!layer.isHidden(style.z)) {
-          this._allRaster.push(layer);
-        }
+        this._allRaster.push(layer);
         if (layer.source) {
           append(this._rasterIds, layer.source, layer.id);
         }
       }
       if (isPatternStyleLayer(layer)) {
-        if (!layer.isHidden(style.z)) {
-          this._allPattern.push(layer);
-        }
+        this._allPattern.push(layer);
         if (layer.source) {
           append(this._patternIds, layer.source, layer.id);
         }

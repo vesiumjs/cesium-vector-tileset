@@ -1,7 +1,7 @@
 import type { MapProjection } from 'cesium';
 import type { CameraFocus } from './camera-focus';
 import type { RenderFrameState } from './render-frame';
-import { Cartesian2, Cartesian3, IntersectionTests, Ray, SceneMode } from 'cesium';
+import { Cartesian2, Cartesian3, IntersectionTests, Ray, SceneMode, WebMercatorProjection } from 'cesium';
 import { mercatorXfromLng, mercatorYfromLat, mercatorZfromAltitude } from '../../geo/mercator-coordinate';
 import { MAX_TILE_ZOOM } from '../../geo/world-bounds';
 import { OverscaledTileID } from '../../tile/tile-id';
@@ -18,18 +18,20 @@ interface SourceLodCamera {
 
 /** Capture the actual ground camera once per pose, including projected CV axes. */
 export function sourceLodCamera(frame: RenderFrameState, projection: MapProjection, width: number, height: number, focus?: CameraFocus | null): SourceLodCamera | undefined {
-  // A virtual focus can lie on/above the camera plane; it is not a ground
-  // target for the variable LOD formula. Keep the finite center cap instead.
-  if (frame.mode === SceneMode.COLUMBUS_VIEW && (focus === undefined ? columbusCameraFocus(frame.camera, projection, height) : focus))
-    return undefined;
+  const finiteFocus = frame.mode === SceneMode.COLUMBUS_VIEW
+    ? focus === undefined ? columbusCameraFocus(frame.camera, projection, height) : focus
+    : undefined;
   const fov = (frame.camera.frustum as { fovy?: number }).fovy;
-  const ray = frame.camera.getPickRay(new Cartesian2(width / 2, height / 2));
-  if (!ray || fov === undefined || !(fov > 0 && fov < Math.PI))
+  if (fov === undefined || !(fov > 0 && fov < Math.PI))
     return undefined;
+  const ray = finiteFocus ? undefined : frame.camera.getPickRay(new Cartesian2(width / 2, height / 2));
   let center;
   let position;
   let normal: Cartesian3;
+  let finiteCenterDistance: number | undefined;
   if (frame.mode === SceneMode.SCENE3D) {
+    if (!ray)
+      return undefined;
     const intersection = IntersectionTests.rayEllipsoid(ray, projection.ellipsoid);
     if (!intersection)
       return undefined;
@@ -38,14 +40,30 @@ export function sourceLodCamera(frame: RenderFrameState, projection: MapProjecti
     normal = projection.ellipsoid.geodeticSurfaceNormal(frame.camera.positionWC);
   }
   else if (frame.mode === SceneMode.COLUMBUS_VIEW) {
-    const distance = -ray.origin.x / ray.direction.x;
-    if (!Number.isFinite(distance) || distance < 0)
-      return undefined;
-    const point = Ray.getPoint(ray, distance, new Cartesian3());
-    center = projection.unproject(new Cartesian3(point.y, point.z, 0));
     const camera = frame.camera.positionWC;
     position = projection.unproject(new Cartesian3(camera.y, camera.z, camera.x));
     normal = Cartesian3.UNIT_X;
+    if (finiteFocus) {
+      // MapLibre's virtual center elevation moves its target plane. Our CV
+      // source geometry stays on projected height zero, so its tile distance
+      // retains the actual camera-to-ground height even at a horizontal view.
+      // Only center distance uses the finite focus: intersecting the real
+      // center ray would approach infinity and over-refine the nearby tiles.
+      center = projection.unproject(new Cartesian3(camera.y, camera.z, 0));
+      const direction = frame.camera.directionWC;
+      const north = direction.z / (projection instanceof WebMercatorProjection ? 1 : Math.cos(position.latitude));
+      finiteCenterDistance = finiteFocus.cameraToCenterDistance * Math.hypot(direction.x, direction.y, north)
+        / (2 * Math.PI * projection.ellipsoid.maximumRadius);
+    }
+    else {
+      if (!ray)
+        return undefined;
+      const distance = -ray.origin.x / ray.direction.x;
+      if (!Number.isFinite(distance) || distance < 0)
+        return undefined;
+      const point = Ray.getPoint(ray, distance, new Cartesian3());
+      center = projection.unproject(new Cartesian3(point.y, point.z, 0));
+    }
   }
   else {
     return undefined;
@@ -68,11 +86,11 @@ export function sourceLodCamera(frame: RenderFrameState, projection: MapProjecti
     ? center.height / circumference
     : mercatorZfromAltitude(center.height, center.latitude * degrees);
   const distanceZ = Math.abs(altitude - centerAltitude);
-  const centerDistance = Math.hypot(distanceX, centerY - y, distanceZ);
+  const centerDistance = finiteCenterDistance ?? Math.hypot(distanceX, centerY - y, distanceZ);
   if (!(distanceZ > 0 && centerDistance > 0) || ![x, y, distanceZ, centerDistance].every(Number.isFinite))
     return undefined;
-  // Effective perspective pitch comes from the actual Mercator ground target,
-  // rather than ENU Camera.pitch (which is also wrong for Columbus View).
+  // LOD pitch combines the actual ground height with the measured or finite
+  // center distance, rather than Native's ENU Camera.pitch.
   const pitch = Math.acos(Math.min(1, distanceZ / centerDistance)) * degrees;
   const horizontalDirection = Math.sqrt(Math.max(0, 1 - Cartesian3.dot(frame.camera.directionWC, normal) ** 2));
   const sinRoll = horizontalDirection > 0

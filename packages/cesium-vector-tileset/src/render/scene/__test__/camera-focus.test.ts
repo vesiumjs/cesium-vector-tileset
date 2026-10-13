@@ -78,15 +78,15 @@ describe('finite Columbus View camera focus', () => {
     expect(sourceLodCamera(frame, frame.mapProjection, 1280, 800)).toBeDefined();
   });
 
-  it('keeps horizon LOD finite and conservative, then immediately restores the actual ground camera', () => {
+  it('keeps horizon LOD finite with distant tiles coarsened, then immediately restores the actual ground camera', () => {
     const frame = cameraFrame({ mode: SceneMode.COLUMBUS_VIEW, projection: new WebMercatorProjection(), latitude: 51.5, height: 120, heading: 0, pitch: 0 });
     const pyramid = { getSource: () => ({ type: 'vector', maxzoom: 22 }) };
     const cache = new WeakMap();
     const horizon = zoomForFrame(pyramid, frame, cache)!;
-    expect(sourceLodCamera(frame, frame.mapProjection, 1280, 800)).toBeUndefined();
+    expect(sourceLodCamera(frame, frame.mapProjection, 1280, 800)!.variable).toBe(true);
     const lod = sourceTileLodForFrame(pyramid, frame, cache, 0)!;
     const fine = new OverscaledTileID(22, 0, 22, 2 ** 21, 2 ** 21);
-    expect(lod.select(fine)).toEqual(fine.scaledTo(horizon.zoom));
+    expect(lod.select(fine)!.canonical.z).toBeLessThan(horizon.zoom);
     frame.camera.setView({ orientation: { heading: 0, pitch: -15 * Math.PI / 180, roll: 0 } });
     const restored = zoomForFrame(pyramid, frame, cache)!;
     const cold = cameraFrame({ mode: SceneMode.COLUMBUS_VIEW, projection: new WebMercatorProjection(), latitude: 51.5, height: 120, heading: 0, pitch: -15 * Math.PI / 180 });

@@ -2,14 +2,14 @@ import type { Tile } from './tile';
 import type { OverscaledTileID } from './tile-id';
 
 interface TileCacheEntry {
+  key: string;
   value: Tile;
   timeout?: ReturnType<typeof setTimeout>;
 }
 
 /**
  * A [least-recently-used cache](https://en.wikipedia.org/wiki/Cache_algorithms)
- * with hash lookup made possible by keeping a list of keys in parallel to
- * an array of dictionary of values
+ * with hash lookup and an insertion-ordered list of entries.
  * TilePyramid offloads currently unused tiles to this cache, and when a tile gets used again,
  * it is also removed from this cache. Thus addition is the only operation that counts as "usage"
  * for the purposes of LRU behaviour.
@@ -18,7 +18,7 @@ interface TileCacheEntry {
 export class TileCache {
   max: number;
   data: Record<string, TileCacheEntry[]> = {};
-  order: string[] = [];
+  private order: TileCacheEntry[] = [];
   onRemove: (element: Tile) => void;
   /**
    * @param max - number of permitted values
@@ -64,22 +64,21 @@ export class TileCache {
     this.data[key] ||= [];
 
     const dataWrapper: TileCacheEntry = {
+      key,
       value: data,
     };
 
     if (expiryTimeout !== undefined) {
       dataWrapper.timeout = setTimeout(() => {
-        this.remove(tileID, dataWrapper);
+        this.removeEntry(dataWrapper, true);
       }, expiryTimeout);
     }
 
     this.data[key].push(dataWrapper);
-    this.order.push(key);
+    this.order.push(dataWrapper);
 
     if (this.order.length > this.max) {
-      const removedData = this._getAndRemoveByKey(this.order[0]);
-      if (removedData)
-        this.onRemove(removedData);
+      this.removeEntry(this.order[0], true);
     }
 
     return this;
@@ -97,53 +96,22 @@ export class TileCache {
 
   /**
    * Get the value attached to a specific key and remove data from cache.
-   * If the key is not found, returns `null`
+   * If the key is not found, returns `undefined`.
    *
    * @param tileID - the key to look up
-   * @returns the tile data, or null if it isn't found
+   * @returns the tile data, or undefined if it isn't found
    */
-  getAndRemove(tileID: OverscaledTileID): Tile | null {
-    if (!this.has(tileID)) {
-      return null;
-    }
-    return this._getAndRemoveByKey(tileID.wrapped().key) ?? null;
-  }
-
-  /*
-     * Get and remove the value with the specified key.
-     */
-
-  private _getAndRemoveByKey(key: string): Tile | undefined {
-    const entries = this.data[key];
-    const data = entries?.shift();
-    if (!data) {
-      return undefined;
-    }
-    if (data.timeout)
-      clearTimeout(data.timeout);
-
-    if (entries.length === 0) {
-      delete this.data[key];
-    }
-    this.order.splice(this.order.indexOf(key), 1);
-
-    return data.value;
-  }
-
-  /*
-     * Get the value with the specified (wrapped tile) key.
-     */
-  getByKey(key: string): Tile | undefined {
-    const data = this.data[key];
-    return data?.[0]?.value;
+  getAndRemove(tileID: OverscaledTileID): Tile | undefined {
+    const entry = this.data[tileID.wrapped().key]?.[0];
+    return entry ? this.removeEntry(entry, false) : undefined;
   }
 
   /**
    * Get the value attached to a specific key without removing data
-   * from the cache. If the key is not found, returns `null`
+   * from the cache. If the key is not found, returns `undefined`.
    *
    * @param tileID - the key to look up
-   * @returns the tile data, or null if it isn't found
+   * @returns the tile data, or undefined if it isn't found
    */
   get(tileID: OverscaledTileID): Tile | undefined {
     if (!this.has(tileID)) {
@@ -153,29 +121,12 @@ export class TileCache {
     return this.data[tileID.wrapped().key]?.[0]?.value;
   }
 
-  /**
-   * Remove a key/value combination from the cache.
-   *
-   * @param tileID - the key for the pair to delete
-   * @param value - If a value is provided, remove that exact version of the value.
-   * @param value.value - The tile value.
-   * @param value.timeout - The timeout handle of the value.
-   * @returns this cache
-   */
-  remove(tileID: OverscaledTileID, value?: {
-    value: Tile;
-    timeout?: ReturnType<typeof setTimeout>;
-  }): this {
-    if (!this.has(tileID)) {
-      return this;
-    }
-    const key = tileID.wrapped().key;
-
+  private removeEntry(data: TileCacheEntry, unload: boolean): Tile | undefined {
+    const key = data.key;
     const entries = this.data[key];
-    const dataIndex = value === undefined ? 0 : entries.indexOf(value);
-    const data = entries[dataIndex];
-    if (!data) {
-      return this;
+    const dataIndex = entries?.indexOf(data) ?? -1;
+    if (dataIndex < 0) {
+      return undefined;
     }
     entries.splice(dataIndex, 1);
     if (data.timeout)
@@ -183,10 +134,10 @@ export class TileCache {
     if (entries.length === 0) {
       delete this.data[key];
     }
-    this.onRemove(data.value);
-    this.order.splice(this.order.indexOf(key), 1);
-
-    return this;
+    this.order.splice(this.order.indexOf(data), 1);
+    if (unload)
+      this.onRemove(data.value);
+    return data.value;
   }
 
   /**
@@ -199,13 +150,11 @@ export class TileCache {
     this.max = max;
 
     while (this.order.length > this.max) {
-      const oldestKey = this.order[0];
-      if (oldestKey === undefined) {
+      const oldestEntry = this.order[0];
+      if (oldestEntry === undefined) {
         break;
       }
-      const removedData = this._getAndRemoveByKey(oldestKey);
-      if (removedData)
-        this.onRemove(removedData);
+      this.removeEntry(oldestEntry, true);
     }
 
     return this;
@@ -226,8 +175,8 @@ export class TileCache {
         }
       }
     }
-    for (const r of removed) {
-      this.remove(r.value.tileID, r);
+    for (const entry of removed) {
+      this.removeEntry(entry, true);
     }
   }
 }

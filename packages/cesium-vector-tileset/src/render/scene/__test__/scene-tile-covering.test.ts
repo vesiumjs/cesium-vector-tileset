@@ -13,8 +13,9 @@ import { OverscaledTileID } from '../../../tile/tile-id';
 import { tileBoundingSphere } from '../../geometry/tile-bounding-sphere';
 import { buildVectorTile } from '../../vector/__test__/vector-tile-helper';
 import { drawBatchForOwner } from '../draw-batch';
-import { zoomForFrame } from '../render-frame';
+import { sourceTileLodForFrame, zoomForFrame } from '../render-frame';
 import { SceneTileCovering } from '../scene-tile-covering';
+import { TileGeneration } from '../tile-generation';
 import { cameraFrame } from './camera-helper';
 
 const scheme = new WebMercatorTilingScheme();
@@ -94,9 +95,7 @@ async function coverageOwner(parent = parentID, cameraOptions?: Parameters<typeo
     generationId: vector.tileBuildLayers(tileId)!.generationId,
     stage: 'complete',
     progress: { vector: 'complete', pattern: true, symbol: true },
-    buckets: data.buckets,
-    styleRevision: style.styleRevision,
-    mode: frame.mode!,
+    generation: new TileGeneration(data, style.styleRevision, frame.mode!, vector.tileBuildLayers(tileId)!.generationId, { vector: 'complete', pattern: true, symbol: true }),
     featureIndex: data.latestFeatureIndex,
     retainPreviousGeneration: false,
     previousVector: [],
@@ -154,6 +153,107 @@ async function loadCoverageTiles(owner: Awaited<ReturnType<typeof coverageOwner>
 }
 
 describe('rendered globe and cached surface coverage', () => {
+  it.each([89.9, 90])('retains distance LOD over the actual finite CV horizon at pitch %s', (pitch) => {
+    const frame: RenderFrameState = cameraFrame({
+      mode: Cesium.SceneMode.COLUMBUS_VIEW,
+      projection: new WebMercatorProjection(),
+      width: 1280,
+      heightPixels: 720,
+      fovY: 36.875112943 * Math.PI / 180,
+    });
+    frame.camera.setView({ destination: new Cartesian3(0, 0, 120), convert: false, orientation: { heading: 0, pitch: (pitch - 90) * Math.PI / 180, roll: 0 } });
+    frame.camera.frustum.near = 139;
+    frame.camera.frustum.far = 20662993;
+    const volume = frame.camera.frustum.computeCullingVolume(frame.camera.positionWC, frame.camera.directionWC, frame.camera.upWC);
+    frame.cullingVolume = volume;
+    const source = { type: 'geojson', minzoom: 0, maxzoom: 18, tileSize: 512, reparseOverscaled: true };
+    const pyramid = { getSource: () => source, getLoadedTileIDs: () => [] };
+    const cache = new WeakMap();
+    const lod = sourceTileLodForFrame(pyramid, frame, cache, 0)!;
+    const near = new OverscaledTileID(18, 0, 18, 2 ** 17, 2 ** 17 - 6);
+    const far = new OverscaledTileID(18, 0, 18, 2 ** 17, 2 ** 17 - 6541);
+    expect(lod.select(near)!.canonical.z).toBeGreaterThan(13);
+    expect(lod.select(far)!.canonical.z).toBeLessThan(8);
+
+    const globe = { _surface: { _tilesToRender: [terrain(new OverscaledTileID(0, 0, 0, 0, 0))] } };
+    const scene = Object.assign(frame.camera._scene!, { mode: frame.mode, globe, preRender: new Event(), postRender: new Event(), _frameState: frame });
+    const covering = new SceneTileCovering(() => {});
+    // A stalled recursive covering blocks every browser task. Bound this test's
+    // real Native visibility calls so a regression fails without hanging Vitest.
+    const computeVisibility = volume.computeVisibility.bind(volume);
+    let visits = 0;
+    vi.spyOn(volume, 'computeVisibility').mockImplementation((sphere) => {
+      if (++visits > 20000)
+        throw new Error('Finite CV covering failed to coarsen distant tiles');
+      return computeVisibility(sphere);
+    });
+    covering.observe(scene);
+    try {
+      const ids = covering.covering(pyramid, frame, 0)!.idealTileIDs;
+      expect(ids.length).toBeGreaterThan(0);
+      expect(ids.length).toBeLessThan(1000);
+      expect(visits).toBeLessThan(20000);
+      expect(ids.some(id => id.canonical.z > 13)).toBe(true);
+      expect(ids.some(id => id.canonical.z < 8)).toBe(true);
+    }
+    finally { covering.destroy(); }
+  });
+
+  it('culls Columbus View tiles in the projected camera coordinates', () => {
+    const center = Rectangle.center(terrain(parentID).rectangle);
+    const frame: RenderFrameState = cameraFrame({
+      mode: Cesium.SceneMode.COLUMBUS_VIEW,
+      projection: new WebMercatorProjection(),
+      longitude: Cesium.Math.toDegrees(center.longitude),
+      latitude: Cesium.Math.toDegrees(center.latitude),
+      height: 3000,
+    });
+    frame.cullingVolume = frame.camera.frustum.computeCullingVolume(frame.camera.positionWC, frame.camera.directionWC, frame.camera.upWC);
+    const globe = { _surface: { _tilesToRender: [terrain(parentID)] } };
+    const scene = Object.assign(frame.camera._scene!, { mode: frame.mode, globe, preRender: new Event(), postRender: new Event(), _frameState: frame });
+    const covering = new SceneTileCovering(() => {});
+    const pyramid = { getSource: () => ({ type: 'vector', minzoom: 0, maxzoom: 13, tileSize: 512 }), getLoadedTileIDs: () => [] };
+    covering.observe(scene);
+    try {
+      expect(covering.covering(pyramid, frame, 0)!.idealTileIDs).toEqual([parentID]);
+    }
+    finally { covering.destroy(); }
+  });
+
+  it('bounds an ordinary London CV covering by the actual projected ground footprint', () => {
+    const frame: RenderFrameState = cameraFrame({
+      mode: Cesium.SceneMode.COLUMBUS_VIEW,
+      longitude: -0.0863,
+      latitude: 51.5078,
+      height: 900,
+      heading: 110 * Math.PI / 180,
+      pitch: -35 * Math.PI / 180,
+      heightPixels: 720,
+    });
+    const volume = frame.camera.frustum.computeCullingVolume(frame.camera.positionWC, frame.camera.directionWC, frame.camera.upWC);
+    frame.cullingVolume = volume;
+    const globe = { _surface: { _tilesToRender: [terrain(new OverscaledTileID(0, 0, 0, 0, 0))] } };
+    const scene = Object.assign(frame.camera._scene!, { mode: frame.mode, globe, preRender: new Event(), postRender: new Event(), _frameState: frame });
+    const source = { type: 'vector', minzoom: 0, maxzoom: 14, tileSize: 512 };
+    const pyramid = { getSource: () => source, getLoadedTileIDs: () => [] };
+    const covering = new SceneTileCovering(() => {});
+    const computeVisibility = volume.computeVisibility.bind(volume);
+    let visits = 0;
+    vi.spyOn(volume, 'computeVisibility').mockImplementation((sphere) => {
+      if (++visits > 20000)
+        throw new Error('Projected CV ground bounds admitted distant empty volume');
+      return computeVisibility(sphere);
+    });
+    covering.observe(scene);
+    try {
+      const ids = covering.covering(pyramid, frame, 0)!.idealTileIDs;
+      expect(ids.length).toBeGreaterThan(0);
+      expect(ids.length).toBeLessThan(1000);
+      expect(visits).toBeLessThan(20000);
+    }
+    finally { covering.destroy(); }
+  });
+
   it('keeps perspective sampling paired with the last confirmed Globe until the new pose completes', () => {
     const frame = cameraFrame({
       projection: new WebMercatorProjection(),

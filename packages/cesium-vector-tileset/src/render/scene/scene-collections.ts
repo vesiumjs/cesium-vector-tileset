@@ -4,6 +4,7 @@ import type { RasterTileUpdate } from '../raster/raster-renderer';
 import type { VectorCollection } from '../vector/vector-tile-renderer';
 import type { Budget } from './frame-budget';
 import type { RenderFrameState } from './render-frame';
+import type { TileGeneration } from './tile-generation';
 import type { TilePublishResult } from './tile-publish-queue';
 import { BufferPolygonCollection, PrimitiveCollection as CesiumPrimitiveCollection, Primitive } from 'cesium';
 import { GeometryPrimitive, hasRunnableGeometryUpdate, updateGeometryWithBudget } from '../geometry/geometry-primitive';
@@ -14,6 +15,15 @@ import { allDrawLayersHidden, drawBatchForOwner, drawLayersForOwner } from './dr
 import { captureUploadedPrimitiveBytes, primitiveResourceOwner } from './resource-memory';
 
 export type SceneCollection = VectorCollection | PrimitiveCollection | Primitive;
+
+/** Renderers own physical resources; Scene coordinates one logical tile's handoff. */
+export interface RetainedSurface {
+  readonly parents: ReadonlyMap<Primitive, PrimitiveCollection>;
+  readonly visible: boolean;
+  setVisible: (visible: boolean, hiddenLayers?: ReadonlySet<string>) => void;
+  release: () => void;
+}
+
 export interface TileVisibility {
   hiddenLayers: ReadonlyMap<string, ReadonlySet<string>>;
   hiddenSymbols: ReadonlySet<string>;
@@ -31,7 +41,8 @@ interface SceneReplacement {
   waiting: Set<SceneCollection>;
   visible: boolean;
   release: Array<() => void>;
-  awaitingDetail?: boolean;
+  retained: RetainedSurface[];
+  generation?: TileGeneration;
 }
 
 const updateCollection = (CesiumPrimitiveCollection.prototype as unknown as {
@@ -180,6 +191,8 @@ export class SceneCollections {
 
   private readonly _releaseDrapedCollection: (collection: VectorCollection) => void;
 
+  private readonly _releaseVectorCollection: (collection: VectorCollection) => void;
+
   private readonly _isSymbolPlaced: (tileId: string) => boolean;
 
   private readonly _preparePaint: (collection: SceneCollection, budget?: Budget) => boolean;
@@ -194,7 +207,7 @@ export class SceneCollections {
 
   private readonly _replacements = new Set<SceneReplacement>();
 
-  private readonly _replacementForCollection = new WeakMap<SceneCollection, SceneReplacement>();
+  private readonly _replacementForCollection = new WeakMap<SceneCollection, Set<SceneReplacement>>();
 
   private readonly _vectorVisibility = new WeakMap<SceneCollection, boolean>();
 
@@ -214,12 +227,14 @@ export class SceneCollections {
     isSymbolPlaced: (tileId: string) => boolean,
     releaseDrapedCollection: (collection: VectorCollection) => void = () => {},
     preparePaint: (collection: SceneCollection, budget?: Budget) => boolean = () => true,
+    releaseVectorCollection: (collection: VectorCollection) => void = () => {},
   ) {
     this._root = root;
     this._requestRender = requestRender;
     this._releaseDrapedCollection = releaseDrapedCollection;
     this._isSymbolPlaced = isSymbolPlaced;
     this._preparePaint = preparePaint;
+    this._releaseVectorCollection = releaseVectorCollection;
   }
 
   add(collection: SceneCollection): void {
@@ -285,8 +300,7 @@ export class SceneCollections {
   }
 
   detach(collection: SceneCollection): void {
-    const replacement = this._replacementForCollection.get(collection);
-    if (replacement) {
+    for (const replacement of [...this._replacementForCollection.get(collection) ?? []]) {
       this._cancelReplacement(replacement);
     }
     const parent = this._parents.get(collection);
@@ -317,6 +331,23 @@ export class SceneCollections {
   }
 
   applyRasterUpdate(update: RasterTileUpdate): void {
+    for (const { previous, next, parent, tileIds } of update.replacedOwners ?? []) {
+      this._parents.set(next, parent);
+      for (const replacement of [...this._replacementForCollection.get(previous) ?? []]) {
+        if (!tileIds.has(replacement.tileId)) {
+          this._cancelReplacement(replacement);
+          continue;
+        }
+        replacement.next.delete(previous);
+        replacement.waiting.delete(previous);
+        this._unbindReplacement(previous, replacement);
+        replacement.next.add(next);
+        replacement.waiting.add(next);
+        this._bindReplacement(next, replacement);
+        next.show = false;
+      }
+      this._removeFirstUpdate(previous);
+    }
     this._applyPrimitivePublication(update);
     this._pendingRaster.removed.push(...update.removed);
     this._pendingRaster.removedMaterials.push(...update.removedMaterials);
@@ -341,7 +372,6 @@ export class SceneCollections {
     if (result.stage === 'complete') {
       for (const replacement of this._replacements) {
         if (replacement.kind === 'vector' && replacement.tileId === result.tileId) {
-          replacement.awaitingDetail = false;
           this._finishReplacement(replacement, new Set());
         }
       }
@@ -374,11 +404,12 @@ export class SceneCollections {
       this._parents.set(primitive, parent);
     }
     if (!update.tileId) {
+      this.queueFirstUpdate(update.added, false);
       return;
     }
     let replacement = [...this._replacements].find(item => item.kind === 'vector' && item.tileId === update.tileId);
     if (!replacement && update.retained) {
-      this._beginReplacement('vector', update.tileId, new Set(update.retained.parents.keys()), new Set());
+      this._beginReplacement('vector', update.tileId, new Set(), new Set());
       replacement = [...this._replacements].find(item => item.kind === 'vector' && item.tileId === update.tileId)!;
     }
     if (replacement) {
@@ -388,22 +419,28 @@ export class SceneCollections {
           // This committed generation never became visible. Cancel its GPU
           // preparation instead of blocking the next handoff on stale work.
           replacement.waiting.delete(primitive);
-          this._replacementForCollection.delete(primitive);
-          this._removeFirstUpdate(primitive);
-          this.deferDestroy(primitive);
+          this._unbindReplacement(primitive, replacement);
+          if (!this._replacementForCollection.has(primitive))
+            this._removeFirstUpdate(primitive);
         }
         else {
-          replacement.old.add(primitive);
           retainedVisible = true;
         }
       }
       if (update.retained) {
-        (retainedVisible ? replacement.release : this._pendingRelease).push(update.retained.release);
+        if (retainedVisible) {
+          replacement.retained.push(update.retained);
+          replacement.visible ||= update.retained.visible;
+        }
+        else {
+          update.retained.setVisible(false);
+          this._pendingRelease.push(update.retained.release);
+        }
       }
       for (const primitive of update.added) {
         replacement.next.add(primitive);
         replacement.waiting.add(primitive);
-        this._replacementForCollection.set(primitive, replacement);
+        this._bindReplacement(primitive, replacement);
         primitive.show = false;
       }
       this._finishReplacement(replacement, new Set());
@@ -474,7 +511,7 @@ export class SceneCollections {
         for (const collection of result.addedVector) {
           replacement.next.add(collection);
           replacement.waiting.add(collection);
-          this._replacementForCollection.set(collection, replacement);
+          this._bindReplacement(collection, replacement);
           collection.show = false;
           this.add(collection);
         }
@@ -485,12 +522,14 @@ export class SceneCollections {
     const old = new Set<SceneCollection>();
     const abandoned = new Set<SceneCollection>();
     const release: Array<() => void> = [];
+    const retained: RetainedSurface[] = [];
     for (const replacement of [...this._replacements]) {
       if (replacement.kind !== 'vector' || replacement.tileId !== result.tileId) {
         continue;
       }
       this._forgetReplacement(replacement);
       release.push(...replacement.release);
+      retained.push(...replacement.retained);
       for (const collection of replacement.old) {
         old.add(collection);
       }
@@ -499,19 +538,17 @@ export class SceneCollections {
         this.detachForDestruction(collection);
       }
     }
-    for (const retained of result.retainedSurfaces ?? []) {
-      release.push(retained.release);
-      for (const [primitive, parent] of retained.parents) {
+    for (const surface of result.retainedSurfaces ?? []) {
+      retained.push(surface);
+      for (const [primitive, parent] of surface.parents)
         this._parents.set(primitive, parent);
-        old.add(primitive);
-      }
     }
     for (const collection of result.previousVector) {
       if (!abandoned.has(collection) && this._root.contains(collection)) {
         old.add(collection);
       }
     }
-    const replacing = old.size > 0 && (result.addedVector.length > 0 || result.retainPreviousGeneration);
+    const replacing = (old.size > 0 || retained.length > 0) && (result.addedVector.length > 0 || result.retainPreviousGeneration);
     for (const collection of [...result.previousVector, ...result.retiredVector]) {
       if (!replacing || !old.has(collection)) {
         collection.show = false;
@@ -519,14 +556,18 @@ export class SceneCollections {
       }
     }
     if (replacing) {
-      this._beginReplacement('vector', result.tileId, old, new Set(result.addedVector), undefined, release);
+      this._beginReplacement('vector', result.tileId, old, new Set(result.addedVector), undefined, release, retained);
       const replacement = [...this._replacements].find(item => item.kind === 'vector' && item.tileId === result.tileId)!;
-      replacement.awaitingDetail = result.retainPreviousGeneration;
+      replacement.generation = result.generation;
     }
     else {
       for (const collection of old) {
         collection.show = false;
         this.deferDestroy(collection);
+      }
+      for (const surface of retained) {
+        surface.setVisible(false);
+        this._pendingRelease.push(surface.release);
       }
       this._pendingRelease.push(...release);
     }
@@ -539,6 +580,28 @@ export class SceneCollections {
   /**
    * @internal
    */
+  private _bindReplacement(collection: SceneCollection, replacement: SceneReplacement): void {
+    let replacements = this._replacementForCollection.get(collection);
+    if (!replacements) {
+      replacements = new Set();
+      this._replacementForCollection.set(collection, replacements);
+    }
+    replacements.add(replacement);
+  }
+
+  /**
+   * @internal
+   */
+  private _unbindReplacement(collection: SceneCollection, replacement: SceneReplacement): void {
+    const replacements = this._replacementForCollection.get(collection);
+    replacements?.delete(replacement);
+    if (replacements?.size === 0)
+      this._replacementForCollection.delete(collection);
+  }
+
+  /**
+   * @internal
+   */
   private _beginReplacement(
     kind: SceneReplacement['kind'],
     tileId: string,
@@ -546,6 +609,7 @@ export class SceneCollections {
     next: Set<SceneCollection>,
     waiting = new Set(next),
     release: Array<() => void> = [],
+    retained: RetainedSurface[] = [],
   ): SceneReplacement {
     const replacement: SceneReplacement = {
       kind,
@@ -553,12 +617,14 @@ export class SceneCollections {
       old,
       next,
       waiting,
-      visible: [...old].some(collection => this._vectorVisibility.get(collection) ?? collection.show),
+      visible: [...old].some(collection => this._vectorVisibility.get(collection) ?? collection.show)
+        || retained.some(surface => surface.visible),
       release,
+      retained,
     };
     this._replacements.add(replacement);
     for (const collection of next) {
-      this._replacementForCollection.set(collection, replacement);
+      this._bindReplacement(collection, replacement);
       collection.show = false;
     }
     return replacement;
@@ -575,7 +641,7 @@ export class SceneCollections {
         if (!replacement.next.has(collection)) {
           replacement.next.add(collection);
           replacement.waiting.add(collection);
-          this._replacementForCollection.set(collection, replacement);
+          this._bindReplacement(collection, replacement);
         }
         collection.show = false;
       }
@@ -589,16 +655,18 @@ export class SceneCollections {
 
   /** Replace a paint collection after the new one completes its first GPU update. */
   replaceWhenReady(tileId: string, old: VectorCollection, next: VectorCollection): void {
-    const replacement = this._replacementForCollection.get(old);
-    if (replacement) {
-      replacement.next.delete(old);
-      replacement.waiting.delete(old);
-      this._replacementForCollection.delete(old);
+    const replacements = this._replacementForCollection.get(old);
+    if (replacements) {
+      for (const replacement of [...replacements]) {
+        replacement.next.delete(old);
+        replacement.waiting.delete(old);
+        this._unbindReplacement(old, replacement);
+        replacement.next.add(next);
+        replacement.waiting.add(next);
+        this._bindReplacement(next, replacement);
+      }
       this._removeFirstUpdate(old);
       this.detachForDestruction(old);
-      replacement.next.add(next);
-      replacement.waiting.add(next);
-      this._replacementForCollection.set(next, replacement);
       next.show = false;
     }
     else if (this._root.contains(old)) {
@@ -627,7 +695,12 @@ export class SceneCollections {
           this.setVectorVisibility(collection, covered);
           visible = covered || visible;
         }
-        if (replacement.old.size === 0) {
+        for (const surface of replacement.retained) {
+          const covered = [...surface.parents.keys()].some(owner => !allDrawLayersHidden(owner, hidden));
+          surface.setVisible(covered, hidden);
+          visible ||= covered;
+        }
+        if (replacement.old.size === 0 && replacement.retained.length === 0) {
           for (const collection of replacement.next) {
             if (!allDrawLayersHidden(collection, hidden)) {
               visible = true;
@@ -705,6 +778,12 @@ export class SceneCollections {
         for (const collection of replacement.old) {
           if (query(collection))
             return true;
+        }
+        for (const surface of replacement.retained) {
+          for (const owner of surface.parents.keys()) {
+            if (query(owner))
+              return true;
+          }
         }
       }
     }
@@ -919,8 +998,7 @@ export class SceneCollections {
       for (const [collection, upload] of queue) {
         if (collection.isDestroyed() || !this._contains(collection)) {
           queue.delete(collection);
-          const replacement = this._replacementForCollection.get(collection);
-          if (replacement) {
+          for (const replacement of [...this._replacementForCollection.get(collection) ?? []]) {
             this._cancelReplacement(replacement);
           }
           continue;
@@ -1040,8 +1118,7 @@ export class SceneCollections {
         captureUploadedBytes(collection);
         queue.delete(collection);
         pumped.push(collection);
-        const replacement = this._replacementForCollection.get(collection);
-        if (replacement) {
+        for (const replacement of [...this._replacementForCollection.get(collection) ?? []]) {
           replacement.waiting.delete(collection);
           measurePreparation(() => this._finishReplacement(replacement, readyToDraw, budget));
         }
@@ -1066,7 +1143,7 @@ export class SceneCollections {
    * @internal
    */
   private _finishReplacement(replacement: SceneReplacement, readyToDraw?: Set<SceneCollection>, budget?: Budget): void {
-    if (replacement.awaitingDetail || replacement.waiting.size > 0
+    if ((replacement.generation && !replacement.generation.complete) || replacement.waiting.size > 0
       || (replacement.kind === 'symbol' && !this._isSymbolPlaced(replacement.tileId))) {
       return;
     }
@@ -1079,7 +1156,7 @@ export class SceneCollections {
       }
     }
     // Preparing paint can replace a blend-mode collection or cancel its handoff.
-    if (!this._replacements.has(replacement) || replacement.awaitingDetail || replacement.waiting.size > 0) {
+    if (!this._replacements.has(replacement) || (replacement.generation && !replacement.generation.complete) || replacement.waiting.size > 0) {
       return;
     }
     this._forgetReplacement(replacement);
@@ -1096,6 +1173,10 @@ export class SceneCollections {
       old.show = false;
       this.deferDestroy(old);
     }
+    for (const surface of replacement.retained) {
+      surface.setVisible(false);
+      this._pendingRelease.push(surface.release);
+    }
     this._pendingRelease.push(...replacement.release);
     this._requestRender();
   }
@@ -1106,10 +1187,11 @@ export class SceneCollections {
   private _forgetReplacement(replacement: SceneReplacement): void {
     this._replacements.delete(replacement);
     for (const collection of replacement.next) {
-      this._replacementForCollection.delete(collection);
+      this._unbindReplacement(collection, replacement);
     }
     for (const collection of replacement.next) {
-      this._removeFirstUpdate(collection);
+      if (!this._replacementForCollection.has(collection))
+        this._removeFirstUpdate(collection);
     }
   }
 
@@ -1125,7 +1207,12 @@ export class SceneCollections {
     // in its retired pool. Cancelling their scene handoff releases only the
     // held predecessor; eviction must request successor destruction itself.
     for (const collection of replacement.next) {
-      this.detach(collection);
+      if (!this._replacementForCollection.has(collection))
+        this.detach(collection);
+    }
+    for (const surface of replacement.retained) {
+      surface.setVisible(false);
+      this._pendingRelease.push(surface.release);
     }
     this._pendingRelease.push(...replacement.release);
   }
@@ -1182,34 +1269,36 @@ export class SceneCollections {
     }
   }
 
-  flushRasterRemovals(): void {
-    destroyRasterResources(this._pendingRaster);
-    this._pendingRaster = { removed: [], added: [], removedMaterials: [] };
-  }
-
-  flushPatternRemovals(): void {
-    destroyPatternResources(this._pendingPattern);
-    this._pendingPattern = { removed: [], added: [], removedMaterials: [] };
-  }
-
-  flushRemovals(): void {
+  /** Returns whether a physical resource or retained tile owner was released. */
+  flushRemovals(): boolean {
     for (const replacement of [...this._replacements]) {
       if ([...replacement.next].some(collection => collection.isDestroyed()
         || !this._contains(collection) || this._pendingDestroy.has(collection))) {
         this._cancelReplacement(replacement);
       }
     }
+    let changed = this._pendingRelease.length > 0
+      || this._pendingRaster.removed.some(primitive => !primitive.isDestroyed())
+      || this._pendingRaster.removedMaterials.some(material => !material.isDestroyed())
+      || this._pendingPattern.removed.some(primitive => !primitive.isDestroyed())
+      || this._pendingPattern.removedMaterials.some(material => !material.isDestroyed());
     for (const collection of this._pendingDestroy) {
       this.detach(collection);
       if (!collection.isDestroyed()) {
         collection.destroy();
+        changed = true;
       }
+      if (!(collection instanceof Primitive))
+        this._releaseVectorCollection(collection);
     }
     this._pendingDestroy.clear();
     for (const release of this._pendingRelease.splice(0)) {
       release();
     }
-    this.flushRasterRemovals();
-    this.flushPatternRemovals();
+    destroyRasterResources(this._pendingRaster);
+    this._pendingRaster = { removed: [], added: [], removedMaterials: [] };
+    destroyPatternResources(this._pendingPattern);
+    this._pendingPattern = { removed: [], added: [], removedMaterials: [] };
+    return changed;
   }
 }

@@ -1,12 +1,12 @@
-import type { BoundingSphere, Occluder } from 'cesium';
+import type { MapProjection, Occluder } from 'cesium';
 import type { OverscaledTileID } from '../../tile/tile-id';
 import type { GlobeLike } from './globe-covering';
 import type { CameraFrameSnapshot, CoveringCache, CoveringSource, CoveringTilePyramid, RenderCovering, RenderFrameState, RenderZoom } from './render-frame';
 import type { SourceTileLod } from './source-tile-lod';
-import { Intersect, SceneMode } from 'cesium';
+import { BoundingSphere, Intersect, SceneMode } from 'cesium';
 import { compareTileId } from '../../tile/tile-id';
 import { TilePyramid } from '../../tile/tile-pyramid';
-import { tileBoundingSphere } from '../geometry/tile-bounding-sphere';
+import { tileBoundingSphere, tileRectangle } from '../geometry/tile-bounding-sphere';
 import { globeVisibleTileIDs } from './globe-covering';
 import { cameraPoseForFrame, captureCameraForFrame, planarCoveringForFrame, sourceTileLodForFrame, zoomForFrame } from './render-frame';
 
@@ -97,6 +97,8 @@ export class SceneTileCovering {
   private _globeCoverings = new WeakMap<object, GlobeCoveringCacheEntry>();
 
   private _tileBounds = new WeakMap<OverscaledTileID, BoundingSphere>();
+
+  private _projectedTileBounds = new WeakMap<MapProjection, WeakMap<OverscaledTileID, BoundingSphere>>();
 
   private readonly _requestRender: () => void;
 
@@ -322,13 +324,38 @@ export class SceneTileCovering {
    * @internal
    */
   private _isVisible(id: OverscaledTileID, frameState: RenderFrameState): boolean {
-    let sphere = this._tileBounds.get(id);
-    if (!sphere) {
-      sphere = tileBoundingSphere(id);
-      this._tileBounds.set(id, sphere);
+    let sphere: BoundingSphere;
+    if (frameState.mode === SceneMode.COLUMBUS_VIEW) {
+      const projection = frameState.mapProjection ?? frameState.camera._scene?.mapProjection;
+      if (!projection)
+        return false;
+      let bounds = this._projectedTileBounds.get(projection);
+      if (!bounds) {
+        bounds = new WeakMap();
+        this._projectedTileBounds.set(projection, bounds);
+      }
+      let projected = bounds.get(id);
+      if (!projected) {
+        // Native's projected rectangle encloses the actual ground footprint.
+        // Projecting an ECEF sphere instead includes its empty volume and can
+        // put coarse tile bounds millions of metres above/below the CV plane.
+        projected = BoundingSphere.fromRectangleWithHeights2D(tileRectangle(id), projection, 0, 0);
+        const { x, y, z } = projected.center;
+        projected.center.x = z;
+        projected.center.y = x;
+        projected.center.z = y;
+        bounds.set(id, projected);
+      }
+      sphere = projected;
+    }
+    else {
+      const cached = this._tileBounds.get(id);
+      sphere = cached ?? tileBoundingSphere(id);
+      if (!cached)
+        this._tileBounds.set(id, sphere);
     }
     return frameState.cullingVolume!.computeVisibility(sphere) !== Intersect.OUTSIDE
-      && (!frameState.occluder || !sphere.isOccluded(frameState.occluder as Occluder));
+      && (frameState.mode !== SceneMode.SCENE3D || !frameState.occluder || !sphere.isOccluded(frameState.occluder as Occluder));
   }
 
   destroy(): void {
@@ -350,6 +377,7 @@ export class SceneTileCovering {
     this._renderedGlobe = { _surface: { _tilesToRender: [] } };
     this._globeCoverings = new WeakMap();
     this._tileBounds = new WeakMap();
+    this._projectedTileBounds = new WeakMap();
   }
 
   /**

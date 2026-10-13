@@ -20,6 +20,7 @@ import { buildVectorTile } from '../../vector/__test__/vector-tile-helper';
 import { VectorTileRenderer } from '../../vector/vector-tile-renderer';
 import { UNBOUNDED_BUDGET } from '../frame-budget';
 import { SceneCollections } from '../scene-collections';
+import { TileGeneration } from '../tile-generation';
 import { TileResidency } from '../tile-residency';
 
 const view: PlacementView = { viewProjection: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), width: 1000, height: 1000, pixelRatio: 1, cameraZoom: 14.5, orthographic: true, cameraToCenterDistance: undefined, mercatorProjection: false };
@@ -131,9 +132,7 @@ function fixture(mode: SceneMode = SceneMode.SCENE3D) {
       generationId: vector.tileBuildLayers(tileId)!.generationId,
       stage: 'complete',
       progress: { vector: 'complete', pattern: true, symbol: true },
-      buckets: tile.buckets,
-      styleRevision: 0,
-      mode,
+      generation: new TileGeneration(tile, 0, mode, vector.tileBuildLayers(tileId)!.generationId, { vector: 'complete', pattern: true, symbol: true }),
       featureIndex: tile.latestFeatureIndex,
       retainPreviousGeneration: false,
       previousVector: [],
@@ -181,29 +180,37 @@ describe('independent symbol coverage', () => {
       const tile = state.tiles.get(tileID.key)!;
       const old = state.vector.getTileCollections(tileId);
       const previousGeneration = state.vector.tileBuildLayers(tileId)!.generationId;
-      const previousIndex = new FeatureIndex(tileID);
-      const currentIndex = new FeatureIndex(tileID);
-      const publication = (generationId: number, featureIndex: FeatureIndex, stage: TilePublishResult['stage'], progress: TilePublishResult['progress'], resources: Partial<TilePublishResult> = {}): TilePublishResult => ({
-        sourceId: 'world',
-        tileId,
-        tileID,
-        generationId,
-        featureIndex,
-        stage,
-        progress,
-        buckets: tile.buckets,
-        styleRevision: 0,
-        mode: SceneMode.SCENE3D,
-        retainPreviousGeneration: stage !== 'complete',
-        previousVector: [],
-        retiredVector: [],
-        addedVector: [],
-        raster: { added: [], removed: [], removedMaterials: [] },
-        addedSymbols: [],
-        removedSymbols: [],
-        firstUpdateSymbols: [],
-        ...resources,
-      });
+      const previousIndex = new FeatureIndex();
+      const currentIndex = new FeatureIndex();
+      const generations = new Map<number, TileGeneration>();
+      const publication = (generationId: number, featureIndex: FeatureIndex, stage: TilePublishResult['stage'], progress: TilePublishResult['progress'], resources: Partial<TilePublishResult> = {}): TilePublishResult => {
+        let generation = generations.get(generationId);
+        if (!generation) {
+          generation = new TileGeneration(tile, 0, SceneMode.SCENE3D, generationId);
+          generations.set(generationId, generation);
+        }
+        Object.assign(generation.publication, progress);
+        generation.featureIndex = featureIndex;
+        return ({
+          sourceId: 'world',
+          tileId,
+          tileID,
+          generationId,
+          featureIndex,
+          stage,
+          progress,
+          generation,
+          retainPreviousGeneration: stage !== 'complete',
+          previousVector: [],
+          retiredVector: [],
+          addedVector: [],
+          raster: { added: [], removed: [], removedMaterials: [] },
+          addedSymbols: [],
+          removedSymbols: [],
+          firstUpdateSymbols: [],
+          ...resources,
+        });
+      };
       state.residency.commit(publication(previousGeneration, previousIndex, 'complete', { vector: 'complete', pattern: true, symbol: true }));
       const build = state.vector.beginTileBuild({ tileId, tileID, buckets: tile.buckets, styleZoom: 14, mode: SceneMode.SCENE3D, styleRevision: 0 });
       state.pending.add(tileId);
