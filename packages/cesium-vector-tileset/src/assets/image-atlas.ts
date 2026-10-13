@@ -1,4 +1,4 @@
-import type { StyleImage, TextFit } from '../style/style-image';
+import type { MaterializedStyleImage, StyleImage, TextFit } from '../style/style-image';
 import type { GetImagesResponse } from '../worker/messages';
 
 import type { TransferRegistry } from '../worker/transfer-registry';
@@ -125,7 +125,7 @@ export class ImageAtlas {
     this.patternPositions = patternPositions;
   }
 
-  addImages(images: Record<string, StyleImage>, positions: Record<string, ImagePosition>, bins: Rect[]): void {
+  addImages(images: Record<string, MaterializedStyleImage>, positions: Record<string, ImagePosition>, bins: Rect[]): void {
     for (const id in images) {
       const src = images[id];
       const bin = {
@@ -159,7 +159,7 @@ export class ImageAtlas {
     this._imageUpdateRevision = images.imageUpdateRevision;
   }
 
-  patchUpdatedImage(position: ImagePosition | undefined, image: StyleImage, pattern: boolean): boolean {
+  patchUpdatedImage(position: ImagePosition | undefined, image: MaterializedStyleImage | undefined, pattern: boolean): boolean {
     if (!position || !image)
       return false;
 

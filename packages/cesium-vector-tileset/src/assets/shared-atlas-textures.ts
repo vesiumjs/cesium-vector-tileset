@@ -57,25 +57,15 @@ export interface AtlasRectLike {
 }
 
 /**
- * Hash the packed layout (name + rect + pixelRatio + sprite version). The
+ * Identify the packed layout (name + rect + pixelRatio + sprite version). The
  * sprite version must change when an image's pixels change; this key does
  * not hash the image bytes.
  */
-export function atlasLayoutHash(positions: Record<string, AtlasRectLike>): string {
-  const names = Object.keys(positions).sort();
-  let hash = 0x811C9DC5;
-  const mix = (value: string): void => {
-    for (let i = 0; i < value.length; i++) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 0x01000193);
-    }
-  };
-  for (const name of names) {
+export function atlasLayoutKey(positions: Record<string, AtlasRectLike>): string {
+  return JSON.stringify(Object.keys(positions).sort().map((name) => {
     const position = positions[name];
-    mix(name);
-    mix(`:${position.tlbr.join(',')}/${position.pixelRatio}/${position.version ?? 0};`);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+    return [name, position.tlbr, position.pixelRatio, position.version ?? 0];
+  }));
 }
 
 interface SharedAtlasRecord {

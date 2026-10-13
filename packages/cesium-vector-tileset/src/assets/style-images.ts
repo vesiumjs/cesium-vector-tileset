@@ -1,4 +1,4 @@
-import type { StyleImage } from '../style/style-image';
+import type { MaterializedStyleImage, StyleImage } from '../style/style-image';
 import type { GetImagesResponse } from '../worker/messages';
 import { renderStyleImage } from '../style/style-image';
 import { warnOnce } from '../util/errors';
@@ -12,6 +12,10 @@ export type MissingImageRequestHandler = (id: string) => void | Promise<void>;
 interface ImageRequestor {
   ids: string[];
   promiseResolve: (value: GetImagesResponse | PromiseLike<GetImagesResponse>) => void;
+}
+
+function hasImageData(image: StyleImage): image is MaterializedStyleImage {
+  return image.data !== undefined;
 }
 
 /**
@@ -78,8 +82,10 @@ export class StyleImages extends Evented {
     }
   }
 
-  getImage(id: string): StyleImage {
+  getImage(id: string): MaterializedStyleImage | undefined {
     const image = this.images[id];
+    if (!image)
+      return undefined;
     // Extract sprite image data on demand
     if (image && !image.data && image.spriteData) {
       const spriteData = image.spriteData;
@@ -95,7 +101,7 @@ export class StyleImages extends Evented {
       image.spriteData = undefined;
     }
 
-    return image;
+    return hasImageData(image) ? image : undefined;
   }
 
   addImage(id: string, image: StyleImage): void {
@@ -112,7 +118,11 @@ export class StyleImages extends Evented {
    */
   private _validate(id: string, image: StyleImage): boolean {
     let valid = true;
-    const data = image.data || image.spriteData;
+    const data = hasImageData(image) ? image.data : image.spriteData;
+    if (!data) {
+      this.fire(new ErrorEvent(new Error(`Image "${id}" has no pixel or sprite data`)));
+      return false;
+    }
     if (!this._validateStretch(image.stretchX, data?.width)) {
       this.fire(new ErrorEvent(new Error(`Image "${id}" has invalid "stretchX" value`)));
       valid = false;
@@ -172,8 +182,13 @@ export class StyleImages extends Evented {
 
   updateImage(id: string, image: StyleImage, validate: boolean = true): void {
     const oldImage = this.getImage(id);
-    if (validate && (oldImage.data.width !== image.data.width || oldImage.data.height !== image.data.height)) {
-      throw new Error(`size mismatch between old image (${oldImage.data.width}x${oldImage.data.height}) and new image (${image.data.width}x${image.data.height}).`);
+    if (!oldImage)
+      throw new Error(`Image id ${id} does not exist, use addImage instead`);
+    const data = hasImageData(image) ? image.data : image.spriteData;
+    if (!data)
+      throw new Error(`Image "${id}" has no pixel or sprite data`);
+    if (validate && (oldImage.data.width !== data.width || oldImage.data.height !== data.height)) {
+      throw new Error(`size mismatch between old image (${oldImage.data.width}x${oldImage.data.height}) and new image (${data.width}x${data.height}).`);
     }
     image.version = ++this.imageUpdateRevision;
     this.images[id] = image;
