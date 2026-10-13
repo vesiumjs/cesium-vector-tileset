@@ -31,7 +31,9 @@ const stop = watch(() => props.scene, (scene, _previous, onCleanup) => {
     const nextDirection = camera.directionWC;
     const nextUp = camera.upWC;
     const frustum = camera.frustum as OrthographicOffCenterFrustum;
-    const nextWidth = scene.mode === SceneMode.SCENE2D ? frustum.right - frustum.left : undefined;
+    const nextWidth = scene.mode === SceneMode.SCENE2D && frustum.right !== undefined && frustum.left !== undefined
+      ? frustum.right - frustum.left
+      : undefined;
     if (mode === scene.mode && width === nextWidth
       && Cartesian3.equals(position, nextPosition)
       && Cartesian3.equals(direction, nextDirection)

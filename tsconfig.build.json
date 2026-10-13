@@ -8,8 +8,6 @@
     "resolveJsonModule": true,
     "strict": true,
     "strictFunctionTypes": true,
-    "strictNullChecks": false,
-    "noImplicitAny": false,
     "declaration": true,
     "declarationMap": true,
     "noEmit": true,
