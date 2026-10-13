@@ -35,9 +35,9 @@ test('a real failed MVT Worker rejects all shared clients while the healthy Work
       }
     };
   });
-  let heldRequest: string;
+  let heldRequest: string | undefined;
   let requested = 0;
-  let release: () => void;
+  let release: (() => void) | undefined;
   const held = new Promise<void>(resolve => release = resolve);
   await page.route('**/tile.worker.ts*', async (route) => {
     requested++;
@@ -58,6 +58,7 @@ test('a real failed MVT Worker rejects all shared clients while the healthy Work
   assert.deepEqual(pending.calls.map(call => call.status), ['pending', 'pending']);
   assert.ok(pending.pending.every(count => count > 0));
   assert.equal(pending.workers[0].errors, 0);
+  assert.ok(release, 'The pending Worker module response must have a release callback');
   release();
   await expect.poll(() => page.evaluate(() => window.mvtWorkerFixture.snapshot().workers[0].errors)).toBe(1);
   await expect.poll(() => page.evaluate(() => window.mvtWorkerFixture.snapshot().calls.map(call => call.status)), { timeout: 5_000 }).toEqual(['rejected', 'rejected']);

@@ -7,6 +7,7 @@ import { writeFile } from 'node:fs/promises';
 import { expect } from 'playwright/test';
 import { fromGeojsonVt, test } from './fixtures';
 
+interface ProbePoint { x: number; y: number }
 interface TileClipProbe {
   ratio: number;
   center: { x: number; y: number };
@@ -27,7 +28,7 @@ declare global {
   interface Window {
     stopTileClipPixels: () => void;
     tileClipPixels: Uint8Array;
-    tileClipProbe: (pick?: boolean) => TileClipProbe;
+    tileClipProbe: (pick?: boolean) => TileClipProbe | undefined;
   }
 }
 
@@ -117,14 +118,14 @@ async function installProbe(page: Page, scenario: typeof scenarios[number], mode
       const point = validation.projectPosition(longitude, latitude, lineHeight);
       return point && { x: point.x * ratio, y: point.y * ratio };
     };
-    const visible = point => point && point.x > width && point.x < canvas.width - width && point.y > width && point.y < canvas.height - width;
+    const visible = (point: ProbePoint | undefined): point is ProbePoint => !!point && point.x > width && point.x < canvas.width - width && point.y > width && point.y < canvas.height - width;
     window.tileClipProbe = (pick = false) => {
       if (!window.tileClipPixels)
         return undefined;
       const center = project(scenario.center);
       const start = project(scenario.center.map((value, index) => value - scenario.direction[index] / 16));
       const end = project(scenario.center.map((value, index) => value + scenario.direction[index] / 16));
-      if (![center, start, end].every(visible))
+      if (!visible(center) || !visible(start) || !visible(end))
         return undefined;
       const length = Math.hypot(end.x - start.x, end.y - start.y);
       const tangent = { x: (end.x - start.x) / length, y: (end.y - start.y) / length };
@@ -134,10 +135,12 @@ async function installProbe(page: Page, scenario: typeof scenarios[number], mode
       // from the seam, so the tiny geographic curvature cannot change owners.
       const east = project([scenario.center[0] + 1 / extent, scenario.center[1]]);
       const south = project([scenario.center[0], scenario.center[1] + 1 / extent]);
+      if (!east || !south)
+        throw new Error('Visible tile seam must project its local axes');
       const axisX = { x: (east.x - center.x) * extent, y: (east.y - center.y) * extent };
       const axisY = { x: (south.x - center.x) * extent, y: (south.y - center.y) * extent };
       const determinant = axisX.x * axisY.y - axisX.y * axisY.x;
-      const sample = (point, painted, label) => {
+      const sample = (point: ProbePoint, painted: boolean, label: string) => {
         const x = Math.floor(point.x);
         const y = Math.floor(point.y);
         const dx = x + 0.5 - center.x;
@@ -160,7 +163,7 @@ async function installProbe(page: Page, scenario: typeof scenarios[number], mode
           feature: id ? tileset.pick(id) : undefined,
         };
       };
-      const offset = (point, along, across) => ({ x: point.x + tangent.x * along + normal.x * across, y: point.y + tangent.y * along + normal.y * across });
+      const offset = (point: ProbePoint, along: number, across: number) => ({ x: point.x + tangent.x * along + normal.x * across, y: point.y + tangent.y * along + normal.y * across });
       const samples = [];
       if (scenario.corners) {
         // NW/NE/SW/SE tiles all buffer this same diagonal at their respective
@@ -173,6 +176,8 @@ async function installProbe(page: Page, scenario: typeof scenarios[number], mode
           // Project each geographic center independently in 3D rather than
           // assuming its curved world path is a straight screen-space strip.
           const point = project(scenario.center.map((value, index) => value + scenario.direction[index] * (progress - 0.5) / 8));
+          if (!point)
+            throw new Error('The interior tile seam sample must project into the viewport');
           for (const side of [-1, 1])
             samples.push(sample(offset(point, 0, side * width * ratio / 4), true, `${progress}/${side}`));
         }
@@ -195,7 +200,7 @@ test.describe(() => {
   ];
   for (const { mode, kind, scenario } of cases) {
     test(`${kind} ${scenario.name} blends once and picks its tile in ${mode}`, async ({ page, renderUrl }, testInfo) => {
-      const errors = [];
+      const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
       const requestedTiles = await serveTiles(page, renderUrl, kind, scenario);
       const cameraCenter = geographic(scenario.center);
@@ -214,6 +219,7 @@ test.describe(() => {
       // pixels matching the expected result: missing halves must fail.
       await expect.poll(() => page.evaluate(() => window.tileClipProbe()), { timeout: 60_000 }).toBeTruthy();
       const probe = await page.evaluate(() => window.tileClipProbe(true));
+      assert.ok(probe, 'The tile seam probe must remain ready when sampled for picking');
       const state = await page.evaluate(() => ({
         fps: window.renderValidation.viewer.scene.debugShowFramesPerSecond,
         globe: window.renderValidation.viewer.scene.globe.show,
@@ -243,8 +249,10 @@ test.describe(() => {
         assert.ok(sample.rgb.every((channel, index) => Math.abs(channel - expected[index]) <= 3), `${mode}/${kind}/${scenario.name}/${sample.label}: pixel ${sample.x}/${sample.y} must ${sample.painted ? 'blend once' : 'stay background'}: ${sample.rgb} vs ${expected}`);
         assert.equal(sample.feature?.layerId, sample.painted ? 'roads' : 'ground', `${sample.label}: render and pick coverage must agree`);
         assert.equal(sample.feature?.properties.owner, sample.expectedOwner, `${sample.label}: pick escaped its source tile`);
-        if (sample.painted)
+        if (sample.painted) {
+          assert.ok(sample.feature, 'A painted line sample must retain its picked feature');
           assert.equal(sample.feature.properties.road, scenario.name);
+        }
       }
       await page.evaluate(() => window.stopTileClipPixels());
     });

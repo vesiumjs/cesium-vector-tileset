@@ -46,6 +46,8 @@ test('globe hides symbols on the far side while keeping front symbols visible', 
   await expect.poll(() => page.evaluate(() => !!window.renderValidation)).toBe(true);
   await page.evaluate(() => {
     const { viewer, atlas } = window.renderValidation;
+    if (!atlas)
+      throw new Error('The symbol occlusion fixture requires its atlas view');
     viewer.camera.setView({ destination: atlas.cesium.Cartesian3.fromDegrees(0, 0, 20_000_000) });
     viewer.scene.requestRender();
   });
@@ -81,12 +83,16 @@ test('globe hides symbols on the far side while keeping front symbols visible', 
   // The first rendered frame must hide it even with the old placement alive.
   await page.evaluate(() => {
     const { viewer, atlas } = window.renderValidation;
+    if (!atlas)
+      throw new Error('The symbol occlusion fixture requires its atlas view');
     viewer.camera.setView({ destination: atlas.cesium.Cartesian3.fromDegrees(85, 0, 20_000_000) });
     viewer.scene.requestRender();
   });
   await expect.poll(async () => (await sample()).back).toBeGreaterThan(100);
   await page.evaluate(() => {
     const { viewer, atlas } = window.renderValidation;
+    if (!atlas)
+      throw new Error('The symbol occlusion fixture requires its atlas view');
     viewer.camera.setView({ destination: atlas.cesium.Cartesian3.fromDegrees(0, 0, 20_000_000) });
   });
   expect((await sample()).back).toBe(0);
@@ -95,6 +101,8 @@ test('globe hides symbols on the far side while keeping front symbols visible', 
   for (const mode of ['2d', 'cv']) {
     await page.evaluate((mode) => {
       const { viewer, atlas } = window.renderValidation;
+      if (!atlas)
+        throw new Error('The symbol occlusion fixture requires its atlas view');
       if (mode === '2d')
         viewer.scene.morphTo2D(0);
       else

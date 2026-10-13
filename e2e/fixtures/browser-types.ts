@@ -116,7 +116,6 @@ type TestPlacementScope = Omit<Public<PlacementScope>, 'job'> & {
   _view: PlacementScope['_view'];
   _lastCommitMs: PlacementScope['_lastCommitMs'];
 };
-type RasterEntry = RasterTileRenderer['_tiles'] extends Map<string, Array<infer Entry>> ? Entry : never;
 export type TestTilesetRenderer = Omit<Public<TilesetRenderer>, 'covering' | 'vector' | 'raster' | 'pattern' | 'symbol' | 'publishQueue' | 'collections' | 'sourceSync' | 'residency' | 'preparation'> & {
   _lastSubmittedCommands: TilesetRenderer['_lastSubmittedCommands'];
   covering: Public<SceneTileCovering> & { _cameraPose: SceneTileCovering['_cameraPose']; _observedCamera: SceneTileCovering['_observedCamera']; _globeCoverings: SceneTileCovering['_globeCoverings'] };
@@ -125,7 +124,7 @@ export type TestTilesetRenderer = Omit<Public<TilesetRenderer>, 'covering' | 've
     _retired: VectorTileRenderer['_retired'];
     dashMaterial?: Public<DashMaterial> & { _material?: Material & { _textures: Record<string, NativeTexture> } };
   };
-  raster: Public<RasterTileRenderer> & { _tiles: Map<string, Array<Omit<RasterEntry, 'material'> & { material: Material & { _textures: Record<string, NativeTexture> } }>> };
+  raster: Public<RasterTileRenderer> & { _tiles: RasterTileRenderer['_tiles'] };
   pattern: Public<PatternTileRenderer> & { _tiles: PatternTileRenderer['_tiles'] };
   symbol: Public<SymbolTileRenderer> & {
     _tiles: SymbolTileRenderer['_tiles'];

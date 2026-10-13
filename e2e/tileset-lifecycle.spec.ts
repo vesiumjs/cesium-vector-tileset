@@ -1,5 +1,6 @@
 import type { FillLayerSpecification, StyleSpecification, VectorSourceSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { Page } from 'playwright/test';
+import type { TestScene } from './fixtures/browser-types';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { writeFile } from 'node:fs/promises';
@@ -21,7 +22,7 @@ interface OpenOptions {
   published?: boolean;
   initialStyle?: StyleSpecification;
   tileDelayMs?: number;
-  expected?: number[];
+  expected?: number[] | null;
 }
 
 const tile = fromGeojsonVt({ land: { features: [{
@@ -72,8 +73,8 @@ function gradientStyle(baseUrl: string, reference = false): StyleSpecification {
 }
 
 async function open(page: Page, baseUrl: string, { extent = 4096, mode = '3d', published = false, initialStyle, tileDelayMs = 0, expected = blue }: OpenOptions = {}) {
-  const errors = [];
-  const requests = [];
+  const errors: string[] = [];
+  const requests: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/lifecycle/**', async (route) => {
     const url = route.request().url();
@@ -108,20 +109,21 @@ test('zoom replacement keeps framebuffer coverage', async ({ page, renderUrl }, 
   // one-frame hole while newly uploaded children replace the parent coverage.
   const samples = await page.evaluate(async () => {
     const validation = window.renderValidation;
-    const samples = [];
+    interface CoverageSample { direction: string; step: number; time: number; zoom: number; coverage: number[]; stats: ReturnType<typeof validation.tileset.stats>; diagnostic?: unknown }
+    const samples: CoverageSample[] = [];
     let direction = 'in';
     let step = 0;
-    const rectangles = globe => globe._surface._tilesToRender.map(tile => ({ level: tile.level, x: tile.x, y: tile.y, rectangle: { ...tile.rectangle } }));
-    let previousGlobe;
+    const rectangles = (globe: TestScene['globe']) => globe._surface._tilesToRender.map(tile => ({ level: tile.level, x: tile.x, y: tile.y, rectangle: { ...tile.rectangle } }));
+    let previousGlobe: ReturnType<typeof rectangles> | undefined;
     const removePreRender = validation.viewer.scene.preRender.addEventListener(() => {
       previousGlobe = rectangles(validation.viewer.scene.globe);
     });
     const remove = validation.viewer.scene.postRender.addEventListener(() => {
       const tileset = validation.tileset;
       const coverage = validation.readCoverage();
-      const sample: { direction: string; step: number; time: number; zoom: number; coverage: number[]; stats: ReturnType<typeof tileset.stats>; diagnostic?: unknown } = { direction, step, time: performance.now(), zoom: validation.zoom, coverage, stats: tileset.stats() };
+      const sample: CoverageSample = { direction, step, time: performance.now(), zoom: validation.zoom, coverage, stats: tileset.stats() };
       if (coverage.some(ratio => ratio < 0.98)) {
-        const collections = collection => ({ show: collection.show, length: collection.length, destroyed: collection.isDestroyed() });
+        const collections = (collection: { show: boolean; length?: number; isDestroyed: () => boolean }) => ({ show: collection.show, length: collection.length, destroyed: collection.isDestroyed() });
         sample.diagnostic = {
           previousGlobe,
           currentGlobe: rectangles(validation.viewer.scene.globe),
@@ -177,8 +179,8 @@ test('public style and source switches draw the new pixels without empty frames'
     return validation.viewer.scene.globe.tilesLoaded && validation.renderedFrames === before;
   })).toBe(true);
   const initialTileRequests = requests.filter(url => url.endsWith('.pbf')).length;
-  async function switchStyle(next, expected, name) {
-    await page.evaluate(({ next, blue, green }) => {
+  async function switchStyle(next: StyleSpecification, expected: number[], name: string) {
+    await page.evaluate(({ serializedStyle, blue, green }) => {
       const validation = window.renderValidation;
       window.switchCoverage = [];
       window.stopSwitchCoverage = validation.viewer.scene.postRender.addEventListener(() => {
@@ -186,8 +188,9 @@ test('public style and source switches draw the new pixels without empty frames'
         const current = validation.readCoverage(green);
         window.switchCoverage.push(previous.map((ratio, index) => ratio + current[index]));
       });
+      const next: StyleSpecification = JSON.parse(serializedStyle);
       validation.tileset.setStyle(next);
-    }, { next, blue, green });
+    }, { serializedStyle: JSON.stringify(next), blue, green });
     await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), expected)).toBeGreaterThanOrEqual(0.98);
     const samples = await page.evaluate(() => {
       window.stopSwitchCoverage();
@@ -363,7 +366,9 @@ test('retained removal and reinsertion wake a settled scene without destroying t
 test('transparent parent and child tile replacement keeps each pixel at a single opacity', async ({ page, renderUrl }, testInfo) => {
   const initialStyle = style(renderUrl);
   initialStyle.sources.land.maxzoom = 14;
-  initialStyle.layers[0].paint['fill-opacity'] = 0.5;
+  const fill = initialStyle.layers[0];
+  assert.ok(fill.type === 'fill' && fill.paint, 'The transparent replacement fixture requires a fill paint');
+  fill.paint['fill-opacity'] = 0.5;
   initialStyle.layers.unshift({ id: 'background', type: 'background', paint: { 'background-color': '#aa2222' } });
   const { errors, requests } = await open(page, renderUrl, { initialStyle, tileDelayMs: 150, expected: null });
   await expect.poll(() => page.evaluate(async () => {
@@ -384,17 +389,18 @@ test('transparent parent and child tile replacement keeps each pixel at a single
   const beforeRequests = requests.filter(url => url.endsWith('.pbf')).length;
   const frames = await page.evaluate(async (color) => {
     const validation = window.renderValidation;
-    const frames = [];
+    interface PixelFrame { step: number; coverage: number[]; pixels: number[][][]; diagnostic?: unknown }
+    const frames: PixelFrame[] = [];
     let step = 0;
     const remove = validation.viewer.scene.postRender.addEventListener(() => {
       const coverage = validation.readCoverage(color);
       const pixels = validation.readPixelSamples();
-      const frame: { step: number; coverage: number[]; pixels: number[][][]; diagnostic?: unknown } = { step, coverage, pixels };
+      const frame: PixelFrame = { step, coverage, pixels };
       if (coverage.some(ratio => ratio < 0.98)) {
         const tileset = validation.tileset;
         frame.diagnostic = {
           stats: tileset.stats(),
-          sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
+          sources: Object.entries(tileset._renderer.style.tilePyramids).map(([id, pyramid]) => ({ id, ideal: pyramid._covering?.idealTileIDs.map(tile => tile.toString()), renderable: pyramid.getRenderableIds() })),
           live: [...tileset._renderer.vector.collections].map(([id, collection]) => ({ id, show: collection.show })),
           held: [...tileset._renderer.residency._sources].map(([id, source]) => ({ id, tiles: [...source.held] })),
           jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),

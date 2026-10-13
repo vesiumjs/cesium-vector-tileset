@@ -52,12 +52,21 @@ async function pixels(page: Page, color: number[]) {
   return matching / sampled;
 }
 
-test('built demo loads minified modules and worker with native FPS, paint and mode switches', async ({ page, productionUrl }) => {
-  const errors = [];
-  const unexpected = [];
-  const resources = [];
-  const workers = [];
-  const failedAssets = [];
+test('built demo loads minified modules and worker with native FPS, paint and mode switches', async ({ page, productionUrl }, testInfo) => {
+  const errors: string[] = [];
+  const unexpected: string[] = [];
+  const resources: string[] = [];
+  const workers: string[] = [];
+  const failedAssets: { url: string; status: number }[] = [];
+  async function expectPaint(mode: string, source: string, color: number[]) {
+    try {
+      await expect.poll(() => pixels(page, color), { message: `Expected ${source} paint in ${mode}` }).toBeGreaterThanOrEqual(0.95);
+    }
+    catch (cause) {
+      await testInfo.attach('production-paint-failure', { body: JSON.stringify({ mode, source, color, errors, unexpected, failedAssets }, null, 2), contentType: 'application/json' });
+      throw cause;
+    }
+  }
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => message.type() === 'error' && errors.push(message.text()));
   page.on('request', request => resources.push(request.url()));
@@ -89,13 +98,13 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
   });
 
   await page.goto(`${productionUrl}${basePath}?preset=london&source=liberty`);
-  await expect.poll(() => pixels(page, [51, 102, 170])).toBeGreaterThanOrEqual(0.95);
+  await expectPaint('3d', 'liberty', [51, 102, 170]);
   await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   // Cesium reports N/A when requestRenderMode has no frame to draw.
   await expect(page.locator('.cesium-performanceDisplay-fps')).toHaveText(/(?:\d+|N\/A) FPS/);
   await expect.poll(() => page.locator('.cesium-credit-logoContainer img').evaluate(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0)).toBe(true);
   await page.getByTestId('source-select').selectOption('bright');
-  await expect.poll(() => pixels(page, [34, 170, 85])).toBeGreaterThanOrEqual(0.95);
+  await expectPaint('3d', 'bright', [34, 170, 85]);
   for (const [mode, source, color] of [
     ['2d', 'liberty', [51, 102, 170]],
     ['cv', 'bright', [34, 170, 85]],
@@ -105,7 +114,7 @@ test('built demo loads minified modules and worker with native FPS, paint and mo
     await expect(page).toHaveURL(new RegExp(`mode=${mode}`));
     // A new color after each mode change must come from a new rendered frame.
     await page.getByTestId('source-select').selectOption(source);
-    await expect.poll(() => pixels(page, color)).toBeGreaterThanOrEqual(0.95);
+    await expectPaint(mode, source, color);
     await expect(page.locator('.cesium-performanceDisplay')).toBeVisible();
   }
   await expect(page.locator('.cesium-widget-errorPanel')).toHaveCount(0);

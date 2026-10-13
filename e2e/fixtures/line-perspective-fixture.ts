@@ -144,11 +144,14 @@ async function createPerspective() {
     setPitch,
     ready: () => tileset.tilesLoaded && reference.loaded() && !!nativePixels && !!referencePixels && nativeFrames > 2 && referenceFrames > 0,
     capture() {
+      const nativeFov = (viewer.camera.frustum as PerspectiveFrustum).fovy;
+      if (nativeFov === undefined)
+        throw new Error('Native camera projection is not ready');
       if (!nativePixels || !referencePixels)
         throw new Error('Both real renderers must produce a framebuffer');
       return {
         errors,
-        camera: { pitch: reference.getPitch(), zoom: reference.getZoom(), fov: reference.getVerticalFieldOfView(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, nativePosition: Cartesian3.clone(viewer.camera.positionWC) },
+        camera: { pitch: reference.getPitch(), zoom: reference.getZoom(), fov: reference.getVerticalFieldOfView(), nativeFov: nativeFov * 180 / Math.PI, nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, nativePosition: Cartesian3.clone(viewer.camera.positionWC) },
         gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(reference.getCanvas().getContext('webgl2')!) },
         viewport: { native: [viewer.canvas.width, viewer.canvas.height, viewer.canvas.clientWidth, viewer.canvas.clientHeight], reference: [reference.getCanvas().width, reference.getCanvas().height, reference.getCanvas().clientWidth, reference.getCanvas().clientHeight] },
         lines: lines.map((line) => {

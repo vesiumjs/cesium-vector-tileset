@@ -186,7 +186,7 @@ function nativeOwnerSnapshot(viewer: TestViewer, tileset: TestTileset, frame: nu
     owners,
     sources,
     hiddenSurfaceLayers: [...tileset._renderer.residency.hiddenSurfaceLayers].map(([id, layers]) => ({ tileId: id, layers: [...layers] })),
-    jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ tileId: id, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.progress } })),
+    jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ tileId: id, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.generation.publication } })),
     observerCpuMs: performance.now() - started,
   };
 }

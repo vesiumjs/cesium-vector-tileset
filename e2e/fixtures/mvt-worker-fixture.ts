@@ -16,7 +16,9 @@ function createStyle() {
   failures.push(errors);
   return style;
 }
-function send(channel: WorkerChannel) {
+function send(channel: WorkerChannel | undefined) {
+  if (!channel)
+    throw new Error('The fixture requires a channel for the failed worker');
   const call: (typeof calls)[number] = { status: 'pending' };
   calls.push(call);
   channel.sendAsync({ type: MessageType.setLayers, data: [] }).then(
@@ -47,6 +49,8 @@ const fixture = {
   },
   async healthy() {
     const channel = styles[1].dispatcher.channels.find(channel => channel.target === window.mvtWorkers[1].worker);
+    if (!channel)
+      throw new Error('The fixture requires a channel for the healthy worker');
     await channel.sendAsync({ type: MessageType.updateGlobalState, data: { alive: true } });
     return true;
   },

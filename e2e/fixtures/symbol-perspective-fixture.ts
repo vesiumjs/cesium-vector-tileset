@@ -159,6 +159,9 @@ async function createPerspective() {
     },
     ready: () => performance.now() - changedAt > 350 && tileset.tilesLoaded && reference.loaded() && nativeFrames > 20 && referenceFrames > 0 && !!nativePixels && !!referencePixels,
     capture() {
+      const nativeFov = (viewer.camera.frustum as PerspectiveFrustum).fovy;
+      if (nativeFov === undefined)
+        throw new Error('Native camera projection is not ready');
       if (!nativePixels || !referencePixels)
         throw new Error('Both renderers must draw');
       const transform = (reference as unknown as { _camera: { transform: { getCameraLngLat: () => { lng: number; lat: number }; getCameraAltitude: () => number; _pixelMatrix3D: number[]; _viewProjMatrix: number[]; cameraToCenterDistance: number; worldSize: number; coordinatePoint: (point: MercatorCoordinate, elevation: number, matrix: number[]) => { x: number; y: number } } } })._camera.transform;
@@ -190,7 +193,7 @@ async function createPerspective() {
         loaded,
         nativeGeometries,
         draws,
-        camera: { nativePosition, referencePosition, pitch: reference.getPitch(), nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeFov: (viewer.camera.frustum as PerspectiveFrustum).fovy * 180 / Math.PI, bearing: reference.getBearing(), roll: reference.getRoll(), nativeHeading: viewer.camera.heading, nativeRoll: viewer.camera.roll, elevation: reference.getCenterElevation(), zoom: reference.getZoom() },
+        camera: { nativePosition, referencePosition, pitch: reference.getPitch(), nativePitch: 90 + viewer.camera.pitch * 180 / Math.PI, fov: reference.getVerticalFieldOfView(), nativeFov: nativeFov * 180 / Math.PI, bearing: reference.getBearing(), roll: reference.getRoll(), nativeHeading: viewer.camera.heading, nativeRoll: viewer.camera.roll, elevation: reference.getCenterElevation(), zoom: reference.getZoom() },
         gpu: { native: gpu(viewer.scene.context._gl), reference: gpu(reference.getCanvas().getContext('webgl2')!) },
         viewport: { native: [viewer.canvas.width, viewer.canvas.height, viewer.canvas.clientWidth, viewer.canvas.clientHeight], reference: [reference.getCanvas().width, reference.getCanvas().height, reference.getCanvas().clientWidth, reference.getCanvas().clientHeight] },
         points: pointRows,

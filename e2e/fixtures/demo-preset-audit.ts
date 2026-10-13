@@ -42,6 +42,7 @@ export async function createDemoPresetAudit(page: Page) {
     } as Cartesian2, currentScene.mapProjection.ellipsoid);
     if (!target || ![target.x, target.y, target.z].every(Number.isFinite))
       throw new Error('Preset camera has no finite ellipsoid target at the canvas centre');
+    const cameraTarget = target;
     const range = Cartesian.distance(original.position, target);
     const targetPosition = currentScene.mapProjection.ellipsoid.cartesianToCartographic(target);
     if (!targetPosition || !Number.isFinite(range) || range <= 0)
@@ -155,7 +156,7 @@ export async function createDemoPresetAudit(page: Page) {
             const heading = original.heading + (stage === 'zoom-in' ? 0 : stage === 'orbit' ? ratio * 0.45 : 0.45);
             const tiltedPitch = Math.min(-0.09, original.pitch + 0.25);
             const pitch = stage === 'tilt' ? original.pitch + ratio * (tiltedPitch - original.pitch) : original.pitch;
-            camera.lookAt(target, { heading, pitch, range: range * (stage === 'zoom-in' ? 1 - ratio * 0.25 : 0.75) });
+            camera.lookAt(cameraTarget, { heading, pitch, range: range * (stage === 'zoom-in' ? 1 - ratio * 0.25 : 0.75) });
             camera.lookAtTransform(Matrix.IDENTITY);
           }
         }));

@@ -39,9 +39,9 @@ async function coverage(page: Page, color: number[], rows = [0.3, 0.5, 0.7]) {
 }
 
 async function interceptStyles(page: Page, baseUrl: string, failure = 'style') {
-  const requests = [];
+  const requests: string[] = [];
   const tileRequests: string[] = [];
-  const errors = [];
+  const errors: string[] = [];
   let activeTilesUnavailable = false;
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/demo-fixture/**/*.pbf', (route) => {

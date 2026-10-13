@@ -7,9 +7,9 @@ import { test } from './fixtures';
 const tile = Buffer.from('JAEGbGF5ZXIxQAICBBACAQiBgICAgICAEAIwAgEBABMCAgIaVA==', 'base64');
 
 test('published MLT UINT64 ID survives decoding, picking and feature-state paint', async ({ page, renderUrl }, testInfo) => {
-  const errors = [];
-  const tileRequests = [];
-  const moduleRequests = [];
+  const errors: string[] = [];
+  const tileRequests: string[] = [];
+  const moduleRequests: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => moduleRequests.push(request.url()));
   await page.route('**/mlt-fixture/**', async (route) => {
@@ -54,7 +54,12 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
 
   const tiles = await page.evaluate(() => {
     const pyramid = window.renderValidation.tileset._renderer.style.tilePyramids.points;
-    return pyramid.getRenderableIds().map(id => pyramid.getTileByID(id).tileID.canonical);
+    return pyramid.getRenderableIds().map((id) => {
+      const tile = pyramid.getTileByID(id);
+      if (!tile)
+        throw new Error(`Renderable MLT tile ${id} is missing`);
+      return tile.tileID.canonical;
+    });
   });
   const coordinates = tiles.map(({ z, x, y }) => {
     const size = 2 ** z;
@@ -68,7 +73,7 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
     const { clientWidth: width, clientHeight: height } = validation.viewer.canvas;
     return coordinates
       .map(([longitude, latitude]) => validation.projectPosition(longitude, latitude, 1))
-      .filter(point => point && point.x > 32 && point.y > 32 && point.x < width - 32 && point.y < height - 32)
+      .filter((point): point is NonNullable<typeof point> => !!point && point.x > 32 && point.y > 32 && point.x < width - 32 && point.y < height - 32)
       .sort((a, b) => Math.hypot(a.x - width / 2, a.y - height / 2) - Math.hypot(b.x - width / 2, b.y - height / 2))[0];
   }, coordinates);
   assert.ok(point, 'no decoded point projected into the viewport');
@@ -97,7 +102,12 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
     const object = picked.id ?? picked;
     const feature = validation.tileset.pick(object);
     const index = validation.tileset._renderer.residency.featureIndex(object.tileId, object.generationId);
-    return { feature, hasRawData: 'rawTileData' in index, id: index.features.getFeature('layer1', object.featureIndex).id };
+    if (!index)
+      throw new Error('The picked MLT generation must retain its feature index');
+    const pickedFeature = index.features?.getFeature('layer1', object.featureIndex);
+    if (!pickedFeature)
+      throw new Error('The picked MLT feature must remain decoded');
+    return { feature, hasRawData: 'rawTileData' in index, id: pickedFeature.id };
   }, point);
   assert.deepEqual(picked, { feature: { layerId: 'points', properties: {} }, hasRawData: false, id: '9007199254740993' });
 

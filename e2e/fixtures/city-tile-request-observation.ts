@@ -463,7 +463,7 @@ export async function observeCityTileRequests(context: BrowserContext) {
               const kinds: Record<string, string[]> = {};
               for (const command of scene._frameState.commandList) {
                 const batch = validation?.drawBatch(command) ?? validation?.drawBatch(command.owner);
-                if (batch)
+                if (batch?.tileId !== undefined)
                   (kinds[batch.kind] ??= []).push(batch.tileId);
               }
               observation.returnFrames.push({

@@ -1,6 +1,7 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import type { Material, PrimitiveCollection } from 'cesium';
+import type { FillLayerSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { Material, Primitive, PrimitiveCollection } from 'cesium';
 import type { Page, TestInfo } from 'playwright/test';
+import type { TilesetStyleSpecification } from '../packages/cesium-vector-tileset/src/tileset-options';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { writeFile } from 'node:fs/promises';
@@ -17,6 +18,11 @@ declare global {
     iconUpdateFrames: number[][];
     stopIconUpdateFrames: () => void;
     restoreRasterMaterialUpdates: () => void;
+    patternLinePixels: () => number;
+    stopPatternLinePixels: () => void;
+    canvasHandoffResources: Primitive[];
+    canvasResizeFrames: number[][];
+    stopCanvasResizeFrames: () => void;
   }
 }
 
@@ -28,7 +34,7 @@ const tiles = Object.fromEntries(['a', 'b'].map(source => [source, fromGeojsonVt
   roads: { features: Array.from({ length: 32 }, (_, index) => ({ type: 2, geometry: [[[0, (index + 0.5) * 128], [4096, (index + 0.5) * 128]]], tags: {} })) },
 }, { version: 2, extent: 4096 })]));
 
-function image(color, width = 8, height = 8) {
+function image(color: string, width = 8, height = 8) {
   const canvas = createCanvas(width, height);
   const context = canvas.getContext('2d');
   context.fillStyle = color;
@@ -36,7 +42,7 @@ function image(color, width = 8, height = 8) {
   return canvas;
 }
 
-function style(baseUrl: string, track: string, source = 'a'): StyleSpecification {
+function style(baseUrl: string, track: string, source = 'a'): TilesetStyleSpecification {
   const raster = track === 'raster';
   return {
     version: 8,
@@ -50,9 +56,9 @@ function style(baseUrl: string, track: string, source = 'a'): StyleSpecification
   };
 }
 
-async function open(page: Page, baseUrl: string, initial: StyleSpecification, spriteSize = 8) {
-  const requests = [];
-  const errors = [];
+async function open(page: Page, baseUrl: string, initial: TilesetStyleSpecification, spriteSize = 8) {
+  const requests: string[] = [];
+  const errors: string[] = [];
   const sprite = image('#3366aa', spriteSize * 2, spriteSize);
   const spriteContext = sprite.getContext('2d');
   spriteContext.fillStyle = '#22aa55';
@@ -81,9 +87,9 @@ async function open(page: Page, baseUrl: string, initial: StyleSpecification, sp
   return { requests, errors };
 }
 
-async function replace(page: Page, next: StyleSpecification, expected: number[], testInfo: TestInfo, name: string) {
+async function replace(page: Page, next: TilesetStyleSpecification, expected: number[], testInfo: TestInfo, name: string) {
   await page.evaluate(({ nextJson, blue, green }) => {
-    const next: StyleSpecification = JSON.parse(nextJson);
+    const next: TilesetStyleSpecification = JSON.parse(nextJson);
     const validation = window.renderValidation;
     window.trackFrames = [];
     window.stopTrackFrames = validation.viewer.scene.postRender.addEventListener(() => {
@@ -102,10 +108,11 @@ async function replace(page: Page, next: StyleSpecification, expected: number[],
           patterns: [...tileset._renderer.pattern._tiles].flatMap(([id, entries]) => entries.map(entry => ({ id, show: entry.primitive.show, ready: entry.primitive.ready, layerId: entry.id.layerId, parentShow: entry.collection.show }))),
           retainedPatterns: [...tileset._renderer.pattern.collections].map(([id, collection]) => ({ id, show: collection.show, length: (collection as PrimitiveCollection).length })),
           rasters: [...tileset._renderer.raster._tiles].flatMap(([id, entries]) => entries.map((entry) => {
-            const texture = entry.material._textures.image;
-            return { id, show: entry.primitive.show, ready: entry.primitive.ready, parentShow: entry.collection.show, fade: entry.material.uniforms.u_fade, opacity: entry.material.uniforms.opacity, texture: texture && { width: texture.width, height: texture.height, destroyed: texture.isDestroyed() }, source: { width: entry.image.width, height: entry.image.height } };
+            const owner = entry.type === 'dynamic' ? entry.batch : entry;
+            const texture = owner.material?.uniforms.image as { width: number; height: number; isDestroyed?: () => boolean } | undefined;
+            return { id, show: owner.primitive?.show, ready: owner.primitive?.ready, parentShow: owner.collection.show, fade: owner.material?.uniforms.u_fade, opacity: owner.material?.uniforms.opacity, texture: texture && { width: texture.width, height: texture.height, destroyed: texture.isDestroyed?.() }, source: { width: owner.sourceIdentity.width, height: owner.sourceIdentity.height } };
           })),
-          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, surfaces: job.surfaces, symbols: job.symbols })),
+          jobs: [...tileset._renderer.publishQueue._jobs.values()].map(job => ({ tileId: job.tileId, progress: job.generation.publication })),
           firstUpdates: tileset._renderer.collections._firstUpdates.flatMap(queue => [...queue].map(([collection, update]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: update.index }))),
         };
       }
@@ -140,6 +147,155 @@ test('public solid and pattern paint switches replace geometry without empty fra
   assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
 });
 
+test('animated canvas hands its visible pixels and resources to a vector source with the same ID', async ({ page, renderUrl }, testInfo) => {
+  // This catches shared dynamic owners surviving a public source/track handoff,
+  // and verifies that delayed replacement data never exposes an empty frame.
+  await page.addInitScript(() => {
+    document.addEventListener('DOMContentLoaded', () => {
+      const canvas = document.createElement('canvas');
+      canvas.id = 'handoff-canvas';
+      canvas.width = canvas.height = 16;
+      canvas.hidden = true;
+      const context = canvas.getContext('2d')!;
+      context.fillStyle = '#3366aa';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      document.body.append(canvas);
+    }, { once: true });
+  });
+  const initial = style(renderUrl, 'raster');
+  initial.sources.fixture = {
+    type: 'canvas',
+    canvas: 'handoff-canvas',
+    animate: true,
+    coordinates: [[-1.1276, 52.5072], [0.8724, 52.5072], [0.8724, 50.5072], [-1.1276, 50.5072]],
+  };
+  const { errors, requests } = await open(page, renderUrl, initial);
+  await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+  const zoom = await page.evaluate(() => {
+    const renderer = window.renderValidation.tileset._renderer;
+    const resources = new Set<Primitive>();
+    for (const id of renderer.raster.tileIds) {
+      renderer.raster.someTilePrimitive(id, (primitive) => {
+        resources.add(primitive);
+        return false;
+      });
+    }
+    window.canvasHandoffResources = [...resources];
+    return renderer.style.getSource('fixture')!.maxzoom;
+  });
+  await page.evaluate((color) => {
+    const validation = window.renderValidation;
+    window.canvasResizeFrames = [];
+    window.stopCanvasResizeFrames = validation.viewer.scene.postRender.addEventListener(() => {
+      window.canvasResizeFrames.push(validation.readCoverage(color));
+    });
+    const canvas = document.getElementById('handoff-canvas') as HTMLCanvasElement;
+    canvas.width = canvas.height = 32;
+    const context = canvas.getContext('2d')!;
+    context.fillStyle = '#3366aa';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }, blue);
+  await expect.poll(() => page.evaluate(() => {
+    const entries = [...window.renderValidation.tileset._renderer.raster._tiles.values()].flat();
+    return entries.length > 0 && entries.every((entry) => {
+      if (entry.type !== 'dynamic')
+        return false;
+      const texture = entry.batch.material?.uniforms.image as { width: number; height: number } | undefined;
+      return texture?.width === 32 && texture.height === 32;
+    }) && window.canvasResizeFrames.length >= 3;
+  })).toBe(true);
+  const resizeFrames = await page.evaluate(() => {
+    window.stopCanvasResizeFrames();
+    return {
+      coverage: window.canvasResizeFrames,
+      ownersSurvived: window.canvasHandoffResources.every(resource => !resource.isDestroyed()),
+    };
+  });
+  assert.ok(resizeFrames.ownersSurvived, 'canvas resize replaced an already uploaded geometry owner');
+  assert.ok(resizeFrames.coverage.every(frame => frame.every(ratio => ratio >= 0.98)), 'canvas resize exposed an empty frame');
+  const next = style(renderUrl, 'solid', 'b');
+  const source = next.sources.fixture;
+  if (source.type !== 'vector')
+    throw new Error('The canvas successor must be a vector source');
+  source.minzoom = source.maxzoom = zoom;
+  await replace(page, next, green, testInfo, 'canvas-vector-handoff');
+  await expect.poll(() => page.evaluate(() => {
+    const renderer = window.renderValidation.tileset._renderer;
+    return renderer.raster.stats.layerCollections === 0 && renderer.raster.stats.tiles === 0
+      && window.canvasHandoffResources.length > 0 && window.canvasHandoffResources.every(resource => resource.isDestroyed());
+  })).toBe(true);
+  assert.ok(requests.some(url => url.includes('/b/') && url.endsWith('.pbf')));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
+});
+
+test('image lines repaint width and opacity and draw in every surface mode', async ({ page, renderUrl }) => {
+  const initial = style(renderUrl, 'solid');
+  initial.transition = { duration: 0, delay: 0 };
+  initial.layers = [{
+    'id': 'roads',
+    'type': 'line',
+    'source': 'fixture',
+    'source-layer': 'roads',
+    'layout': { 'line-cap': 'round', 'line-join': 'round' },
+    'paint': { 'line-pattern': 'blue', 'line-width': 2 },
+  }];
+  const { errors, requests } = await open(page, renderUrl, initial);
+  await page.evaluate((color) => {
+    const { viewer } = window.renderValidation;
+    const context = viewer.scene.context as unknown as { readPixels: (options: object) => Uint8Array };
+    let count = 0;
+    window.stopPatternLinePixels = viewer.scene.postRender.addEventListener(() => {
+      const pixels = context.readPixels({ x: 0, y: 0, width: viewer.canvas.width, height: viewer.canvas.height });
+      count = 0;
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        if (color.every((channel, index) => Math.abs(pixels[offset + index] - channel) < 5))
+          count++;
+      }
+    });
+    window.patternLinePixels = () => count;
+    viewer.scene.requestRender();
+  }, blue);
+  await expect.poll(() => page.evaluate(() => window.patternLinePixels())).toBeGreaterThan(100);
+  const narrowPixels = await page.evaluate(() => window.patternLinePixels());
+  const beforeRequests = requests.filter(url => url.endsWith('.pbf')).length;
+  await page.evaluate(() => {
+    const { tileset, viewer } = window.renderValidation;
+    tileset._renderer.style.setPaintProperty('roads', 'line-width', 8);
+    viewer.scene.requestRender();
+  });
+  await expect.poll(() => page.evaluate(() => window.patternLinePixels())).toBeGreaterThan(narrowPixels * 1.5);
+  assert.equal(requests.filter(url => url.endsWith('.pbf')).length, beforeRequests, 'image line paint refetched source tiles');
+  await page.evaluate(() => {
+    const { tileset, viewer } = window.renderValidation;
+    tileset._renderer.style.setPaintProperty('roads', 'line-opacity', 0);
+    viewer.scene.requestRender();
+  });
+  await expect.poll(() => page.evaluate(() => window.patternLinePixels())).toBe(0);
+  await page.evaluate(() => {
+    const { tileset, viewer } = window.renderValidation;
+    tileset._renderer.style.setPaintProperty('roads', 'line-opacity', 1);
+    viewer.scene.requestRender();
+  });
+  await expect.poll(() => page.evaluate(() => window.patternLinePixels())).toBeGreaterThan(100);
+  for (const mode of ['2d', 'cv', '3d'] as const) {
+    await page.evaluate((mode) => {
+      const validation = window.renderValidation;
+      if (mode === '2d')
+        validation.viewer.scene.morphTo2D(0);
+      else if (mode === 'cv')
+        validation.viewer.scene.morphToColumbusView(0);
+      else validation.viewer.scene.morphTo3D(0);
+      validation.setTopView();
+    }, mode);
+    await expect.poll(() => page.evaluate(() => window.patternLinePixels())).toBeGreaterThan(100);
+    await expect.poll(() => page.evaluate(() => window.renderValidation.tileset.tilesLoaded)).toBe(true);
+  }
+  assert.deepEqual(errors, []);
+  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
+  await page.evaluate(() => window.stopPatternLinePixels());
+});
+
 for (const track of ['raster']) {
   test(`same source ID with a new URL keeps ${track} pixels until replacement tiles draw`, async ({ page, renderUrl }, testInfo) => {
     const { requests, errors } = await open(page, renderUrl, style(renderUrl, track));
@@ -147,6 +303,8 @@ for (const track of ['raster']) {
     if (track === 'raster') {
       await page.evaluate(() => {
         const { viewer, atlas } = window.renderValidation;
+        if (!atlas)
+          throw new Error('Raster test requires the Native Cesium fixture');
         const prototype = atlas.cesium.Material.prototype as Material & { update: (context: object) => void };
         const update = prototype.update;
         const firstFrame = new WeakMap<Material, number>();
@@ -156,6 +314,8 @@ for (const track of ['raster']) {
         prototype.update = function (context) {
           if (this.uniforms.u_fade !== undefined) {
             const frame = viewer.scene._frameState.frameNumber;
+            if (frame === undefined)
+              throw new Error('Raster test requires a Native frame number');
             if (firstFrame.get(this) === frame)
               return;
             if (!firstFrame.has(this))
@@ -183,7 +343,7 @@ for (const track of ['raster']) {
 
 test('public 8px icon image updates repaint an idle scene without refetching tiles', async ({ page, renderUrl }, testInfo) => {
   const initial = style(renderUrl, 'solid');
-  initial.layers[0].paint['fill-color'] = '#990000';
+  (initial.layers[0] as FillLayerSpecification).paint = { 'fill-color': '#990000', 'fill-antialias': false };
   initial.layers.push({
     'id': 'icons',
     'type': 'symbol',
@@ -225,6 +385,8 @@ test('public 8px icon image updates repaint an idle scene without refetching til
       window.stopIconUpdateFrames();
       const validation = window.renderValidation;
       const image = validation.tileset._renderer.style.getImage('blue');
+      if (!image)
+        throw new Error('Updated icon image is missing');
       return { frames: window.iconUpdateFrames, blueCoverage: validation.readCoverage(blue), greenCoverage: validation.readCoverage(green), pixels: validation.readPixelSamples(), stats: validation.tileset.stats(), image: { version: image.version, firstPixel: Array.from(image.data.data.subarray(0, 4)) } };
     }, { blue, green });
     frames = result.frames;

@@ -134,6 +134,9 @@ async function createSurfaceHorizon() {
     }
     const batch = drawBatchForOwner(command.owner);
     if (batch?.layerId === 'water' || batch?.layerId === 'road') {
+      const tileId = batch.tileId;
+      if (tileId === undefined)
+        throw new Error('Surface draw has no source tile identity');
       if (current.depthTest !== undefined && command.renderState.depthTest.enabled !== current.depthTest) {
         let state = states.get(command.renderState);
         if (!state) {
@@ -145,12 +148,12 @@ async function createSurfaceHorizon() {
         command = Object.assign(Object.create(Object.getPrototypeOf(command)), command, { renderState: state });
       }
       const frustum = (this as unknown as { uniformState: { currentFrustum: Cartesian2 } }).uniformState.currentFrustum;
-      const id = tileset._renderer.vector._records.get(batch.tileId)?.tileID;
+      const id = tileset._renderer.vector._records.get(tileId)?.tileID;
       const canonical = id && ('canonical' in id ? id.canonical : id);
       const world = canonical && 2 ** canonical.z;
       draws.push({
         kind: batch.layerId,
-        tile: batch.tileId,
+        tile: tileId,
         near: frustum.x,
         far: frustum.y,
         depthTest: command.renderState.depthTest.enabled,

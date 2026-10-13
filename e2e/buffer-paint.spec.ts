@@ -191,8 +191,14 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
   const nativeLifecycle = () => page.evaluate(async () => {
     const { viewer } = window.renderValidation;
     const owners = window.bufferOwners.filter(owner => owner.array);
-    const commands = owners.map(owner => owner.collection._renderContext.command);
-    const states = owners.map(owner => owner.collection._renderContext.renderState);
+    const contexts = owners.map((owner) => {
+      const context = owner.collection._renderContext;
+      if (!context)
+        throw new Error('An uploaded buffer owner must retain its Native render context');
+      return context;
+    });
+    const commands = contexts.map(context => context.command);
+    const states = contexts.map(context => context.renderState);
     for (let frame = 0; frame < 3; frame++) {
       await new Promise<void>((resolve) => {
         const remove = viewer.scene.postRender.addEventListener(() => {
@@ -202,10 +208,16 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
         viewer.scene.requestRender();
       });
     }
+    const currentContexts = owners.map((owner) => {
+      const context = owner.collection._renderContext;
+      if (!context)
+        throw new Error('A retained buffer owner lost its Native render context during steady paint');
+      return context;
+    });
     return {
-      commandsStable: owners.every((owner, index) => owner.collection._renderContext.command === commands[index]),
-      statesStable: owners.every((owner, index) => owner.collection._renderContext.renderState === states[index]),
-      blends: owners.map(owner => ({ layerId: owner.layerId, enabled: owner.collection._renderContext.renderState.blending.enabled })),
+      commandsStable: currentContexts.every((context, index) => context.command === commands[index]),
+      statesStable: currentContexts.every((context, index) => context.renderState === states[index]),
+      blends: owners.map((owner, index) => ({ layerId: owner.layerId, enabled: currentContexts[index].renderState.blending.enabled })),
     };
   });
   for (const alpha of [1, 0.5, 0, 1]) {
@@ -259,7 +271,7 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
     await expect.poll(() => page.evaluate(phase => window.renderValidation.tileset.tilesLoaded
       && window.bufferOwners.filter(owner => owner.layerId === 'points').every(owner =>
         Math.abs(owner.material.color.alpha - phase.fill) < 0.01
-        && Math.abs(owner.material.outlineColor.alpha - phase.stroke) < 0.01
+        && owner.material.outlineColor !== undefined && Math.abs(owner.material.outlineColor.alpha - phase.stroke) < 0.01
         && owner.material.outlineWidth === phase.width), phase)).toBe(true);
     const lifecycle = await nativeLifecycle();
     assert.ok(lifecycle.commandsStable && lifecycle.statesStable, 'steady stroke paint rebuilt Native commands or render states');

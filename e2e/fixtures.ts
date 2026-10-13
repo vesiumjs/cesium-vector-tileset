@@ -1,3 +1,4 @@
+import type { GeoJSONVTTile } from '@maplibre/geojson-vt';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -9,8 +10,8 @@ import { createServer } from 'vite';
 export { GeoJSONVT } from '@maplibre/geojson-vt';
 // geojson-vt's tile type intersects pre-transform and integer geometries.
 // The encoder consumes the transformed geometry below, also used by fixtures.
-export const fromGeojsonVt = encodeTile as unknown as (
-  layers: Record<string, { features: Array<{
+export const fromGeojsonVt = encodeTile as (
+  layers: Record<string, GeoJSONVTTile | { features: Array<{
     type: number;
     geometry: number[][] | number[][][];
     tags?: Record<string, unknown>;
@@ -60,6 +61,24 @@ export const test = base.extend<{ cpuThrottle: void }, { renderUrl: string }>({
           ? [{
               name: 'captured-performance-baseline',
               enforce: 'pre',
+              async resolveId(source, importer) {
+                if (!importer || !source.startsWith('.'))
+                  return;
+                const resolved = path.resolve(path.dirname(importer.split('?')[0]), source);
+                const relative = path.relative(process.cwd(), resolved);
+                if (!relative.startsWith('packages/cesium-vector-tileset/src/'))
+                  return;
+                for (const extension of ['.ts', '/index.ts', '']) {
+                  try {
+                    await readFile(path.join(process.env.E2E_BASELINE_DIR!, relative + extension), 'utf8');
+                    return resolved + extension;
+                  }
+                  catch (error) {
+                    if (!['ENOENT', 'EISDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+                      throw error;
+                  }
+                }
+              },
               async load(id) {
                 // Vite generates the URL wrapper; freeze the worker module
                 // itself when its worker_file request reaches this loader.

@@ -11,6 +11,7 @@ import buildingsStyle from '../src/styles/buildings.json' with { type: 'json' };
 import { fromGeojsonVt, GeoJSONVT, test } from './fixtures';
 
 const manhattan = demoPresets.find(scenario => scenario.id === 'manhattan');
+assert.ok(manhattan, 'The Manhattan preset must be available to the building regression');
 // Keep the low street regression independent of the gallery's overview pose.
 const longitude = -74.01192337274551;
 const latitude = 40.70752701473173;
@@ -80,17 +81,25 @@ async function attachBuildingState(page: Page, testInfo: TestInfo, height: strin
     const scene = (document.querySelector('[data-testid="camera-readout"]') as Element & { __vueParentComponent: { props: { scene: TestScene } } }).__vueParentComponent.props.scene;
     const tileset = Array.from({ length: scene.primitives.length }, (_, index) => scene.primitives.get(index))
       .find(primitive => typeof primitive.stats === 'function') as TestTileset;
+    const buildings = tileset._renderer.style.getLayer('white-buildings');
+    if (!buildings)
+      throw new Error('The white building style layer is missing from the diagnostic snapshot');
     return {
       zoom: tileset._renderer.style.z,
       styleZoom: tileset._renderer.evaluation.zoom,
-      hidden: tileset._renderer.style.getLayer('white-buildings').isHidden(tileset._renderer.style.z),
+      hidden: buildings.isHidden(tileset._renderer.style.z),
       stats: tileset.stats(),
-      jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols, tile: job.data.tileID.canonical, buildPhase: job.vectorBuild?.phase })),
+      jobs: [...tileset._renderer.publishQueue._jobs].map(([id, job]) => ({ id, surfaces: job.surfaces, symbols: job.symbols, tile: job.generation.data.tileID.canonical, buildPhase: job.vectorBuild?.phase })),
       firstUploads: tileset._renderer.collections._firstUpdates.map(queue => [...queue].map(([collection, upload]) => ({ show: collection.show, length: (collection as PrimitiveCollection).length, index: upload.index }))),
       camera: { longitude: scene.camera.positionCartographic.longitude, latitude: scene.camera.positionCartographic.latitude, height: scene.camera.positionCartographic.height, pitch: scene.camera.pitch },
       loaded: tileset.tilesLoaded,
       globeLoaded: scene.globe.tilesLoaded,
-      renderable: Object.entries(tileset._renderer.style.tilePyramids).map(([source, pyramid]) => ({ source, tiles: pyramid.getRenderableIds().map(id => pyramid.getTileByID(id).tileID.canonical) })),
+      renderable: Object.entries(tileset._renderer.style.tilePyramids).map(([source, pyramid]) => ({ source, tiles: pyramid.getRenderableIds().map((id) => {
+        const tile = pyramid.getTileByID(id);
+        if (!tile)
+          throw new Error(`Renderable building tile ${id} is missing`);
+        return tile.tileID.canonical;
+      }) })),
       records: [...tileset._renderer.vector._records].map(([id, record]) => ({
         id,
         buckets: Object.entries(record.buckets).map(([id, bucket]) => ({ id, vertices: (bucket as typeof bucket & { layoutVertexArray?: { length: number } }).layoutVertexArray?.length, triangles: (bucket as typeof bucket & { indexArray?: { length: number } }).indexArray?.length })),
@@ -108,7 +117,7 @@ async function attachBuildingState(page: Page, testInfo: TestInfo, height: strin
 }
 
 test('Manhattan white buildings remain visible at 60 and 15 metre camera heights', async ({ page, renderUrl }, testInfo) => {
-  const errors = [];
+  const errors: string[] = [];
   const requested = new Set();
   page.on('pageerror', error => errors.push(error.message));
   const style = {
@@ -120,7 +129,9 @@ test('Manhattan white buildings remain visible at 60 and 15 metre camera heights
     ],
   };
   await page.route('**/building-fixture/**/*.pbf', (route) => {
-    const [z, x, y] = new URL(route.request().url()).pathname.match(/(\d+)\/(\d+)\/(\d+)\.pbf$/).slice(1).map(Number);
+    const match = new URL(route.request().url()).pathname.match(/(\d+)\/(\d+)\/(\d+)\.pbf$/);
+    assert.ok(match, 'The building tile request must contain z/x/y coordinates');
+    const [z, x, y] = match.slice(1).map(Number);
     requested.add(`${z}/${x}/${y}`);
     const tile = buildingIndex.getTile(z, x, y) ?? { features: [] };
     return route.fulfill({ body: Buffer.from(fromGeojsonVt({ building: tile }, { version: 2, extent })), contentType: 'application/x-protobuf' });
@@ -176,7 +187,7 @@ test('Manhattan white buildings remain visible at 60 and 15 metre camera heights
 
 test('real OpenFreeMap Manhattan white buildings draw at 60 and 15 metres', { tag: '@live' }, async ({ page, renderUrl }, testInfo) => {
   test.setTimeout(180_000);
-  const errors = [];
+  const errors: string[] = [];
   const tiles = new Map();
   const excludedColors = buildingsStyle.layers.filter(layer => layer.type !== 'fill-extrusion')
     .flatMap(layer => Object.values(layer.paint).filter(value => typeof value === 'string' && /^#[\da-f]{6}$/i.test(value)))

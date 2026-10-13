@@ -164,6 +164,7 @@ export function installNativeCityMotion(viewer: TestViewer) {
       // Diagnostic only, outside the measured Scene.render interval. Command
       // submission is not a claim that nonzero glyph pixels have appeared.
       if (observeStages && tileset) {
+        const observedTileset = tileset;
         if (submittedCommands > 0)
           capture.milestone('firstLibraryCommand');
         if (!sawSymbol) {
@@ -180,7 +181,7 @@ export function installNativeCityMotion(viewer: TestViewer) {
           sawStation = cityDiagnostics(viewer, tileset, tileset._renderer.symbol.cameraZoom).some((row) => {
             const box = row.screenBox;
             return row.opacity >= 0.1 && row.uploaded && row.shown && row.current
-              && tileset._renderer.symbol.isTilePlacementActive(row.tileId)
+              && observedTileset._renderer.symbol.isTilePlacementActive(row.tileId)
               && submitted.has(`${row.tileId}/${row.layerId}`) && box
               && box.x2 > 0 && box.y2 > 0 && box.x1 < viewer.canvas.width && box.y1 < viewer.canvas.height;
           });

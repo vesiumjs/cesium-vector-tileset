@@ -95,7 +95,7 @@ export function cityReadiness(tileset: TestTileset, viewer: TestViewer) {
     styleLoaded: tileset._renderer.style.loaded(),
     firstUpdates: scene.pendingFirstUpdateCount,
     paint: tileset._renderer.vector.needsPaintUpdate,
-    jobs: [...tileset._renderer.publishQueue._jobs].map(([tileId, job]) => ({ tileId, generationId: job.generationId, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.progress } })),
+    jobs: [...tileset._renderer.publishQueue._jobs].map(([tileId, job]) => ({ tileId, generationId: job.generation.reservedId, surfaces: job.surfaces, symbols: job.symbols, progress: { ...job.generation.publication } })),
     patternRefreshes: tileset._renderer.publishQueue._patternRefreshes.size,
     residency: {
       visibleSymbolTiles: [...residency._visibleSymbolTiles],
@@ -103,7 +103,7 @@ export function cityReadiness(tileset: TestTileset, viewer: TestViewer) {
       hiddenStyleTiles: [...residency.hiddenStyleTiles],
       pendingRetirements: [...residency._pendingSymbolRetirements],
       sources: [...residency._sources].map(([sourceId, source]) => ({ sourceId, held: [...source.held], renderableIds: [...source.renderableIds], hydrated: [...source.hydrated], mode: source.mode })),
-      tiles: [...residency._tiles].map(([tileId, tile]) => ({ tileId, live: tile.live, generationId: tile.generationId, previousGenerationId: tile.previousGenerationId, publication: tile.publication && { ...tile.publication }, hasSymbols: tile.hasSymbols })),
+      tiles: [...residency._tiles].map(([tileId, tile]) => ({ tileId, live: tile.live, generationId: tile.generation?.reservedId, previousGenerationId: tile.previousGeneration?.reservedId, publication: tile.generation?.publication && { ...tile.generation?.publication } })),
     },
     symbols: {
       drawable: symbols.hasDrawableSymbols,
@@ -128,6 +128,6 @@ export function cityReadiness(tileset: TestTileset, viewer: TestViewer) {
       opacity: [...symbols._pendingOpacityHalves].map(pendingHalf),
       dynamic: [...symbols._pendingDynamicHalves].map(pendingHalf),
     },
-    replacements: [...scene._replacements].map(value => ({ tileId: value.tileId, kind: value.kind, visible: value.visible, awaitingDetail: value.awaitingDetail, waiting: value.waiting.size, old: [...value.old].map(value => ({ id: id(collectionIds, value), destroyed: value.isDestroyed(), show: value.show })), next: [...value.next].map(value => ({ id: id(collectionIds, value), destroyed: value.isDestroyed(), show: value.show })) })),
+    replacements: [...scene._replacements].map(value => ({ tileId: value.tileId, kind: value.kind, visible: value.visible, awaitingDetail: value.generation && !value.generation.complete, waiting: value.waiting.size, old: [...value.old].map(value => ({ id: id(collectionIds, value), destroyed: value.isDestroyed(), show: value.show })), next: [...value.next].map(value => ({ id: id(collectionIds, value), destroyed: value.isDestroyed(), show: value.show })) })),
   };
 }

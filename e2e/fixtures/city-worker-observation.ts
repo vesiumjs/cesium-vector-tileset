@@ -307,8 +307,12 @@ export async function observeCityWorkers(context: BrowserContext, observeGeometr
       const prototype = window.Worker.prototype;
       const add = NativeWorker.prototype.addEventListener;
       const remove = NativeWorker.prototype.removeEventListener;
-      const listeners = new WeakMap<Worker, WeakMap<EventListener, Map<boolean, EventListener>>>();
-      prototype.addEventListener = function (type, listener, options) {
+      type WorkerFunctionListener = EventListener | {
+        [Key in keyof WorkerEventMap]: (this: Worker, event: WorkerEventMap[Key]) => void;
+      }[keyof WorkerEventMap];
+      type WorkerListener = WorkerFunctionListener | EventListenerObject | null;
+      const listeners = new WeakMap<Worker, WeakMap<WorkerFunctionListener, Map<boolean, EventListener>>>();
+      prototype.addEventListener = function (this: Worker, type: string, listener: WorkerListener, options?: boolean | AddEventListenerOptions) {
         if (type !== 'message' || typeof listener !== 'function')
           return Reflect.apply(add, this, [type, listener, options]);
         const capture = typeof options === 'boolean' ? options : options?.capture ?? false;
@@ -333,7 +337,7 @@ export async function observeCityWorkers(context: BrowserContext, observeGeometr
         }
         return Reflect.apply(add, this, [type, wrapped, options]);
       };
-      prototype.removeEventListener = function (type, listener, options) {
+      prototype.removeEventListener = function (this: Worker, type: string, listener: WorkerListener, options?: boolean | EventListenerOptions) {
         const capture = typeof options === 'boolean' ? options : options?.capture ?? false;
         const wrapped = type === 'message' && typeof listener === 'function'
           ? listeners.get(this)?.get(listener)?.get(capture)

@@ -288,7 +288,15 @@ test('roads and buildings retain paint and picking through 2D, CV and 3D handoff
             };
           }
         }
-        throw new Error('Scene mode did not publish and release a complete replacement generation');
+        throw new Error(`Scene mode did not publish and release a complete replacement generation: ${JSON.stringify({
+          target,
+          mode: viewer.scene.mode,
+          tilesLoaded: tileset.tilesLoaded,
+          stats: tileset.stats(),
+          records: [...tileset._renderer.vector._records.values()].map(record => ({ mode: record.mode, complete: record.complete })),
+          oldDestroyed: oldResources.map(resource => resource.isDestroyed()),
+          errors: window.renderValidation.renderErrors,
+        })}`);
       }
       finally { stop(); }
     }, target);

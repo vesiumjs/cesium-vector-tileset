@@ -475,7 +475,10 @@ async function createValidation() {
       }
       const result = {
         resources: resources.length,
-        arraysStable: resources.every(({ primitive, arrays }) => arrays.length === primitive._va?.length && arrays.every((array, index) => array === primitive._va[index])),
+        arraysStable: resources.every(({ primitive, arrays }) => {
+          const currentArrays = primitive._va;
+          return currentArrays !== undefined && arrays.length === currentArrays.length && arrays.every((array, index) => array === currentArrays[index]);
+        }),
         changedWidths: resources.filter(resource => resource.paint.width !== resource.width).length,
         builds: measurements.builds - beforeBuilds,
         zoom: [beforeZoom, internals._renderer.evaluation.zoom],
