@@ -1,13 +1,11 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import type { Style } from '../../style/style';
-import { diff as diffStyles } from '@maplibre/maplibre-gl-style-spec';
+import type { Style, StyleStateChange } from '../../style/style';
 
 /**
  * Classifies paint changes after Style has checked worker attribute requirements.
  * @internal
  */
-export function classifyStyleChange(previousStyle: StyleSpecification, nextStyle: StyleSpecification, style: Style) {
-  const changes = diffStyles(previousStyle, nextStyle);
+export function classifyStyleChange({ previous: previousStyle, changes }: StyleStateChange, style: Style) {
   const paintOnly = changes.every((change) => {
     if (change.command === 'setLight' || change.command === 'setTransition' || change.command === 'setProjection') {
       return true;

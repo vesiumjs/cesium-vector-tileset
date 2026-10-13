@@ -19,7 +19,7 @@ import { filterObject } from '../util/objects';
 import { Layout, PossiblyEvaluated, PossiblyEvaluatedPropertyValue, Properties, TRANSITION_SUFFIX, Transitionable } from './properties';
 import { validateAndEmit, validateStyle } from './validate-style';
 
-export type PaintPropertyEntry = { [K in keyof AllPaintProperties]: { name: K; value: AllPaintProperties[K] } }[keyof AllPaintProperties];
+export type PaintPropertyEntry = { [K in keyof AllPaintProperties]-?: { name: K; value: AllPaintProperties[K] } }[keyof AllPaintProperties];
 
 const ERROR_PAINT_NOT_LAYOUT = ' is a PAINT property not a LAYOUT property. Use get/setPaintProperty instead?';
 const ERROR_LAYOUT_NOT_PAINT = ' is a LAYOUT property not a PAINT property. Use get/setLayoutProperty instead?';
@@ -80,9 +80,9 @@ export abstract class StyleLayer<
     this._globalState = globalState;
     this.visibility = layer.layout?.visibility ?? 'visible';
     this._visibilitySet = layer.layout?.visibility !== undefined;
-    this._evaluatedVisibility = this.visibility === 'none' ? 'none' : 'visible';
     this._featureFilter = { filter: () => true, needGeometry: false, getGlobalStateRefs: () => new Set<string>() };
     this._visibilityExpression = createVisibilityExpression(this.visibility, `layers[${this.id}].layout.visibility`, globalState);
+    this._evaluatedVisibility = this._visibilityExpression.evaluate();
 
     this.metadata = layer.metadata;
     this.minzoom = layer.minzoom ?? 0;
@@ -108,7 +108,8 @@ export abstract class StyleLayer<
       this.setPaintProperty(property as keyof AllPaintProperties, layer.paint[property as keyof typeof layer.paint], { validate: false });
     }
     for (const property in layer.layout) {
-      this.setLayoutProperty(property as keyof AllLayoutProperties, layer.layout[property as keyof typeof layer.layout], { validate: false });
+      if (property !== 'visibility')
+        this.setLayoutProperty(property as keyof AllLayoutProperties, layer.layout[property as keyof typeof layer.layout], { validate: false });
     }
 
     this._transitioningPaint = this._transitionablePaint.untransitioned();
@@ -348,22 +349,6 @@ export abstract class StyleLayer<
       objectKey: name,
       value,
     }, options);
-  }
-
-  is3D(): boolean {
-    return false;
-  }
-
-  isTileClipped(): boolean {
-    return false;
-  }
-
-  hasOffscreenPass(): boolean {
-    return false;
-  }
-
-  resize(): void {
-    // noop
   }
 
   isStateDependent(): boolean {

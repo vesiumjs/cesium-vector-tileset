@@ -1,11 +1,10 @@
-import type { LightSpecification, TransitionSpecification } from '@maplibre/maplibre-gl-style-spec';
-import type { vec3 } from 'gl-matrix';
+import type { LightSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { StyleSetterOptions } from '../style/style';
 import type { LightProps, LightPropsPossiblyEvaluated } from './light-properties.g';
 
 import type { PossiblyEvaluated, Transitioning, TransitionParameters } from './properties';
+import { Cartesian3, Math as CesiumMath, Spherical } from 'cesium';
 import { Evented } from '../util/evented';
-import { sphericalToCartesian } from '../util/math';
 import { EvaluationParameters } from './evaluation-parameters';
 import { getProperties } from './light-properties.g';
 
@@ -20,10 +19,10 @@ export class Light extends Evented {
   _transitioning: Transitioning<LightProps>;
   properties: PossiblyEvaluated<LightProps, LightPropsPossiblyEvaluated>;
 
-  constructor(lightOptions: LightSpecification, globalState: Record<string, any>) {
+  constructor(lightOptions: LightSpecification, globalState: Record<string, any>, options: StyleSetterOptions = {}) {
     super();
     this._transitionable = new Transitionable(getProperties(), 'light', globalState);
-    this.setLight(lightOptions);
+    this.setLight(lightOptions, options);
     this._transitioning = this._transitionable.untransitioned();
     this.properties = this._transitioning.possiblyEvaluate(new EvaluationParameters(0));
   }
@@ -35,8 +34,9 @@ export class Light extends Evented {
   /**
    * Gets the light position in cartesian coordinates.
    */
-  getCartesianPosition(): vec3 {
-    return sphericalToCartesian(this.properties.get('position'));
+  getCartesianPosition(): Cartesian3 {
+    const [magnitude, azimuthal, polar] = this.properties.get('position');
+    return Cartesian3.fromSpherical(new Spherical(CesiumMath.toRadians(azimuthal + 90), CesiumMath.toRadians(polar), magnitude));
   }
 
   setLight(light: LightSpecification, options: StyleSetterOptions = {}): void {
@@ -44,16 +44,10 @@ export class Light extends Evented {
       return;
     }
 
-    for (const [name, value] of Object.entries(light)) {
-      if (name.endsWith(TRANSITION_SUFFIX)) {
-        const propertyName = name.slice(0, -TRANSITION_SUFFIX.length);
-        if (isLightProperty(propertyName) && isTransitionSpecification(value)) {
-          this._transitionable.setTransition(propertyName, value);
-        }
-      }
-      else if (isLightProperty(name)) {
-        this._transitionable.setValue(name, value);
-      }
+    for (const name of Object.keys(getProperties().properties) as (keyof LightProps)[]) {
+      this._transitionable.setValue(name, light[name]);
+      const transitionName = `${name}${TRANSITION_SUFFIX}` as keyof LightSpecification;
+      this._transitionable.setTransition(name, light[transitionName] as LightSpecification['color-transition']);
     }
   }
 
@@ -68,15 +62,4 @@ export class Light extends Evented {
   recalculate(parameters: EvaluationParameters): void {
     this.properties = this._transitioning.possiblyEvaluate(parameters);
   }
-}
-
-function isLightProperty(name: string): name is keyof LightProps {
-  return Object.hasOwn(getProperties().properties, name);
-}
-
-function isTransitionSpecification(value: unknown): value is TransitionSpecification {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false;
-  }
-  return Object.keys(value).every(key => key === 'delay' || key === 'duration');
 }

@@ -13,8 +13,4 @@ export class FillExtrusionStyleLayer extends StyleLayer<
   constructor(layer: LayerSpecification, globalState: Record<string, any>) {
     super(layer, properties, globalState);
   }
-
-  is3D(): boolean {
-    return true;
-  }
 }

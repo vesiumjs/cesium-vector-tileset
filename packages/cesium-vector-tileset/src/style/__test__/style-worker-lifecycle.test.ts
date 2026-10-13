@@ -9,19 +9,17 @@ type MessageData = Parameters<WorkerChannel['receive']>[0]['data'];
 async function workerFixture(startupFailure?: Error) {
   vi.resetModules();
   vi.spyOn(navigator, 'hardwareConcurrency', 'get').mockReturnValue(4);
-  const [{ TileWorker }, { Style }, { MessageType }, { getSharedWorkerPool }, { rtlMainThreadPluginFactory }] = await Promise.all([
+  const [{ TileWorker }, { Style }, { MessageType }, { getSharedWorkerPool }] = await Promise.all([
     import('../../worker/tile-worker'),
     import('../style'),
     import('../../worker/messages'),
     import('../../worker/worker-pool'),
-    import('../../source/rtl-text-plugin-main-thread'),
   ]);
   const workers: ControlledWorker[] = [];
   class ControlledWorker extends EventTarget {
     readonly messages: MessageData[] = [];
     readonly queued: MessageData[] = [];
     readonly worker: InstanceType<typeof TileWorker>;
-    readonly rtlImports: string[] = [];
     deferMessages = false;
     readonly terminate = vi.fn(() => this.worker.channel.remove());
 
@@ -32,15 +30,6 @@ async function workerFixture(startupFailure?: Error) {
         this.dispatchEvent(new MessageEvent('message', { data: message }));
       };
       this.worker = new TileWorker(scope, () => {});
-      // The external RTL script import is controlled; its messages still
-      // cross the real dispatcher and both real WorkerChannel implementations.
-      this.worker.channel.registerMessageHandler(MessageType.syncRTLPluginState, async (_mapId, state) => {
-        if (state.pluginStatus === 'loading') {
-          this.rtlImports.push(state.pluginURL);
-          return { ...state, pluginStatus: 'loaded' };
-        }
-        return state;
-      });
       if (workers.length === 0 && startupFailure) {
         queueMicrotask(() => this.dispatchEvent(new ErrorEvent('error', { error: startupFailure, message: startupFailure.message })));
       }
@@ -73,7 +62,7 @@ async function workerFixture(startupFailure?: Error) {
     styles.forEach((style, index) => style.on('error', event => startupErrors[index].push(event.error)));
   }
   await Promise.all(styles.map(style => style.dispatcher.waitForInitComplete()));
-  return { styles, workers, startupErrors, MessageType, pool: getSharedWorkerPool(), Style, plugin: rtlMainThreadPluginFactory() };
+  return { styles, workers, startupErrors, MessageType, pool: getSharedWorkerPool(), Style };
 }
 
 afterEach(() => {
@@ -235,15 +224,11 @@ describe('shared style worker lifecycle', () => {
     }
   });
 
-  it('rebuilds the worker pool and imports a previously loaded RTL plugin into its new workers', async () => {
-    const { styles: [first, second], workers, Style, plugin, pool } = await workerFixture();
+  it('rebuilds the worker pool after its last style is destroyed', async () => {
+    const { styles: [first, second], workers, Style, pool, MessageType } = await workerFixture();
     let restarted: InstanceType<typeof Style> | undefined;
     try {
-      const url = 'https://rtl.example/plugin.js';
-      await plugin.setRTLTextPlugin(url);
-      expect(plugin.getRTLTextPluginStatus()).toBe('loaded');
       const previousWorkers = workers.slice();
-      expect(previousWorkers.every(worker => worker.rtlImports.includes(url))).toBe(true);
       first.destroy();
       second.destroy();
       await Promise.resolve();
@@ -251,11 +236,12 @@ describe('shared style worker lifecycle', () => {
 
       restarted = new Style();
       await restarted.dispatcher.waitForInitComplete();
-      await plugin.syncStateWithWorkers();
+      await restarted.dispatcher.broadcast(MessageType.updateGlobalState, { restarted: true });
       const nextWorkers = workers.slice(previousWorkers.length);
       expect(nextWorkers).toHaveLength(previousWorkers.length);
-      expect(nextWorkers.every(worker => worker.rtlImports.includes(url))).toBe(true);
-      expect(plugin.getRTLTextPluginStatus()).toBe('loaded');
+      expect(nextWorkers.every(({ worker }) => worker.globalStates.get(restarted.dispatcher.id)?.restarted)).toBe(true);
+      await restarted.dispatcher.broadcast(MessageType.updateGlobalState, {});
+      expect(nextWorkers.every(({ worker }) => Object.keys(worker.globalStates.get(restarted.dispatcher.id)!).length === 0)).toBe(true);
     }
     finally {
       first.destroy();

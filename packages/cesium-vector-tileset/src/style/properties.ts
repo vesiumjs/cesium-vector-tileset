@@ -1,8 +1,8 @@
 import type { CompositeExpression, Feature, FeatureState, FormattedSection, ICanonicalTileID, PropertyValueSpecification, SourceExpression, StylePropertyExpression, StylePropertySpecification, TransitionSpecification, Type } from '@maplibre/maplibre-gl-style-spec';
 import type { TransferRegistry } from '../worker/transfer-registry';
 import { interpolates, normalizePropertyExpression } from '@maplibre/maplibre-gl-style-spec';
+import { Math as CesiumMath, EasingFunction } from 'cesium';
 import { warnOnce } from '../util/errors';
-import { easeCubicInOut } from '../util/math';
 import { clone } from '../util/objects';
 
 import { EvaluationParameters } from './evaluation-parameters';
@@ -73,7 +73,7 @@ export class PropertyValue<T, R> {
   constructor(property: Property<T, R>, value: PropertyValueSpecification<T> | undefined, rootKey: string, globalState?: Record<string, any>) {
     this.property = property;
     this.value = value;
-    this.expression = normalizePropertyExpression(
+    this.expression = normalizePropertyExpression<unknown>(
       value === undefined ? property.specification.default : value,
       rootKey,
       property.specification,
@@ -189,7 +189,7 @@ export class Transitionable<Props> {
 
   serialize(): any {
     const result: any = {};
-    for (const property of Object.keys(this._values)) {
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       const value = this.getValue(property as keyof Props);
       if (value !== undefined) {
         result[property] = value;
@@ -197,7 +197,7 @@ export class Transitionable<Props> {
 
       const transition = this.getTransition(property as keyof Props);
       if (transition !== undefined) {
-        result[`${property}${TRANSITION_SUFFIX}`] = transition;
+        result[`${String(property)}${TRANSITION_SUFFIX}`] = transition;
       }
     }
     return result;
@@ -205,7 +205,7 @@ export class Transitionable<Props> {
 
   transitioned(parameters: TransitionParameters, prior: Transitioning<Props>): Transitioning<Props> {
     const result = new Transitioning(this._properties);
-    for (const property of Object.keys(this._values)) {
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       result._values[property] = this._values[property].transitioned(parameters, prior._values[property]);
     }
     return result;
@@ -213,7 +213,7 @@ export class Transitionable<Props> {
 
   untransitioned(): Transitioning<Props> {
     const result = new Transitioning(this._properties);
-    for (const property of Object.keys(this._values)) {
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       result._values[property] = this._values[property].untransitioned();
     }
     return result;
@@ -247,8 +247,8 @@ class TransitioningPropertyValue<T, R> {
 
   possiblyEvaluate(
     parameters: EvaluationParameters,
-    canonical: ICanonicalTileID,
-    availableImages: string[],
+    canonical?: ICanonicalTileID,
+    availableImages?: string[],
   ): R {
     const now = parameters.now || 0;
     const finalValue = this.value.possiblyEvaluate(parameters, canonical, availableImages);
@@ -276,7 +276,7 @@ class TransitioningPropertyValue<T, R> {
     else {
       // Interpolate between recursively-calculated prior value and final.
       const t = (now - this.begin) / (this.end - this.begin);
-      return this.property.interpolate(prior.possiblyEvaluate(parameters, canonical, availableImages), finalValue, easeCubicInOut(t));
+      return this.property.interpolate(prior.possiblyEvaluate(parameters, canonical, availableImages), finalValue, EasingFunction.CUBIC_IN_OUT(CesiumMath.clamp(t, 0, 1)));
     }
   }
 }
@@ -289,7 +289,7 @@ class TransitioningPropertyValue<T, R> {
  */
 export class Transitioning<Props> {
   _properties: Properties<Props>;
-  _values: { [K in keyof Props]: PossiblyEvaluatedPropertyValue<unknown> };
+  _values: { [K in keyof Props]: TransitioningPropertyValue<unknown, unknown> };
 
   constructor(properties: Properties<Props>) {
     this._properties = properties;
@@ -301,15 +301,15 @@ export class Transitioning<Props> {
     canonical?: ICanonicalTileID,
     availableImages?: string[],
   ): PossiblyEvaluated<Props, any> {
-    const result = new PossiblyEvaluated(this._properties);
-    for (const property of Object.keys(this._values)) {
+    const result = new PossiblyEvaluated<Props, Record<keyof Props, unknown>>(this._properties);
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       result._values[property] = this._values[property].possiblyEvaluate(parameters, canonical, availableImages);
     }
     return result;
   }
 
   hasTransition(): boolean {
-    for (const property of Object.keys(this._values)) {
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       if (this._values[property].prior) {
         return true;
       }
@@ -370,7 +370,7 @@ export class Layout<Props> {
 
   serialize(): any {
     const result: any = {};
-    for (const property of Object.keys(this._values)) {
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       const value = this.getValue(property as keyof Props);
       if (value !== undefined) {
         result[property] = value;
@@ -384,8 +384,8 @@ export class Layout<Props> {
     canonical?: ICanonicalTileID,
     availableImages?: string[],
   ): PossiblyEvaluated<Props, any> {
-    const result = new PossiblyEvaluated(this._properties);
-    for (const property of Object.keys(this._values)) {
+    const result = new PossiblyEvaluated<Props, Record<keyof Props, unknown>>(this._properties);
+    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
       result._values[property] = this._values[property].possiblyEvaluate(parameters, canonical, availableImages);
     }
     return result;
@@ -659,13 +659,13 @@ export class CrossFadedDataDrivenProperty<T> extends DataDrivenProperty<CrossFad
   }
 
   evaluate(
-    value: PossiblyEvaluatedValue<CrossFaded<T>>,
+    value: PossiblyEvaluatedValue<CrossFaded<T> | undefined>,
     globals: EvaluationParameters,
     feature: Feature,
     featureState: FeatureState,
     canonical?: ICanonicalTileID,
     availableImages?: string[],
-  ): CrossFaded<T> {
+  ): CrossFaded<T> | undefined {
     if (value.kind === 'source') {
       const constant = value.evaluate(globals, feature, featureState, canonical, availableImages);
       return this._calculate(constant, constant, constant, globals);
@@ -688,7 +688,7 @@ export class CrossFadedDataDrivenProperty<T> extends DataDrivenProperty<CrossFad
     return z > parameters.zoomHistory.lastIntegerZoom ? { from: min, to: mid } : { from: max, to: mid };
   }
 
-  interpolate(a: PossiblyEvaluatedPropertyValue<CrossFaded<T>>): PossiblyEvaluatedPropertyValue<CrossFaded<T>> {
+  interpolate(a: PossiblyEvaluatedPropertyValue<CrossFaded<T> | undefined>): PossiblyEvaluatedPropertyValue<CrossFaded<T> | undefined> {
     return a;
   }
 }
@@ -744,7 +744,7 @@ export class CrossFadedProperty<T> implements Property<T, CrossFaded<T> | undefi
  * layer type. These objects are immutable, and they are used as the prototypes for the `_values` members of
  * `Transitionable`, `Transitioning`, `Layout`, and `PossiblyEvaluated`. This allows these classes to avoid
  * doing work in the common case where a property has no explicit value set and should be considered to take
- * on the default value: using `for (const property of Object.keys(this._values))`, they can iterate over
+ * on the default value: using `for (const property of (Object.keys(this._values) as Array<keyof Props>))`, they can iterate over
  * only the _own_ properties of `_values`, skipping repeated calculation of transitions and possible/final
  * evaluations for defaults, the result of which will always be the same.
  * @internal

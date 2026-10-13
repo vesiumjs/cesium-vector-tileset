@@ -92,6 +92,9 @@ export interface StyleImageMetadata {
  */
 export type StyleImage = StyleImageData & StyleImageMetadata;
 
+/** Pixel data resolved by StyleImages before Worker transfer or atlas consumption. */
+export type MaterializedStyleImage = StyleImage & { data: RGBAImage };
+
 /**
  * Interface for dynamically generated style images. This is a specification for
  * implementers to model: it is not an exported method or class.
@@ -176,7 +179,7 @@ export interface StyleImageInterface {
   onRemove?: () => void;
 }
 
-export function renderStyleImage(image: StyleImage): boolean {
+export function renderStyleImage(image: MaterializedStyleImage): boolean {
   const { userImage } = image;
   if (userImage?.render) {
     const updated = userImage.render();

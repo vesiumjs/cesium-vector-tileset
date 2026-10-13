@@ -7,39 +7,32 @@ import type {
   FilterSpecification,
   LayerSpecification,
   LightSpecification,
-  SourceSpecification,
   SpriteSpecification,
   StateSpecification,
-  StyleSpecification,
   TransitionSpecification,
 } from '@maplibre/maplibre-gl-style-spec';
 import type { MissingImageRequestHandler } from '../assets/style-images';
-import type { CanvasSourceSpecification } from '../source/canvas-source';
-import type { GeoJSONSource } from '../source/geojson-source';
-import type { Source } from '../source/source';
+import type { AnySourceSpecification, Source } from '../source/source';
+import type { TilesetStyleSpecification as StyleSpecification } from '../tileset-options';
 import type { StyleEventType } from '../util/events';
 import type { RequestTransformFunction } from '../util/request';
 import type { GetDashesParameters, GetDashesResponse, GetGlyphsParameters, GetGlyphsResponse, GetImagesParameters, GetImagesResponse } from '../worker/messages';
 import type { EvaluationParameters } from './evaluation-parameters';
 import type { RenderTransitionFlags } from './render-transition';
-import type { StyleImage } from './style-image';
+import type { MaterializedStyleImage, StyleImage } from './style-image';
 import type { StyleLayer } from './style-layer';
-import type { Validator } from './validate-style';
-import { derefLayers, diff as diffStyles, emptyStyle } from '@maplibre/maplibre-gl-style-spec';
+import type { Validator, ValidatorOptions } from './validate-style';
+import { derefLayers, diff as diffNativeStyles, emptyStyle } from '@maplibre/maplibre-gl-style-spec';
 import { DashAtlas } from '../assets/dash-atlas';
 import { GlyphSource } from '../assets/glyph-source';
 import { StyleImages } from '../assets/style-images';
-import { rtlMainThreadPluginFactory } from '../source/rtl-text-plugin-main-thread';
-import { RTLPluginLoadedEventName } from '../source/rtl-text-plugin-status';
+import { GeoJSONSource } from '../source/geojson-source';
 import { TilePyramid } from '../tile/tile-pyramid';
-import { throwIfAborted } from '../util/abort-error';
-import { getJSON, getReferrer } from '../util/ajax';
+import { getReferrer } from '../util/ajax';
 import { browser } from '../util/browser';
-import { ensureError } from '../util/errors';
 import { ErrorEvent, Evented } from '../util/evented';
 import { SourceDataEvent, StyleDataEvent, StyleLoadEvent } from '../util/events';
 import { clone, deepEqual, filterObject, mapObject } from '../util/objects';
-import { ResourceType, transformRequest } from '../util/request';
 import { WorkerDispatcher } from '../worker/dispatcher';
 import { MessageType } from '../worker/messages';
 import { getSharedWorkerPool } from '../worker/worker-pool';
@@ -47,14 +40,18 @@ import { createStyleLayer } from './create-style-layer';
 import { Light } from './light';
 import { loadSprite } from './load-sprite';
 import { renderTransitionFlags, samePaintZoom } from './render-transition';
-import { normalizeSprite } from './sprite';
 import { isRasterStyleLayer } from './style-layer/raster-style-layer';
-import { SPEC_SOURCE_TYPES, validateAndEmit, validateStyle, validateStyleAndEmit } from './validate-style';
+import { SPEC_SOURCE_TYPES, validateAndEmit, validateCanvasSource, validateStyle, validateStyleAndEmit } from './validate-style';
 import { ZoomHistory } from './zoom-history';
 
-const empty = emptyStyle();
-
 let styleIdCounter = 0;
+
+type StyleDiffCommand = DiffCommand<Exclude<DiffOperations, 'addSource' | 'setStyle'>>
+  | { command: 'addSource'; args: [string, AnySourceSpecification] }
+  | { command: 'setStyle'; args: [StyleSpecification] };
+
+// The diff treats Canvas sources as source JSON; its declarations omit this adapter's source type.
+const diffStyles = diffNativeStyles as (before: StyleSpecification, after: StyleSpecification) => StyleDiffCommand[];
 
 /** A source's bucket schema and the synchronization barrier for that schema. */
 export interface SourceParseState {
@@ -124,88 +121,12 @@ export interface StyleSetterOptions {
   validate?: boolean;
 }
 
-/**
- * Part of {@link Map.setStyle} options, transformStyle is a convenience function that allows to modify a style after it is fetched but before it is committed to the map state.
- *
- * This function exposes previous and next styles, it can be commonly used to support a range of functionalities like:
- *
- * - when previous style carries certain 'state' that needs to be carried over to a new style gracefully;
- * - when a desired style is a certain combination of previous and incoming style;
- * - when an incoming style requires modification based on external state.
- * - when an incoming style uses relative paths, which need to be converted to absolute.
- *
- * @param previous - The current style.
- * @param next - The next style.
- * @returns resulting style that will to be applied to the map
- *
- * @example
- * ```ts
- * map.setStyle('https://demotiles.maplibre.org/style.json', {
- *   transformStyle: (previousStyle, nextStyle) => ({
- *       ...nextStyle,
- *       // make relative sprite path like "../sprite" absolute
- *       sprite: new URL(nextStyle.sprite, "https://demotiles.maplibre.org/styles/osm-bright-gl-style/sprites/").href,
- *       // make relative glyphs path like "../fonts/{fontstack}/{range}.pbf" absolute
- *       glyphs: new URL(nextStyle.glyphs, "https://demotiles.maplibre.org/font/").href,
- *       sources: {
- *           // make relative vector url like "../../" absolute
- *           ...nextStyle.sources.map(source => {
- *              if (source.url) {
- *                  source.url = new URL(source.url, "https://tiles.openfreemap.org/planet");
- *              }
- *              return source;
- *           }),
- *           // copy a source from previous style
- *           'osm': previousStyle.sources.osm
- *       },
- *       layers: [
- *           // background layer
- *           nextStyle.layers[0],
- *           // copy a layer from previous style
- *           previousStyle.layers[0],
- *           // other layers from the next style
- *           ...nextStyle.layers.slice(1).map(layer => {
- *               // hide the layers we don't need from demotiles style
- *               if (layer.id.startsWith('geolines')) {
- *                   layer.layout = {...layer.layout || {}, visibility: 'none'};
- *               // filter out US polygons
- *               } else if (layer.id.startsWith('coastline') || layer.id.startsWith('countries')) {
- *                   layer.filter = ['!=', ['get', 'ADM0_A3'], 'USA'];
- *               }
- *               return layer;
- *           })
- *       ]
- *   })
- * });
- * ```
- */
-export type TransformStyleFunction = (previous: StyleSpecification | undefined, next: StyleSpecification) => StyleSpecification;
-
-/**
- * The options object related to the {@link Map}'s style related methods
- */
-export interface StyleSwapOptions {
-  /**
-   * If false, force a 'full' update, removing the current style
-   * and building the given one instead of attempting a diff-based update.
-   */
-  diff?: boolean;
-  /**
-   * TransformStyleFunction is a convenience function
-   * that allows to modify a style after it is fetched but before it is committed to the map state. Refer to {@link TransformStyleFunction}.
-   */
-  transformStyle?: TransformStyleFunction;
+export interface StyleStateChange {
+  previous: StyleSpecification;
+  next: StyleSpecification;
+  changes: StyleDiffCommand[];
 }
 
-/**
- * Specifies a layer to be added to a {@link Style}. In addition to a standard {@link LayerSpecification},
- * a {@link LayerSpecification} with an embedded {@link SourceSpecification} can also be provided.
- */
-export type AddLayerObject = LayerSpecification | (Omit<LayerSpecification, 'source'> & { source: SourceSpecification });
-
-/**
- * The Style base class
- */
 export class Style extends Evented<StyleEventType> {
   transformRequest?: RequestTransformFunction;
   /**
@@ -240,7 +161,7 @@ export class Style extends Evented<StyleEventType> {
    * Requests the tileset renderer to repaint.
    */
   triggerRepaint: () => void = () => {};
-  stylesheet: StyleSpecification = clone(empty);
+  stylesheet: StyleSpecification = emptyStyle();
   dispatcher: WorkerDispatcher;
   images: StyleImages;
   glyphSource: GlyphSource;
@@ -248,10 +169,9 @@ export class Style extends Evented<StyleEventType> {
   light?: Light;
 
   _frameRequest?: AbortController;
-  _loadStyleRequest?: AbortController;
   _spriteRequest?: AbortController;
   _layers: { [_: string]: StyleLayer } = {};
-  _serializedLayers: { [_: string]: LayerSpecification } | null;
+  _serializedLayers: { [_: string]: LayerSpecification } | null = null;
   _order: string[] = [];
   tilePyramids: { [_: string]: TilePyramid } = {};
   zoomHistory: ZoomHistory = new ZoomHistory();
@@ -372,17 +292,16 @@ export class Style extends Evented<StyleEventType> {
 
     this._resetUpdates();
 
-    void this.dispatcher.broadcast(MessageType.setReferrer, getReferrer()).catch(() => {});
-    const rtlPlugin = rtlMainThreadPluginFactory();
-    rtlPlugin.on(RTLPluginLoadedEventName, this._rtlPluginLoaded);
-    void rtlPlugin.syncStateWithWorkers().catch(() => {});
+    const referrer = getReferrer();
+    if (referrer !== undefined)
+      void this.dispatcher.broadcast(MessageType.setReferrer, referrer).catch(() => {});
 
     this.on('data', (event) => {
       if (event.dataType !== 'source' || event.sourceDataType !== 'metadata') {
         return;
       }
 
-      const tilePyramid = this.tilePyramids[event.sourceId];
+      const tilePyramid = event.sourceId === undefined ? undefined : this.tilePyramids[event.sourceId];
       if (!tilePyramid) {
         return;
       }
@@ -408,15 +327,15 @@ export class Style extends Evented<StyleEventType> {
     return {
       _spritesImagesIds: {},
       _layers: {},
-      _order: [],
+      _order: [] as string[],
       tilePyramids: {},
       zoomHistory: new ZoomHistory(),
-      _availableImages: [],
+      _availableImages: [] as string[],
       _imagesListDirty: false,
       _globalState: {},
-      _serializedLayers: null,
-      stylesheet: clone(empty),
-      light: undefined,
+      _serializedLayers: null as Record<string, LayerSpecification> | null,
+      stylesheet: emptyStyle(),
+      light: undefined as Light | undefined,
       _loaded: false,
       _changed: false,
       _updatedLayers: {},
@@ -431,56 +350,20 @@ export class Style extends Evented<StyleEventType> {
     };
   }
 
-  /**
-   * @internal
-   */
-  private _rtlPluginLoaded: () => void = () => {
-    for (const id in this.tilePyramids) {
-      const sourceType = this.tilePyramids[id].getSource().type;
-      if (sourceType === 'vector' || sourceType === 'geojson') {
-        // Non-vector sources don't have any symbols buckets to reload when the RTL text plugin loads
-        // They also load more quickly, so they're more likely to have already displaying tiles
-        // that would be unnecessarily booted by the plugin load event
-        this.tilePyramids[id].reload(); // Should be a no-op if the plugin loads before any tiles load
-      }
-    }
-  };
-
-  setGlobalStateProperty(name: string, value: any): this {
+  setGlobalState(newStylesheetState: StateSpecification = {}): void {
     this._checkLoaded();
-
-    const newValue = value === null
-      ? this.stylesheet.state?.[name]?.default ?? null
-      : value;
-
-    if (deepEqual(newValue, this._globalState[name])) {
-      return this;
+    const changedGlobalStateRefs: string[] = [];
+    const propertyNames = new Set([...Object.keys(this._globalState), ...Object.keys(newStylesheetState)]);
+    for (const propertyName of propertyNames) {
+      const newValue = newStylesheetState[propertyName]?.default;
+      if (deepEqual(this._globalState[propertyName], newValue))
+        continue;
+      changedGlobalStateRefs.push(propertyName);
+      if (newValue === undefined)
+        delete this._globalState[propertyName];
+      else
+        this._globalState[propertyName] = newValue;
     }
-
-    this._globalState[name] = newValue;
-
-    this._applyGlobalStateChanges([name]);
-    return this;
-  }
-
-  getGlobalState(): Record<string, any> {
-    return this._globalState;
-  }
-
-  setGlobalState(newStylesheetState: StateSpecification): void {
-    this._checkLoaded();
-
-    const changedGlobalStateRefs = [];
-
-    for (const propertyName in newStylesheetState) {
-      const didChange = !deepEqual(this._globalState[propertyName], newStylesheetState[propertyName].default);
-
-      if (didChange) {
-        changedGlobalStateRefs.push(propertyName);
-        this._globalState[propertyName] = newStylesheetState[propertyName].default;
-      }
-    }
-
     this._applyGlobalStateChanges(changedGlobalStateRefs);
   }
 
@@ -494,26 +377,24 @@ export class Style extends Evented<StyleEventType> {
     if (globalStateRefs.length === 0) {
       return;
     }
+    this._changed = true;
 
     const sourceIdsToReload = new Set<string>();
-    const globalStateChange: Record<string, any> = {};
 
     for (const ref of globalStateRefs) {
-      globalStateChange[ref] = this._globalState[ref];
-
       for (const layerId in this._layers) {
         const layer = this._layers[layerId];
         const layoutAffectingGlobalStateRefs = layer.getLayoutAffectingGlobalStateRefs();
         const paintAffectingGlobalStateRefs = layer.getPaintAffectingGlobalStateRefs();
         const visibilityAffectingGlobalStateRefs = layer.getVisibilityAffectingGlobalStateRefs();
 
-        if (layoutAffectingGlobalStateRefs.has(ref)) {
+        if (layer.source !== undefined && layoutAffectingGlobalStateRefs.has(ref)) {
           sourceIdsToReload.add(layer.source);
         }
         const paintProperties = paintAffectingGlobalStateRefs.get(ref);
         if (paintProperties) {
           for (const { name, value } of paintProperties) {
-            this._updatePaintProperty(layer, name, value);
+            this._updatePaintProperty(layer, name, value, { validate: false });
           }
         }
         if (visibilityAffectingGlobalStateRefs?.has(ref)) {
@@ -523,8 +404,8 @@ export class Style extends Evented<StyleEventType> {
       }
     }
 
-    // Propagate global state changes to workers
-    void this.dispatcher.broadcast(MessageType.updateGlobalState, globalStateChange).catch(() => {});
+    // Send the full snapshot: transfer serialization omits undefined patch values.
+    void this.dispatcher.broadcast(MessageType.updateGlobalState, this._globalState).catch(() => {});
 
     for (const id in this.tilePyramids) {
       if (sourceIdsToReload.has(id)) {
@@ -534,59 +415,22 @@ export class Style extends Evented<StyleEventType> {
     }
   }
 
-  async loadURL(url: string, options: StyleSwapOptions & StyleSetterOptions = {}, previousStyle?: StyleSpecification): Promise<void> {
-    this.fire(new StyleDataEvent('dataloading'));
-
-    options.validate = typeof options.validate === 'boolean'
-      ? options.validate
-      : true;
-
-    this._loadStyleRequest = new AbortController();
-    const abortController = this._loadStyleRequest;
-    try {
-      const request = await transformRequest(url, ResourceType.Style, this.transformRequest);
-      throwIfAborted(abortController.signal);
-
-      const response = await getJSON<StyleSpecification>(request, abortController);
-      if (this._loadStyleRequest === abortController) {
-        // Clear this request only if it is still the active style load. A stale
-        // request can finish after a newer loadURL() call has already installed
-        // another controller, and must not clear that newer abort handle.
-        delete this._loadStyleRequest;
-      }
-      this._load(response.data, options, previousStyle);
-    }
-    catch (error) {
-      if (this._loadStyleRequest === abortController) {
-        delete this._loadStyleRequest;
-      }
-      if (error && !abortController.signal.aborted) { // ignore abort
-        this.fire(new ErrorEvent(ensureError(error)));
-      }
-    }
-  }
-
-  loadJSON(json: StyleSpecification, options: StyleSetterOptions & StyleSwapOptions = {}, previousStyle?: StyleSpecification): void {
+  loadJSON(json: StyleSpecification, options: StyleSetterOptions = {}): void {
     this.fire(new StyleDataEvent('dataloading'));
 
     this._frameRequest = new AbortController();
     browser.frameAsync(this._frameRequest).then(() => {
       delete this._frameRequest;
       options.validate = options.validate !== false;
-      this._load(json, options, previousStyle);
+      this._load(json, options);
     }).catch(() => {}); // ignore abort
-  }
-
-  loadEmpty(): void {
-    this.fire(new StyleDataEvent('dataloading'));
-    this._load(empty, { validate: false });
   }
 
   /**
    * @internal
    */
-  private _load(json: StyleSpecification, options: StyleSwapOptions & StyleSetterOptions, previousStyle?: StyleSpecification): void {
-    let nextState = options.transformStyle ? options.transformStyle(previousStyle, json) : json;
+  private _load(json: StyleSpecification, options: StyleSetterOptions): void {
+    let nextState = json;
     if (options.validate && validateStyleAndEmit(this, nextState)) {
       return;
     }
@@ -616,7 +460,7 @@ export class Style extends Evented<StyleEventType> {
     this._createLayers();
     this._applyRasterFadeDurations();
 
-    this.light = new Light(this.stylesheet.light ?? {}, this._globalState);
+    this.light = new Light(this.stylesheet.light ?? {}, this._globalState, { validate: false });
     this.fire(new StyleDataEvent('data'));
     this.fire(new StyleLoadEvent());
   }
@@ -627,7 +471,7 @@ export class Style extends Evented<StyleEventType> {
   private _createLayers() {
     const dereferencedLayers = derefLayers(this.stylesheet.layers);
 
-    this.setGlobalState(this.stylesheet.state ?? null);
+    this.setGlobalState(this.stylesheet.state ?? {});
 
     // Broadcast layers to workers first, so that expensive style processing (createStyleLayer)
     // can happen in parallel on both main and worker threads.
@@ -690,7 +534,7 @@ export class Style extends Evented<StyleEventType> {
           for (const id in images[spriteId]) {
             // don't prefix images of the "default" sprite
             const imageId = spriteId === 'default' ? id : `${spriteId}:${id}`;
-            // save all the sprite's images' ids to be able to delete them in `removeSprite`
+            // Track namespace ownership so a later sprite replacement removes its images.
             if (imageId in this.images.images) {
               this.images.updateImage(imageId, images[spriteId][id], false);
             }
@@ -710,7 +554,7 @@ export class Style extends Evented<StyleEventType> {
       }
       err = error;
       if (!abortController.signal.aborted) { // ignore abort
-        this.fire(new ErrorEvent(err));
+        this.fire(new ErrorEvent(error));
       }
     }).finally(() => {
       if (this._spriteRequest !== abortController) {
@@ -893,7 +737,7 @@ export class Style extends Evented<StyleEventType> {
     // have no pending style mutation, zoom change, or transition, so retain
     // the last evaluated paint/layout values exactly as MapLibre does between
     // transform/style invalidations.
-    if (!changed && !zoomChanged && !transitionFlags!.any) {
+    if (!changed && !zoomChanged && transitionFlags && !transitionFlags.any) {
       return transitionFlags;
     }
     if (changed) {
@@ -1031,7 +875,8 @@ export class Style extends Evented<StyleEventType> {
       if (!isRasterStyleLayer(layer)) {
         continue;
       }
-      this.tilePyramids[layer.source].setRasterFadeDuration(layer.paint.get('raster-fade-duration'));
+      if (layer.source !== undefined)
+        this.tilePyramids[layer.source].setRasterFadeDuration(layer.paint.get('raster-fade-duration'));
     }
   }
 
@@ -1080,16 +925,15 @@ export class Style extends Evented<StyleEventType> {
    * May throw an Error ('Unimplemented: METHOD') if the maplibre-gl-style-spec
    * diff algorithm produces an operation that is not supported.
    *
-   * @returns true if any changes were made; false otherwise
+   * @returns the normalized style change, or undefined if no changes were applied
    */
-  setState(nextState: StyleSpecification, options: StyleSwapOptions & StyleSetterOptions = {}): boolean {
+  setState(nextState: StyleSpecification, options: StyleSetterOptions = {}): StyleStateChange | undefined {
     this._checkLoaded();
 
     const serializedStyle = this.serialize();
-    nextState = options.transformStyle ? options.transformStyle(serializedStyle, nextState) : nextState;
     const validate = options.validate ?? true;
     if (validate && validateStyleAndEmit(this, nextState))
-      return false;
+      return undefined;
 
     nextState = clone(nextState);
     nextState.layers = derefLayers(nextState.layers);
@@ -1097,7 +941,31 @@ export class Style extends Evented<StyleEventType> {
     if (!serializedStyle) {
       throw new Error('Style is not serialized.');
     }
-    const changes = diffStyles(serializedStyle, nextState);
+    // Compare Canvas identities as JSON scalars so the library never descends into DOM state.
+    const canvasIdentities = new Map<HTMLCanvasElement, string>();
+    const projectForDiff = (style: StyleSpecification): StyleSpecification => ({
+      ...style,
+      sources: mapObject(style.sources, (source) => {
+        if (source.type !== 'canvas' || source.canvas === undefined)
+          return source;
+        let canvas: string;
+        if (typeof source.canvas === 'string') {
+          canvas = `id:${source.canvas}`;
+        }
+        else {
+          const identity = canvasIdentities.get(source.canvas);
+          canvas = identity ?? `element:${canvasIdentities.size}`;
+          if (identity === undefined)
+            canvasIdentities.set(source.canvas, canvas);
+        }
+        return { ...source, canvas };
+      }),
+    });
+    const changes = diffStyles(projectForDiff(serializedStyle), projectForDiff(nextState));
+    for (const change of changes) {
+      if (change.command === 'addSource')
+        change.args[1] = nextState.sources[change.args[0]];
+    }
     const operations = this._getOperationsToPerform(changes);
 
     if (operations.unimplemented.length > 0) {
@@ -1105,7 +973,7 @@ export class Style extends Evented<StyleEventType> {
     }
 
     if (operations.operations.length === 0) {
-      return false;
+      return undefined;
     }
 
     // A new style starts with a fresh zoom history; integer-zoom crossfade
@@ -1124,13 +992,13 @@ export class Style extends Evented<StyleEventType> {
 
     this.fire(new StyleLoadEvent({ style: this }));
 
-    return true;
+    return { previous: serializedStyle, next: nextState, changes };
   }
 
   /**
    * @internal
    */
-  private _getOperationsToPerform(diff: Array<DiffCommand<DiffOperations>>): { operations: Array<() => void>; unimplemented: string[] } {
+  private _getOperationsToPerform(diff: StyleDiffCommand[]): { operations: Array<() => void>; unimplemented: string[] } {
     const operations: Array<() => void> = [];
     const unimplemented: string[] = [];
     for (const op of diff) {
@@ -1143,7 +1011,7 @@ export class Style extends Evented<StyleEventType> {
           continue;
         case 'addLayer': {
           const [layerObject, before] = op.args;
-          operations.push(() => this.addLayer(layerObject, before ?? undefined));
+          operations.push(() => this.addLayer(layerObject, before ?? undefined, { validate: false }));
           break;
         }
         case 'removeLayer': {
@@ -1153,22 +1021,22 @@ export class Style extends Evented<StyleEventType> {
         }
         case 'setPaintProperty': {
           const [layerId, name, value] = op.args;
-          operations.push(() => this.setPaintProperty(layerId, name, value));
+          operations.push(() => this.setPaintProperty(layerId, name, value, { validate: false }));
           break;
         }
         case 'setLayoutProperty': {
           const [layerId, name, value] = op.args;
-          operations.push(() => this.setLayoutProperty(layerId, name, value));
+          operations.push(() => this.setLayoutProperty(layerId, name, value, { validate: false }));
           break;
         }
         case 'setFilter': {
           const [layerId, filter] = op.args;
-          operations.push(() => this.setFilter(layerId, filter));
+          operations.push(() => this.setFilter(layerId, filter, { validate: false }));
           break;
         }
         case 'addSource': {
           const [id, source] = op.args;
-          operations.push(() => this.addSource(id, source));
+          operations.push(() => this.addSource(id, source, { validate: false }));
           break;
         }
         case 'removeSource': {
@@ -1182,7 +1050,7 @@ export class Style extends Evented<StyleEventType> {
           break;
         }
         case 'setLight':
-          operations.push(() => this.setLight(op.args[0]));
+          operations.push(() => this.setLight(op.args[0], { validate: false }));
           break;
         case 'setGeoJSONSourceData': {
           const [id, data] = op.args;
@@ -1191,12 +1059,12 @@ export class Style extends Evented<StyleEventType> {
         }
         case 'setGlyphs': {
           const [glyphsUrl] = op.args;
-          operations.push(() => this.setGlyphs(glyphsUrl));
+          operations.push(() => this.setGlyphs(glyphsUrl, { validate: false }));
           break;
         }
         case 'setSprite': {
           const [sprite] = op.args;
-          operations.push(() => this.setSprite(sprite));
+          operations.push(() => this.setSprite(sprite, { validate: false }));
           break;
         }
 
@@ -1235,6 +1103,10 @@ export class Style extends Evented<StyleEventType> {
 
   updateImage(id: string, image: StyleImage): void {
     const previous = this.images.getImage(id);
+    if (!previous) {
+      this.fire(new ErrorEvent(new Error(`An image named "${id}" does not exist.`)));
+      return;
+    }
     const layoutChanged = previous.pixelRatio !== image.pixelRatio || previous.sdf !== image.sdf;
     this.images.updateImage(id, image);
     if (layoutChanged) {
@@ -1245,7 +1117,7 @@ export class Style extends Evented<StyleEventType> {
     }
   }
 
-  getImage(id: string): StyleImage {
+  getImage(id: string): MaterializedStyleImage | undefined {
     return this.images.getImage(id);
   }
 
@@ -1279,7 +1151,7 @@ export class Style extends Evented<StyleEventType> {
     return this.images.listImages();
   }
 
-  addSource(id: string, source: SourceSpecification | CanvasSourceSpecification, options: StyleSetterOptions = {}): void {
+  addSource(id: string, source: AnySourceSpecification, options: StyleSetterOptions = {}): void {
     this._checkLoaded();
 
     if (this.tilePyramids[id] !== undefined) {
@@ -1290,8 +1162,9 @@ export class Style extends Evented<StyleEventType> {
       throw new Error(`The type property must be defined, but only the following properties were given: ${Object.keys(source).join(', ')}.`);
     }
 
-    const shouldValidate = SPEC_SOURCE_TYPES.has(source.type);
-    if (shouldValidate && this._validate(validateStyle.source, `sources.${id}`, source, null, options))
+    const shouldValidate = source.type === 'canvas' || SPEC_SOURCE_TYPES.has(source.type);
+    const sourceValidator = source.type === 'canvas' ? validateCanvasSource : validateStyle.source;
+    if (shouldValidate && this._validate(sourceValidator, `sources.${id}`, source, null, options))
       return;
     const tilePyramid = this.tilePyramids[id] = new TilePyramid(id, source, this.dispatcher);
     tilePyramid.style = this;
@@ -1342,8 +1215,8 @@ export class Style extends Evented<StyleEventType> {
 
     if (this.tilePyramids[id] === undefined)
       throw new Error(`There is no source with this ID=${id}`);
-    const geojsonSource: GeoJSONSource = this.tilePyramids[id].getSource() as any;
-    if (geojsonSource.type !== 'geojson')
+    const geojsonSource = this.tilePyramids[id].getSource();
+    if (!(geojsonSource instanceof GeoJSONSource))
       throw new Error(`geojsonSource.type is ${geojsonSource.type}, which is !== 'geojson`);
 
     geojsonSource.setData(data);
@@ -1366,7 +1239,7 @@ export class Style extends Evented<StyleEventType> {
    * @param before - ID of an existing layer to insert before
    * @param options - Style setter options.
    */
-  addLayer(layerObject: AddLayerObject, before?: string, options: StyleSetterOptions = {}): this {
+  addLayer(layerObject: LayerSpecification, before?: string, options: StyleSetterOptions = {}): this {
     this._checkLoaded();
 
     const id = layerObject.id;
@@ -1374,12 +1247,6 @@ export class Style extends Evented<StyleEventType> {
     if (this.getLayer(id)) {
       this.fire(new ErrorEvent(new Error(`Layer "${id}" already exists on this map.`)));
       return this;
-    }
-
-    if ('source' in layerObject && typeof layerObject.source === 'object') {
-      this.addSource(id, layerObject.source);
-      layerObject = clone(layerObject);
-      layerObject = Object.assign(layerObject, { source: id });
     }
 
     // this layer is not in the style.layers array, so we pass an impossible array index
@@ -1423,39 +1290,6 @@ export class Style extends Evented<StyleEventType> {
     }
     this._updateLayer(layer);
     return this;
-  }
-
-  /**
-   * Moves a layer to a different z-position. The layer will be inserted before the layer with
-   * ID `before`, or appended if `before` is omitted.
-   * @param id - ID of the layer to move
-   * @param before - ID of an existing layer to insert before
-   */
-  moveLayer(id: string, before?: string): void {
-    this._checkLoaded();
-    this._changed = true;
-
-    const layer = this._layers[id];
-    if (!layer) {
-      this.fire(new ErrorEvent(new Error(`The layer '${id}' does not exist in the map's style and cannot be moved.`)));
-      return;
-    }
-
-    if (id === before) {
-      return;
-    }
-
-    const index = this._order.indexOf(id);
-    this._order.splice(index, 1);
-
-    const newIndex = before ? this._order.indexOf(before) : this._order.length;
-    if (before && newIndex === -1) {
-      this.fire(new ErrorEvent(new Error(`Cannot move layer "${id}" before non-existing layer "${before}".`)));
-      return;
-    }
-    this._order.splice(newIndex, 0, id);
-
-    this._layerOrderChanged = true;
   }
 
   /**
@@ -1506,15 +1340,6 @@ export class Style extends Evented<StyleEventType> {
   }
 
   /**
-   * Return the ids of all layers currently in the style, including custom layers, in order.
-   *
-   * @returns ids of layers, in order
-   */
-  getLayersOrder(): string[] {
-    return [...this._order];
-  }
-
-  /**
    * Return the live internal order for render-path iteration.
    * @internal
    */
@@ -1541,15 +1366,13 @@ export class Style extends Evented<StyleEventType> {
       return;
     }
 
+    minzoom ??= 0;
+    maxzoom ??= 24;
     if (layer.minzoom === minzoom && layer.maxzoom === maxzoom)
       return;
 
-    if (minzoom != null) {
-      layer.minzoom = minzoom;
-    }
-    if (maxzoom != null) {
-      layer.maxzoom = maxzoom;
-    }
+    layer.minzoom = minzoom;
+    layer.maxzoom = maxzoom;
     this._updateLayer(layer);
   }
 
@@ -1580,15 +1403,6 @@ export class Style extends Evented<StyleEventType> {
     this._updateLayer(layer);
   }
 
-  /**
-   * Get a layer's filter object
-   * @param layer - the layer to inspect
-   * @returns the layer's filter, if any
-   */
-  getFilter(layer: string): FilterSpecification | void {
-    return clone(this.getLayer(layer)?.filter);
-  }
-
   setLayoutProperty<K extends keyof AllLayoutProperties>(layerId: string, name: K, value: AllLayoutProperties[K], options: StyleSetterOptions = {}): void {
     this._checkLoaded();
 
@@ -1603,22 +1417,6 @@ export class Style extends Evented<StyleEventType> {
 
     layer.setLayoutProperty(name, value, options);
     this._updateLayer(layer);
-  }
-
-  /**
-   * Get a layout property's value from a given layer
-   * @param layerId - the layer to inspect
-   * @param name - the name of the layout property
-   * @returns the property value
-   */
-  getLayoutProperty<K extends keyof AllLayoutProperties>(layerId: string, name: K): AllLayoutProperties[K] | undefined {
-    const layer = this.getLayer(layerId);
-    if (!layer) {
-      this.fire(new ErrorEvent(new Error(`Cannot get style of non-existing layer "${layerId}".`)));
-      return;
-    }
-
-    return layer.getLayoutProperty(name);
   }
 
   setPaintProperty<K extends keyof AllPaintProperties>(layerId: string, name: K, value: AllPaintProperties[K], options: StyleSetterOptions = {}): void {
@@ -1649,14 +1447,6 @@ export class Style extends Evented<StyleEventType> {
     this._updatedPaintProps[layer.id] = true;
     // reset serialization field, to be populated only when needed
     this._serializedLayers = null;
-  }
-
-  getPaintProperty<K extends keyof AllPaintProperties>(layer: string, name: K): AllPaintProperties[K] {
-    const styleLayer = this.getLayer(layer);
-    if (!styleLayer) {
-      throw new Error(`Cannot get style of non-existing layer "${layer}".`);
-    }
-    return styleLayer.getPaintProperty(name);
   }
 
   setFeatureState(target: FeatureIdentifier, state: FeatureState): void {
@@ -1717,7 +1507,7 @@ export class Style extends Evented<StyleEventType> {
     tilePyramid.removeFeatureState(sourceLayer, target.id, key);
   }
 
-  getFeatureState(target: FeatureIdentifier): FeatureState {
+  getFeatureState(target: FeatureIdentifier): FeatureState | undefined {
     this._checkLoaded();
     const sourceId = target.source;
     const sourceLayer = target.sourceLayer;
@@ -1784,41 +1574,25 @@ export class Style extends Evented<StyleEventType> {
     this._changed = true;
   }
 
-  getLight(): LightSpecification {
-    this._checkLoaded();
-    return this.light.getLight();
-  }
-
-  setLight(lightOptions: LightSpecification, options: StyleSetterOptions = {}): void {
+  setLight(lightOptions: LightSpecification | undefined, options: StyleSetterOptions = {}): void {
     this._checkLoaded();
 
-    const light = this.light.getLight();
-    let _update = false;
-    for (const key in lightOptions) {
-      if (!deepEqual(lightOptions[key], light[key])) {
-        _update = true;
-        break;
-      }
-    }
-    if (!_update)
+    lightOptions ??= {};
+    if (this._validate(validateStyle.light, 'light', lightOptions, null, options))
+      return;
+    if (deepEqual(lightOptions, this.light.getLight()))
       return;
 
-    const parameters = {
-      now: performance.now(),
-      transition: Object.assign({
-        duration: 300,
-        delay: 0,
-      }, this.stylesheet.transition),
-    };
-
-    this.light.setLight(lightOptions, options);
-    this.light.updateTransitions(parameters);
+    this.light.setLight(lightOptions, { validate: false });
+    this._changed = true;
   }
 
   /**
    * @internal
    */
-  private _validate(validate: Validator, key: string, value: any, props: any, options: StyleSetterOptions = {}): boolean {
+  private _validate(validate: Validator, key: string, value: unknown, props: Pick<ValidatorOptions, 'arrayIndex'> | null, options: StyleSetterOptions = {}): boolean {
+    if (options.validate === false)
+      return false;
     return validateAndEmit(this, validate, {
       key,
       style: this.serialize(),
@@ -1874,10 +1648,6 @@ export class Style extends Evented<StyleEventType> {
     return glyphs;
   }
 
-  getGlyphsUrl(): string | null {
-    return this.stylesheet.glyphs || null;
-  }
-
   setGlyphs(glyphsUrl: string | null | undefined, options: StyleSetterOptions = {}): void {
     this._checkLoaded();
 
@@ -1886,7 +1656,7 @@ export class Style extends Evented<StyleEventType> {
     }
 
     this._glyphsDidChange = true;
-    this.stylesheet.glyphs = glyphsUrl;
+    this.stylesheet.glyphs = glyphsUrl ?? undefined;
     this.glyphSource.entries = {};
     this.glyphSource.setURL(glyphsUrl);
   }
@@ -1897,77 +1667,6 @@ export class Style extends Evented<StyleEventType> {
       result[key] = this.dashAtlas.getDash(dash.dasharray, dash.round);
     }
     return result;
-  }
-
-  /**
-   * Add a sprite.
-   *
-   * @param id - The id of the desired sprite
-   * @param url - The url to load the desired sprite from
-   * @param options - The style setter options
-   * @param completion - The completion handler
-   */
-  addSprite(id: string, url: string, options: StyleSetterOptions = {}, completion?: (err?: Error) => void): void {
-    this._checkLoaded();
-
-    const spriteToAdd = [{ id, url }];
-    const updatedSprite = [
-      ...normalizeSprite(this.stylesheet.sprite),
-      ...spriteToAdd,
-    ];
-
-    if (this._validate(validateStyle.sprite, 'sprite', updatedSprite, null, options))
-      return;
-
-    this.stylesheet.sprite = updatedSprite;
-    this._loadSprite(updatedSprite, true, completion);
-  }
-
-  /**
-   * Remove a sprite by its id. When the last sprite is removed, the whole `this.stylesheet.sprite` object becomes
-   * `undefined`. This falsy `undefined` value later prevents attempts to load the sprite when it's absent.
-   *
-   * @param id - the id of the sprite to remove
-   */
-  removeSprite(id: string): void {
-    this._checkLoaded();
-
-    const internalSpriteRepresentation = normalizeSprite(this.stylesheet.sprite);
-
-    if (!internalSpriteRepresentation.some(sprite => sprite.id === id)) {
-      this.fire(new ErrorEvent(new Error(`Sprite "${id}" doesn't exists on this map.`)));
-      return;
-    }
-
-    if (this._spritesImagesIds[id]) {
-      for (const imageId of this._spritesImagesIds[id]) {
-        this.images.removeImage(imageId);
-        this._changedImages[imageId] = true;
-      }
-    }
-
-    internalSpriteRepresentation.splice(internalSpriteRepresentation.findIndex(sprite => sprite.id === id), 1);
-    this.stylesheet.sprite = internalSpriteRepresentation.length > 0 ? internalSpriteRepresentation : undefined;
-
-    delete this._spritesImagesIds[id];
-    if (!this.stylesheet.sprite) {
-      this._unloadSprite();
-      return;
-    }
-    this._loadSprite(this.stylesheet.sprite, true);
-    this._availableImages = this.images.listImages();
-    this._imagesListDirty = true;
-    this._changed = true;
-    this.fire(new StyleDataEvent('data'));
-  }
-
-  /**
-   * Get the current sprite value.
-   *
-   * @returns empty array when no sprite is set; id-url pairs otherwise
-   */
-  getSprite(): Array<{ id: string; url: string }> {
-    return normalizeSprite(this.stylesheet.sprite);
   }
 
   /**
@@ -2006,20 +1705,10 @@ export class Style extends Evented<StyleEventType> {
       this._frameRequest.abort();
       delete this._frameRequest;
     }
-    if (this._loadStyleRequest) {
-      this._loadStyleRequest.abort();
-      delete this._loadStyleRequest;
-    }
     if (this._spriteRequest) {
       this._spriteRequest.abort();
       delete this._spriteRequest;
     }
-
-    // Worker-side map state (workerSources, layerIndexes, availableImages)
-    // is only released on removeMap, and the RTL plugin listener closes over
-    // this Style. Without both, a destroyed tileset leaks worker memory and
-    // the RTL singleton forever.
-    rtlMainThreadPluginFactory().off(RTLPluginLoadedEventName, this._rtlPluginLoaded);
 
     // remove sourcecaches
     for (const id in this.tilePyramids) {

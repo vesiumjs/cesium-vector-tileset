@@ -14,11 +14,11 @@ export function normalizeSprite(sprite?: SpriteSpecification): Array<{ id: strin
     resultArray.push({ id: 'default', url: sprite });
   }
   else if (sprite && sprite.length > 0) {
-    const dedupArray: string[] = [];
+    const seen = new Set<string>();
     for (const { id, url } of sprite) {
-      const key = `${id}${url}`;
-      if (!dedupArray.includes(key)) {
-        dedupArray.push(key);
+      const key = JSON.stringify([id, url]);
+      if (!seen.has(key)) {
+        seen.add(key);
         resultArray.push({ id, url });
       }
     }

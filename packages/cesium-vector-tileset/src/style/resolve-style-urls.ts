@@ -1,4 +1,4 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { TilesetStyleSpecification as StyleSpecification } from '../tileset-options';
 
 export function resolveResourceUrl(url: string, baseUrl: string): string {
   return new URL(url, baseUrl).href.replace(/%7B/gi, '{').replace(/%7D/gi, '}');

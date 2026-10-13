@@ -103,7 +103,7 @@ export class SymbolStyleLayer extends StyleLayer<
       if (!SymbolStyleLayer.hasPaintOverride(this.layout, overridable)) {
         continue;
       }
-      const overridden = this.paint.get(overridable as keyof SymbolPaintPropsPossiblyEvaluated) as PossiblyEvaluatedPropertyValue<number>;
+      const overridden = this.paint.get(overridable as keyof SymbolPaintPropsPossiblyEvaluated) as PossiblyEvaluatedPropertyValue<unknown>;
       const override = new FormatSectionOverride(overridden);
       const styleExpression = new StyleExpression(override, `layers[${this.id}].paint.${overridden.property.name}`, overridden.property.specification);
       let expression = null;
@@ -113,7 +113,8 @@ export class SymbolStyleLayer extends StyleLayer<
       else {
         expression = new ZoomDependentExpression('composite', styleExpression, overridden.value.zoomStops);
       }
-      this.paint._values[overridable] = new PossiblyEvaluatedPropertyValue(overridden.property, expression, overridden.parameters);
+      const values: Partial<Record<keyof SymbolPaintPropsPossiblyEvaluated, unknown>> = this.paint._values;
+      values[overridable as keyof SymbolPaintPropsPossiblyEvaluated] = new PossiblyEvaluatedPropertyValue(overridden.property, expression, overridden.parameters);
     }
   }
 

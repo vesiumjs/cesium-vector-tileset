@@ -1,4 +1,4 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { TilesetStyleSpecification as StyleSpecification } from '../tileset-options';
 import type { RequestTransformFunction } from '../util/request';
 import { ResourceType, transformRequest } from '../util/request';
 import { resolveStyleUrls } from './resolve-style-urls';

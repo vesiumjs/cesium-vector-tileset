@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { CesiumVectorTileset } from '../cesium-vector-tileset';
 import { FillBucket } from '../data/bucket/fill-bucket';
 import { UNBOUNDED_BUDGET } from '../render/scene/frame-budget';
+import { TileGeneration } from '../render/scene/tile-generation';
 import { buildVectorTile } from '../render/vector/__test__/vector-tile-helper';
 import { EvaluationParameters } from '../style/evaluation-parameters';
 import { Tile } from '../tile/tile';
@@ -40,6 +41,79 @@ async function loadedSurface(initial = style()) {
 }
 
 describe('style replacement resource lifetime', () => {
+  it('reclaims deleted raster and pattern parents across repeated style replacements', async () => {
+    const tracks = (suffix: string): StyleSpecification => ({
+      version: 8,
+      sources: {
+        imagery: { type: 'raster', tiles: ['http://example.invalid/{z}/{x}/{y}.png'] },
+        land: { type: 'vector', tiles: ['http://example.invalid/{z}/{x}/{y}.pbf'] },
+      },
+      layers: [
+        { id: `imagery-${suffix}`, type: 'raster', source: 'imagery' },
+        { 'id': `pattern-${suffix}`, 'type': 'fill', 'source': 'land', 'source-layer': 'land', 'paint': { 'fill-pattern': 'hatch' } },
+      ],
+    });
+    const tileset = new CesiumVectorTileset({ style: tracks('initial') });
+    await tileset.whenReady();
+    try {
+      for (const suffix of ['next', 'third', 'final']) {
+        const previous = [tileset.get(0), tileset.get(1)];
+        tileset.setStyle(tracks(suffix));
+        expect(tileset.stats().raster.layerCollections).toBe(1);
+        expect(tileset.stats().pattern.layerCollections).toBe(1);
+        expect(tileset.length).toBe(2);
+        expect(previous.every(collection => collection.isDestroyed())).toBe(true);
+      }
+      tileset.setStyle({ version: 8, sources: {}, layers: [] });
+      expect(tileset.stats().raster.layerCollections).toBe(0);
+      expect(tileset.stats().pattern.layerCollections).toBe(0);
+      expect(tileset.length).toBe(0);
+    }
+    finally { tileset.destroy(); }
+  });
+
+  it('preserves hidden track parents and reclaims them when the same IDs change tracks', async () => {
+    const sources: StyleSpecification['sources'] = {
+      imagery: { type: 'raster', tiles: ['http://example.invalid/{z}/{x}/{y}.png'] },
+      land: { type: 'vector', tiles: ['http://example.invalid/{z}/{x}/{y}.pbf'] },
+    };
+    const initial: StyleSpecification = {
+      version: 8,
+      sources,
+      layers: [
+        { id: 'imagery', type: 'raster', source: 'imagery', minzoom: 17 },
+        { 'id': 'land', 'type': 'fill', 'source': 'land', 'source-layer': 'land', 'layout': { visibility: 'none' }, 'paint': { 'fill-pattern': 'hatch' } },
+      ],
+    };
+    const tileset = new CesiumVectorTileset({ style: initial });
+    await tileset.whenReady();
+    try {
+      expect(tileset.stats().raster.layerCollections).toBe(1);
+      expect(tileset.stats().pattern.layerCollections).toBe(1);
+      const style = (tileset as unknown as { _renderer: { style: Style } })._renderer.style;
+      expect(style.getLayer('imagery')!.isHidden(0)).toBe(true);
+      expect(style.getLayer('land')!.isHidden(0)).toBe(true);
+      const parents = [tileset.get(0), tileset.get(1)];
+      tileset.setStyle({ ...initial, layers: [
+        { id: 'imagery', type: 'raster', source: 'imagery' },
+        { 'id': 'land', 'type': 'fill', 'source': 'land', 'source-layer': 'land', 'paint': { 'fill-pattern': 'hatch' } },
+      ] });
+      expect(tileset.get(0)).toBe(parents[0]);
+      expect(tileset.get(1)).toBe(parents[1]);
+      expect(style.getLayer('imagery')!.isHidden(0)).toBe(false);
+      expect(style.getLayer('land')!.isHidden(0)).toBe(false);
+      tileset.setStyle({ ...initial, layers: [
+        { 'id': 'imagery', 'type': 'fill', 'source': 'land', 'source-layer': 'land' },
+        { 'id': 'land', 'type': 'fill', 'source': 'land', 'source-layer': 'land' },
+      ] });
+      expect(tileset.stats().raster.layerCollections).toBe(0);
+      expect(tileset.stats().pattern.layerCollections).toBe(0);
+      expect(tileset.length).toBe(0);
+      expect(parents.every(collection => collection.isDestroyed())).toBe(true);
+    }
+    finally { tileset.destroy(); }
+  });
+
   it('holds a deleted source until the new source has finished uploading', async () => {
     const { tileset, surface, tileID } = await loadedSurface();
     const internals = (tileset as unknown as { _renderer: { residency: TileResidency; collections: SceneCollections } })._renderer;
@@ -152,9 +226,7 @@ describe('style replacement resource lifetime', () => {
         generationId: internals.vector.tileBuildLayers(`land/${childID.key}`)!.generationId,
         stage: 'complete',
         progress: { vector: 'complete', pattern: true, symbol: true },
-        buckets: child.buckets,
-        styleRevision: internals.style.styleRevision,
-        mode: SceneMode.SCENE3D,
+        generation: new TileGeneration(child, internals.style.styleRevision, SceneMode.SCENE3D, internals.vector.tileBuildLayers(`land/${childID.key}`)!.generationId, { vector: 'complete', pattern: true, symbol: true }),
         featureIndex: child.latestFeatureIndex,
         retainPreviousGeneration: false,
         previousVector: [],

@@ -108,10 +108,10 @@ export class StyleEvaluation {
       const color = light.properties.get('color');
       const intensity = light.properties.get('intensity');
       const previous = this._lighting;
-      if (!previous || previous.position[0] !== position[0] || previous.position[1] !== position[1] || previous.position[2] !== position[2]
+      if (!previous || previous.position[0] !== position.x || previous.position[1] !== position.y || previous.position[2] !== position.z
         || previous.color.red !== color.r || previous.color.green !== color.g || previous.color.blue !== color.b || previous.intensity !== intensity) {
         this._lighting = {
-          position: [position[0], position[1], position[2]],
+          position: [position.x, position.y, position.z],
           color: { red: color.r, green: color.g, blue: color.b },
           intensity,
         };

@@ -3,7 +3,7 @@ import type { Style } from '../style';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CesiumVectorTileset } from '../../cesium-vector-tileset';
 import { addProtocol, removeProtocol } from '../../source/protocol-crud';
-import { ImageRequest } from '../../util/image-request';
+import { normalizeSprite } from '../sprite';
 
 interface SpriteRequest {
   parameters: RequestParameters;
@@ -39,7 +39,6 @@ beforeEach(() => {
 afterEach(() => {
   for (const request of requests) request.reject(new Error('Sprite test finished'));
   removeProtocol('sprite-test');
-  ImageRequest.resetRequestQueue();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -71,6 +70,10 @@ async function createTileset() {
 }
 
 describe('sprite request ownership', () => {
+  it('keeps distinct sprite pairs whose concatenated ids and URLs match', () => {
+    const sprites = [{ id: 'a', url: 'bc' }, { id: 'ab', url: 'c' }];
+    expect(normalizeSprite([...sprites, sprites[0]])).toEqual(sprites);
+  });
   it('keeps the latest public style pending after a superseded sprites late success', async () => {
     const { tileset, style } = await createTileset();
     try {
@@ -140,7 +143,7 @@ describe('sprite request ownership', () => {
       });
       const base = await spriteRequests('a');
       const extra = await spriteRequests('b');
-      style.removeSprite('extra');
+      tileset.setStyle({ ...emptyStyle, sprite: [{ id: 'base', url: spriteUrl('a') }] });
       expect([...base, ...extra].every(request => request.signal.aborted)).toBe(true);
       const changed = vi.fn();
       style.on('data', changed);

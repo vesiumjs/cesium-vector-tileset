@@ -23,8 +23,4 @@ export class FillStyleLayer extends StyleLayer<
       this.paint._values['fill-outline-color'] = this.paint._values['fill-color'];
     }
   }
-
-  isTileClipped(): boolean {
-    return true;
-  }
 }

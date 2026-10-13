@@ -1,5 +1,4 @@
 import type { GlobalProperties, TransitionSpecification } from '@maplibre/maplibre-gl-style-spec';
-import { rtlWorkerPlugin } from '../source/rtl-text-plugin-worker';
 import { isStringInSupportedScript } from '../symbol/script-detection';
 
 import { ZoomHistory } from './zoom-history';
@@ -8,6 +7,13 @@ export interface CrossfadeParameters {
   fromScale: number;
   toScale: number;
   t: number;
+}
+
+interface EvaluationParametersOptions {
+  now?: number;
+  fadeDuration?: number;
+  zoomHistory?: ZoomHistory;
+  transition?: TransitionSpecification;
 }
 
 /**
@@ -25,10 +31,10 @@ export class EvaluationParameters implements GlobalProperties {
   // if defined as class method, it'll hidden from operations
   // that iterate over own enumerable properties
   // (i..e spread operator (...), Object.keys(), for...in statement, etc.)
-  isSupportedScript: (_: string) => boolean = isSupportedScript;
+  isSupportedScript: (_: string) => boolean = isStringInSupportedScript;
 
   // "options" may also be another EvaluationParameters to copy, see CrossFadedProperty.possiblyEvaluate
-  constructor(zoom: number, options?: any) {
+  constructor(zoom: number, options?: EvaluationParametersOptions) {
     this.zoom = zoom;
 
     if (options) {
@@ -63,8 +69,4 @@ export class EvaluationParameters implements GlobalProperties {
       ? { fromScale: 2, toScale: 1, t: fraction + (1 - fraction) * t }
       : { fromScale: 0.5, toScale: 1, t: 1 - (1 - t) * fraction };
   }
-}
-
-function isSupportedScript(str: string): boolean {
-  return isStringInSupportedScript(str, rtlWorkerPlugin.getRTLTextPluginStatus() === 'loaded');
 }

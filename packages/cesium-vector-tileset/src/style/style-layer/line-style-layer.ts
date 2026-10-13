@@ -12,8 +12,4 @@ export class LineStyleLayer extends StyleLayer<
   constructor(layer: LayerSpecification, globalState: Record<string, any>) {
     super(layer, properties, globalState);
   }
-
-  isTileClipped(): boolean {
-    return true;
-  }
 }

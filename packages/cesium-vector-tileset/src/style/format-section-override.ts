@@ -43,7 +43,7 @@ export class FormatSectionOverride<T> implements Expression {
     return false;
   }
 
-  serialize() {
+  serialize(): null {
     return null;
   }
 }
