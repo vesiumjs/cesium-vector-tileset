@@ -36,6 +36,7 @@
     "@maplibre/maplibre-gl-style-spec": "^26.4.4",
     "@maplibre/vt-pbf": "^4.3.2",
     "@types/geojson": "^7946.0.16",
+    "bidi-js": "^1.1.0",
     "earcut": "^3.2.4",
     "gl-matrix": "^3.4.4",
     "murmurhash-js": "^1.0.0",

@@ -16,6 +16,7 @@ export function writeThirdPartyNotices(): void {
     ['@maplibre/maplibre-gl-style-spec', '../node_modules/@maplibre/maplibre-gl-style-spec/LICENSE.txt'],
     ['@maplibre/mlt', '../node_modules/@maplibre/mlt/LICENSE.txt'],
     ['@maplibre/vt-pbf', '../node_modules/@maplibre/vt-pbf/LICENSE'],
+    ['bidi-js', '../node_modules/bidi-js/LICENSE.txt'],
     ['earcut', '../node_modules/earcut/LICENSE'],
     ['gl-matrix', '../node_modules/gl-matrix/LICENSE.md'],
     ['pbf', '../node_modules/pbf/LICENSE'],
