@@ -1,7 +1,5 @@
 import type { LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { LoadGeoJSONParameters } from '../source/geojson-worker-source';
-import type { PluginState } from '../source/rtl-text-plugin-status';
-import type { RTLTextPlugin } from '../source/rtl-text-plugin-worker';
 import type {
   TileParameters,
   WorkerSource,
@@ -10,12 +8,11 @@ import type {
   WorkerTileWithData,
 } from '../source/worker-source';
 import type { OverscaledTileID } from '../tile/tile-id';
-import type { ClusterIDAndSource, GetClusterLeavesParams, RemoveSourceParams, UpdateLayersParameters } from './messages';
+import type { RemoveSourceParams, UpdateLayersParameters } from './messages';
 import type { TileWorkerScope } from './scope';
 import type { WorkerEndpoint, WorkerMessageSender } from './worker-channel';
 import { GeoJSONWorkerSource } from '../source/geojson-worker-source';
 import { addProtocol, removeProtocol } from '../source/protocol-crud';
-import { rtlWorkerPlugin } from '../source/rtl-text-plugin-worker';
 import { VectorTileWorkerSource } from '../source/vector-tile-worker-source';
 
 import { StyleLayerIndex } from '../style/style-layer-index';
@@ -26,49 +23,6 @@ import {
 
 } from './messages';
 import { WorkerChannel } from './worker-channel';
-
-/**
- * Loads an external script into worker (global) scope. The loader picks a
- * strategy based on what the script actually is:
- *
- * - `.mjs` URLs: dynamic `import()` directly, no fetch/sniff overhead. Worker
- *   CSP needs `script-src` to permit the URL.
- *
- * - Other URLs: fetch the source and sniff for ESM syntax (top-level `import`
- *   or `export`). If ESM is detected, run it through a blob-URL dynamic
- *   `import()` so the browser parses it as a module; this requires
- *   `script-src blob:` in the worker CSP. Otherwise treat it as UMD/IIFE and
- *   run it via `globalThis.eval`, which requires `script-src 'unsafe-eval'`.
- */
-async function loadScript(url: string): Promise<void> {
-  if (url.endsWith('.mjs')) {
-    await import(/* @vite-ignore */ url);
-    return;
-  }
-  const response = await fetch(url, { credentials: 'same-origin' });
-  if (!response.ok) {
-    throw new Error(`Failed to load ${url}: ${response.status}`);
-  }
-  const code = await response.text();
-  // Top-level `import`/`export` keywords are unique to ESM. UMD scripts
-  // assign to `module.exports` / `exports.foo` — those don't match.
-  if (/^[ \t]*(?:import|export)\s/m.test(code)) {
-    const blobUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-    try {
-      await import(/* @vite-ignore */ blobUrl);
-    }
-    finally {
-      URL.revokeObjectURL(blobUrl);
-    }
-    return;
-  }
-  // Run the code in the worker's global scope (not inside this function),
-  // so UMD/IIFE plugin scripts can assign to globals like
-  // `self.registerRTLTextPlugin`. Calling eval as a property access
-  // (rather than the bare `eval` identifier) is what makes it global-scope.
-  // eslint-disable-next-line no-eval -- required to execute UMD/IIFE plugin scripts in the worker's global scope
-  globalThis.eval(code);
-}
 
 /**
  * Handles tile sources, style updates and protocol requests inside the worker.
@@ -92,7 +46,7 @@ export class TileWorker {
     };
   };
 
-  referrer: string;
+  referrer?: string;
   globalStates: Map<string | number, Record<string, any>>;
 
   private readonly _prepareTile: (tile: WorkerTileWithData, tileID: OverscaledTileID) => void;
@@ -115,35 +69,22 @@ export class TileWorker {
     this.self.addProtocol = addProtocol;
     this.self.removeProtocol = removeProtocol;
 
-    // Invoked by the RTL text plugin once it has fetched and parsed.
-    this.self.registerRTLTextPlugin = (rtlTextPlugin: RTLTextPlugin) => {
-      rtlWorkerPlugin.setMethods(rtlTextPlugin);
-    };
-
     this.self.makeRequest = makeRequest;
-
-    this.channel.registerMessageHandler(MessageType.getClusterExpansionZoom, async (mapId, params: ClusterIDAndSource) => {
-      return (this._getWorkerSource(mapId, params.type, params.source) as GeoJSONWorkerSource).getClusterExpansionZoom(params);
-    });
-
-    this.channel.registerMessageHandler(MessageType.getClusterChildren, async (mapId, params: ClusterIDAndSource) => {
-      return (this._getWorkerSource(mapId, params.type, params.source) as GeoJSONWorkerSource).getClusterChildren(params);
-    });
-
-    this.channel.registerMessageHandler(MessageType.getClusterLeaves, async (mapId, params: GetClusterLeavesParams) => {
-      return (this._getWorkerSource(mapId, params.type, params.source) as GeoJSONWorkerSource).getClusterLeaves(params);
-    });
 
     this.channel.registerMessageHandler(MessageType.loadData, (mapId, params: LoadGeoJSONParameters) => {
       return (this._getWorkerSource(mapId, params.type, params.source) as GeoJSONWorkerSource).loadData(params);
     });
 
     this.channel.registerMessageHandler(MessageType.loadTile, (mapId, params: WorkerTileParameters, controller) => {
-      return this._loadSourceTile(mapId, params, 'loadTile', controller!);
+      if (!controller)
+        throw new Error('A tile request abort controller is required.');
+      return this._loadSourceTile(mapId, params, 'loadTile', controller);
     });
 
     this.channel.registerMessageHandler(MessageType.reloadTile, (mapId, params: WorkerTileParameters, controller) => {
-      return this._loadSourceTile(mapId, params, 'reloadTile', controller!);
+      if (!controller)
+        throw new Error('A tile request abort controller is required.');
+      return this._loadSourceTile(mapId, params, 'reloadTile', controller);
     });
 
     this.channel.registerMessageHandler(MessageType.abortTile, (mapId, params: TileParameters) => {
@@ -187,10 +128,6 @@ export class TileWorker {
       this.referrer = params;
     });
 
-    this.channel.registerMessageHandler(MessageType.syncRTLPluginState, (mapId, params: PluginState) => {
-      return this._syncRTLPluginState(mapId, params);
-    });
-
     this.channel.registerMessageHandler(MessageType.setImages, (mapId, params: string[]) => {
       return this._setImages(mapId, params);
     });
@@ -201,9 +138,11 @@ export class TileWorker {
 
     this.channel.registerMessageHandler(MessageType.updateGlobalState, async (mapId, params: Record<string, any>) => {
       const globalState = this._getGlobalState(mapId);
-      for (const key in params) {
-        globalState[key] = params[key];
+      for (const key of Object.keys(globalState)) {
+        if (!Object.hasOwn(params, key))
+          delete globalState[key];
       }
+      Object.assign(globalState, params);
     });
 
     this.channel.registerMessageHandler(MessageType.setLayers, async (mapId, params: LayerSpecification[]) => {
@@ -239,9 +178,6 @@ export class TileWorker {
   /**
    * @internal
    */
-  private async _syncRTLPluginState(_mapId: string | number, incomingState: PluginState): Promise<PluginState> {
-    return await rtlWorkerPlugin.syncState(incomingState, loadScript);
-  }
 
   /**
    * @internal

@@ -1,5 +1,6 @@
 import type { PromoteIdSpecification } from '@maplibre/maplibre-gl-style-spec';
-import type { BucketParameters, IndexedFeature } from '../data/bucket';
+import type { DashEntry } from '../assets/dash-atlas';
+import type { BucketParameters, IndexedFeature, PopulateParameters } from '../data/bucket';
 import type { FeatureSnapshotInput } from '../data/feature-snapshot';
 import type { StyleLayer } from '../style/style-layer';
 import type { StyleLayerIndex } from '../style/style-layer-index';
@@ -8,7 +9,7 @@ import type { WorkerMessageSender } from '../worker/worker-channel';
 import type { VectorTileData } from './vector-tile-data';
 import type {
   WorkerTileParameters,
-  WorkerTileResult,
+  WorkerTileWithData,
 } from './worker-source';
 import { GlyphAtlas } from '../assets/glyph-atlas';
 import { ImageAtlas } from '../assets/image-atlas';
@@ -45,15 +46,11 @@ function createBucket(type: StyleLayer['type'], parameters: BucketParameters<any
 
 export class WorkerTile {
   tileID: OverscaledTileID;
-  uid: string | number;
   zoom: number;
   pixelRatio: number;
-  tileSize: number;
   source: string;
-  promoteId: PromoteIdSpecification;
+  promoteId?: PromoteIdSpecification;
   overscaling: number;
-  collectResourceTiming: boolean;
-  returnDependencies: boolean;
 
   status: 'parsing' | 'done' = 'done';
   collisionBoxArray: CollisionBoxArray;
@@ -64,20 +61,16 @@ export class WorkerTile {
 
   constructor(params: WorkerTileParameters) {
     this.tileID = new OverscaledTileID(params.tileID.overscaledZ, params.tileID.wrap, params.tileID.canonical.z, params.tileID.canonical.x, params.tileID.canonical.y);
-    this.uid = params.uid;
     this.zoom = params.zoom;
     this.pixelRatio = params.pixelRatio;
-    this.tileSize = params.tileSize;
     this.source = params.source;
     this.overscaling = this.tileID.overscaleFactor();
-    this.collectResourceTiming = !!params.collectResourceTiming;
-    this.returnDependencies = !!params.returnDependencies;
     this.promoteId = params.promoteId;
     this.collisionBoxArray = new CollisionBoxArray();
     this.inFlightDependencies = [];
   }
 
-  async parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller = new AbortController()): Promise<WorkerTileResult> {
+  async parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller = new AbortController()): Promise<WorkerTileWithData> {
     throwIfAborted(controller.signal);
     if (this.abort !== controller)
       this.abort?.abort();
@@ -108,7 +101,7 @@ export class WorkerTile {
   /**
    * @internal
    */
-  private async _parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller: AbortController, dependencies: AbortController[]): Promise<WorkerTileResult> {
+  private async _parse(data: VectorTileData, layerIndex: StyleLayerIndex, availableImages: string[], channel: WorkerMessageSender, controller: AbortController, dependencies: AbortController[]): Promise<WorkerTileWithData> {
     // WorkerTile instances are reused for reloads. Collision boxes belong to
     // one parse result; retaining the previous array duplicates collision
     // data and leaves stale boxes in the next serialized tile.
@@ -116,14 +109,14 @@ export class WorkerTile {
     const sourceLayerIds = Object.keys(data.layers).sort();
     const sourceLayerIndices = new Map(sourceLayerIds.map((id, index) => [id, index]));
 
-    const featureIndex = new FeatureIndex(this.tileID, this.promoteId);
+    const featureIndex = new FeatureIndex(this.promoteId);
     featureIndex.bucketLayerIDs = [];
     featureIndex.sourceLayerIds = sourceLayerIds;
 
     const buckets: { [_: string]: WorkerBucket } = {};
     const sourceFeatures = new Map<string, IndexedFeature[]>();
 
-    const options = {
+    const options: PopulateParameters = {
       featureIndex,
       iconDependencies: {},
       patternDependencies: {},
@@ -217,8 +210,13 @@ export class WorkerTile {
       getDashesPromise = channel.sendAsync({ type: MessageType.getDashes, data: { dashes } }, abortController);
     }
 
-    const [glyphMap, iconMap, patternMap, dashPositions] = await Promise.all([getGlyphsPromise, getIconsPromise, getPatternsPromise, getDashesPromise]);
+    const [glyphMap, iconMap, patternMap, dashResponse] = await Promise.all([getGlyphsPromise, getIconsPromise, getPatternsPromise, getDashesPromise]);
     throwIfAborted(controller.signal);
+    const dashPositions: Record<string, DashEntry> = {};
+    for (const [key, entry] of Object.entries(dashResponse)) {
+      if (entry)
+        dashPositions[key] = entry;
+    }
 
     // Resolve the numeric dash patterns the getDashes round-trip received.
     // The atlas positions come back keyed by the same dash key; the renderer
@@ -313,9 +311,6 @@ export class WorkerTile {
       dashPositions,
       dashRows,
       // Only used for benchmarking:
-      glyphMap: this.returnDependencies ? glyphMap : null,
-      iconMap: this.returnDependencies ? iconMap : null,
-      glyphPositions: this.returnDependencies ? glyphAtlas.positions : null,
     };
   }
 }

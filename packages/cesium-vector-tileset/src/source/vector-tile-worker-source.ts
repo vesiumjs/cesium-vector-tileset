@@ -3,13 +3,16 @@ import type {
   WorkerSource,
   WorkerTileParameters,
   WorkerTileResult,
+  WorkerTileWithoutData,
 } from '../source/worker-source';
 import type { StyleLayer } from '../style/style-layer';
 import type { StyleLayerIndex } from '../style/style-layer-index';
-import type { ExpiryData } from '../util/ajax';
+import type { CanonicalTileID } from '../tile/tile-id';
+import type { ExpiryData, RequestParameters } from '../util/ajax';
 import type { RemoveSourceParams } from '../worker/messages';
 import type { WorkerMessageSender } from '../worker/worker-channel';
 import type { VectorTileData, VectorTileLayer } from './vector-tile-data';
+import type { OverzoomParameters } from './worker-source';
 import type { ParsingState } from './worker-tile-state';
 import { VectorTile } from '@mapbox/vector-tile';
 import { PbfReader } from 'pbf';
@@ -90,7 +93,7 @@ export class VectorTileWorkerSource implements WorkerSource {
     catch (ex) {
       const bytes = new Uint8Array(rawData);
       const isGzipped = bytes[0] === 0x1F && bytes[1] === 0x8B;
-      let errorMessage = `Unable to parse the tile at ${params.request.url}, `;
+      let errorMessage = `Unable to parse the tile at ${params.request?.url ?? params.tileID.toString()}, `;
       if (isGzipped) {
         errorMessage += 'please make sure the data is not gzipped and that you have configured the relevant header in the server';
       }
@@ -104,13 +107,14 @@ export class VectorTileWorkerSource implements WorkerSource {
   /**
    * Implements {@link WorkerSource.loadTile}.
    */
-  async loadTile(params: WorkerTileParameters, abortController = new AbortController()): Promise<WorkerTileResult | null> {
+  async loadTile(params: WorkerTileParameters, abortController = new AbortController()): Promise<WorkerTileResult> {
     throwIfAborted(abortController.signal);
     const { uid, overzoomParameters } = params;
 
-    if (overzoomParameters) {
-      params.request = overzoomParameters.overzoomRequest;
-    }
+    const request = overzoomParameters?.overzoomRequest ?? params.request;
+    if (!request)
+      throw new Error(`Vector tile ${params.tileID} requires a network request.`);
+    params.request = request;
 
     const timing = params.request?.collectResourceTiming
       ? new RequestPerformance(params.request.url)
@@ -122,9 +126,9 @@ export class VectorTileWorkerSource implements WorkerSource {
     try {
       // Download the tile data from the network.
       const parent = overzoomParameters
-        ? await this._loadParentTile(params, abortController)
+        ? await this._loadParentTile(params, request, overzoomParameters, abortController)
         : undefined;
-      const tileResponse = parent?.response ?? await getArrayBuffer(params.request, abortController);
+      const tileResponse = parent?.response ?? await getArrayBuffer(request, abortController);
       throwIfAborted(abortController.signal);
 
       // Tile data hasn't changed (etag support) - return an unmodified result
@@ -135,13 +139,10 @@ export class VectorTileWorkerSource implements WorkerSource {
 
       const tileResult = parent?.decoded ?? this.loadVectorTile(params, tileResponse.data);
       this.tileState.finishLoading(uid, workerTile);
-      if (!tileResult)
-        return null;
-
       let { vectorTile } = tileResult;
       if (overzoomParameters) {
         this.overzoomParents.set(workerTile, tileResult);
-        ({ vectorTile } = this._getOverzoomTile(params, vectorTile));
+        ({ vectorTile } = this._getOverzoomTile(params, vectorTile, overzoomParameters.maxZoomTileID));
       }
 
       const cacheControl = this._getExpiryData(tileResponse);
@@ -181,14 +182,13 @@ export class VectorTileWorkerSource implements WorkerSource {
    * interested child aborts.
    * @internal
    */
-  private async _loadParentTile(params: WorkerTileParameters, childAbort: AbortController): Promise<ParentTile> {
-    const request = params.request;
+  private async _loadParentTile(params: WorkerTileParameters, request: RequestParameters, overzoomParameters: OverzoomParameters, childAbort: AbortController): Promise<ParentTile> {
     // getArrayBuffer may set request.type while preparing fetch. Content
     // identity uses only the request fields that can change the response.
     const key = JSON.stringify([
       params.source,
       params.encoding,
-      params.overzoomParameters.maxZoomTileID.key,
+      overzoomParameters.maxZoomTileID.key,
       request.url,
       request.method,
       request.body,
@@ -214,7 +214,7 @@ export class VectorTileWorkerSource implements WorkerSource {
     if (!pending) {
       const abort = new AbortController();
       pending = {
-        response: getArrayBuffer(params.request, abort),
+        response: getArrayBuffer(request, abort),
         abort,
         consumers: new Set(),
       };
@@ -226,9 +226,8 @@ export class VectorTileWorkerSource implements WorkerSource {
     const aborted = new Promise<never>((_resolve, reject) => {
       onAbort = () => reject(childAbort.signal.reason);
       childAbort.signal.addEventListener('abort', onAbort, { once: true });
-      if (childAbort.signal.aborted) {
+      if (childAbort.signal.aborted)
         onAbort();
-      }
     });
     try {
       const response = await Promise.race([shared.response, aborted]);
@@ -238,7 +237,7 @@ export class VectorTileWorkerSource implements WorkerSource {
         return { response };
       }
       shared.decoded ??= this.loadVectorTile(params, response.data);
-      const cacheControl = response.cacheControl && parseCacheControl(response.cacheControl);
+      const cacheControl = response.cacheControl ? parseCacheControl(response.cacheControl) : undefined;
       const maxAge = cacheControl?.['max-age'];
       const expiresAt = cacheControl?.['no-cache'] || cacheControl?.['no-store']
         ? 0
@@ -255,7 +254,8 @@ export class VectorTileWorkerSource implements WorkerSource {
       return parent;
     }
     finally {
-      childAbort.signal.removeEventListener('abort', onAbort);
+      if (onAbort)
+        childAbort.signal.removeEventListener('abort', onAbort);
       shared.consumers.delete(childAbort);
       if (shared.consumers.size === 0) {
         if (this.pendingParentTiles.get(key) === shared) {
@@ -270,7 +270,7 @@ export class VectorTileWorkerSource implements WorkerSource {
   /**
    * @internal
    */
-  private _getEtagUnmodifiedResult(response: ExpiryData, timing: RequestPerformance): WorkerTileResult {
+  private _getEtagUnmodifiedResult(response: ExpiryData, timing: RequestPerformance | undefined): WorkerTileWithoutData {
     const cacheControl = this._getExpiryData(response);
     const resourceTiming = this._finishRequestTiming(timing);
     return Object.assign({ etagUnmodified: true as const }, cacheControl, resourceTiming);
@@ -280,7 +280,10 @@ export class VectorTileWorkerSource implements WorkerSource {
    * @internal
    */
   private async _parseWorkerTile(workerTile: WorkerTile, parseState?: ParsingState, controller = new AbortController()): Promise<WorkerTileResult> {
-    let result = await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.channel, controller);
+    const data = workerTile.vectorTile;
+    if (!data)
+      throw new Error('Cannot parse a tile without decoded vector data.');
+    let result = await workerTile.parse(data, this.layerIndex, this.availableImages, this.channel, controller);
 
     if (parseState) {
       const { cacheControl, resourceTiming } = parseState;
@@ -313,7 +316,7 @@ export class VectorTileWorkerSource implements WorkerSource {
   /**
    * @internal
    */
-  private _finishRequestTiming(timing: RequestPerformance): { resourceTiming?: any } {
+  private _finishRequestTiming(timing: RequestPerformance | undefined): { resourceTiming?: PerformanceEntryList } {
     const timingData = timing?.finish();
     if (!timingData)
       return {};
@@ -330,9 +333,8 @@ export class VectorTileWorkerSource implements WorkerSource {
    * @returns the overzoomed tile
    * @internal
    */
-  private _getOverzoomTile(params: WorkerTileParameters, maxZoomVectorTile: VectorTileData): LoadVectorTileResult {
-    const { tileID, source, overzoomParameters } = params;
-    const { maxZoomTileID } = overzoomParameters;
+  private _getOverzoomTile(params: WorkerTileParameters, maxZoomVectorTile: VectorTileData, maxZoomTileID: CanonicalTileID): LoadVectorTileResult {
+    const { tileID, source } = params;
     const layerFamilies: Record<string, StyleLayer[][]> = this.layerIndex.familiesBySource[source] ?? {};
     const sourceLayerIds = Object.keys(layerFamilies).sort();
 
@@ -383,7 +385,7 @@ export class VectorTileWorkerSource implements WorkerSource {
 
     const parent = this.overzoomParents.get(workerTile);
     if (parent && params.overzoomParameters) {
-      const sliced = this._getOverzoomTile(params, parent.vectorTile);
+      const sliced = this._getOverzoomTile(params, parent.vectorTile, params.overzoomParameters.maxZoomTileID);
       workerTile.vectorTile = sliced.vectorTile;
     }
 

@@ -1,12 +1,9 @@
 import type { PromoteIdSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { DashEntry } from '../assets/dash-atlas';
-import type { GlyphPositions } from '../assets/glyph-atlas';
 import type { ImageAtlas } from '../assets/image-atlas';
 import type { CollisionBoxArray } from '../data/array-types.g';
 import type { Bucket } from '../data/bucket';
 import type { FeatureIndex } from '../data/feature-index';
-import type { StyleGlyph } from '../style/style-glyph';
-import type { StyleImage } from '../style/style-image';
 import type { CanonicalTileID, OverscaledTileID } from '../tile/tile-id';
 import type { ExpiryData, RequestParameters } from '../util/ajax';
 import type { AlphaImage } from '../util/image';
@@ -31,11 +28,9 @@ export type WorkerTileParameters = TileParameters & {
   request?: RequestParameters;
   zoom: number;
   maxZoom?: number;
-  tileSize: number;
-  promoteId: PromoteIdSpecification;
+  promoteId?: PromoteIdSpecification;
   pixelRatio: number;
   collectResourceTiming?: boolean;
-  returnDependencies?: boolean;
   encoding?: TileEncoding;
   /**
    * Provide this property when the requested tile has a higher canonical Z than source maxzoom.
@@ -71,22 +66,13 @@ export type WorkerTileWithData = ExpiryData & {
   collisionBoxArray: CollisionBoxArray;
   dashPositions: Record<string, DashEntry>;
   dashRows?: Record<string, DashRow>;
-  resourceTiming?: PerformanceResourceTiming[];
-  glyphMap?: {
-    [_: string]: {
-      [_: number]: StyleGlyph;
-    };
-  } | null;
-  iconMap?: {
-    [_: string]: StyleImage;
-  } | null;
-  glyphPositions?: GlyphPositions | null;
+  resourceTiming?: PerformanceEntryList;
   etagUnmodified?: false;
 };
 
 export type WorkerTileWithoutData = ExpiryData & {
   etagUnmodified: true; // Strict for type narrowing
-  resourceTiming?: PerformanceResourceTiming[];
+  resourceTiming?: PerformanceEntryList;
 };
 
 /**

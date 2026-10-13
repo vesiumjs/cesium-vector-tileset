@@ -125,13 +125,6 @@ export class WorkerDispatcher {
       channel.registerMessageHandler(type, handler);
     }
   }
-
-  public async unregisterMessageHandler<T extends MessageType>(type: T): Promise<void> {
-    const channels = await this.channelsReady;
-    for (const channel of channels) {
-      channel.unregisterMessageHandler(type);
-    }
-  }
 }
 
 let globalDispatcher: WorkerDispatcher | undefined;

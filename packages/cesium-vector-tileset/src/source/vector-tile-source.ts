@@ -32,39 +32,10 @@ export interface LoadTileResult {
 }
 
 /**
- * A source containing MVT or MLT vector tiles.
- * (See the [Style Specification](https://maplibre.org/maplibre-style-spec/) for detailed documentation of options.)
+ * Loads MVT or MLT tiles, following VectorSourceSpecification.
+ * Configure the source in StyleSpecification.sources and apply changes with CesiumVectorTileset.setStyle.
  *
- * @group Sources
- *
- * @example
- * ```ts
- * map.addSource('some id', {
- *     type: 'vector',
- *     url: 'https://demotiles.maplibre.org/tiles/tiles.json'
- * });
- * ```
- *
- * @example
- * ```ts
- * map.addSource('some id', {
- *     type: 'vector',
- *     tiles: ['https://d25uarhxywzl1j.cloudfront.net/v0.1/{z}/{x}/{y}.mvt'],
- *     minzoom: 6,
- *     maxzoom: 14
- * });
- * ```
- *
- * @example
- * ```ts
- * map.getSource('some id').setUrl("https://demotiles.maplibre.org/tiles/tiles.json");
- * ```
- *
- * @example
- * ```ts
- * map.getSource('some id').setTiles(['https://d25uarhxywzl1j.cloudfront.net/v0.1/{z}/{x}/{y}.mvt']);
- * ```
- * @see [Add a vector tile source](https://maplibre.org/maplibre-gl-js/docs/examples/add-a-vector-tile-source/)
+ * @internal
  */
 export class VectorTileSource extends Evented<SourceEventType> implements Source {
   type: 'vector';
@@ -85,7 +56,6 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   tiles: string[];
   tileBounds?: TileBounds;
   reparseOverscaled: boolean;
-  isTileClipped: boolean;
   _tileJSONRequest?: AbortController;
   _loaded: boolean;
 
@@ -104,7 +74,6 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
     this.scheme = 'xyz';
     this.tileSize = 512;
     this.reparseOverscaled = true;
-    this.isTileClipped = true;
     this._loaded = false;
     this.tiles = options.tiles ?? [];
     this.url = options.url;
@@ -121,7 +90,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
     this.setEventedParent(eventedParent);
   }
 
-  async load(sourceDataChanged: boolean = false): Promise<void> {
+  async load(): Promise<void> {
     this._loaded = false;
     this.fire(new SourceDataEvent('dataloading'));
     const tileJSONRequest = new AbortController();
@@ -139,13 +108,13 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
       if (tileJSON) {
         Object.assign(this, tileJSON);
         this.tileBounds = tileJSON.bounds
-          ? new TileBounds(tileJSON.bounds, this.minzoom, this.maxzoom)
+          ? new TileBounds(tileJSON.bounds)
           : undefined;
 
         // `content` is included here to prevent a race condition where `Style._updateSources` is called
         // before the TileJSON arrives. this makes sure the tiles needed are loaded once TileJSON arrives
         this.fire(new SourceDataEvent('data', { sourceDataType: 'metadata' }));
-        this.fire(new SourceDataEvent('data', { sourceDataType: 'content', sourceDataChanged }));
+        this.fire(new SourceDataEvent('data', { sourceDataType: 'content' }));
       }
     }
     catch (err) {
@@ -176,43 +145,6 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   onAdd(): void {
     this._removed = false;
     this.load();
-  }
-
-  setSourceProperty(callback: () => void): void {
-    if (this._tileJSONRequest) {
-      this._tileJSONRequest.abort();
-    }
-
-    callback();
-
-    this.load(true);
-  }
-
-  /**
-   * Sets the source `tiles` property and re-renders the map.
-   *
-   * @param tiles - An array of one or more tile source URLs, as in the TileJSON spec.
-   */
-  setTiles(tiles: string[]): this {
-    this.setSourceProperty(() => {
-      this._options.tiles = tiles;
-    });
-
-    return this;
-  }
-
-  /**
-   * Sets the source `url` property and re-renders the map.
-   *
-   * @param url - A URL to a TileJSON resource. Supported protocols are `http:` and `https:`.
-   */
-  setUrl(url: string): this {
-    this.setSourceProperty(() => {
-      this.url = url;
-      this._options.url = url;
-    });
-
-    return this;
   }
 
   onRemove(): void {
@@ -275,7 +207,6 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
           uid: tile.uid,
           tileID: tile.tileID,
           zoom: tile.tileID.overscaledZ,
-          tileSize: this.tileSize * tile.tileID.overscaleFactor(),
           type: this.type,
           source: this.id,
           pixelRatio: this.style?.pixelRatio ?? 1,

@@ -33,7 +33,6 @@ vi.mock('../../worker/dispatcher', () => ({
     channelsReady = Promise.resolve(this.channels);
     broadcast = vi.fn().mockResolvedValue([]);
     registerMessageHandler = vi.fn().mockResolvedValue(undefined);
-    unregisterMessageHandler = vi.fn().mockResolvedValue(undefined);
     waitForInitComplete = vi.fn().mockResolvedValue(undefined);
     getReadyChannel = () => transport.channel;
     getChannel = async () => transport.channel;
@@ -70,7 +69,7 @@ function payload(radius: unknown, color?: unknown): WorkerTileWithData {
   });
   const result: WorkerTileWithData = {
     buckets: [bucket],
-    featureIndex: new FeatureIndex(tileID),
+    featureIndex: new FeatureIndex(),
     collisionBoxArray: new CollisionBoxArray(),
     imageAtlas: new ImageAtlas({}, {}),
     glyphAtlasImage: new AlphaImage({ width: 1, height: 1 }),

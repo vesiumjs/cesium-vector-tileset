@@ -46,7 +46,6 @@ function params(uid: string, x: number): WorkerTileParameters {
     source: 'vector',
     tileID: new OverscaledTileID(1, 0, 1, x, 0),
     zoom: 1,
-    tileSize: 512,
     pixelRatio: 1,
     promoteId: undefined,
     request: { url: `https://example.test/1/${x}/0.pbf` },

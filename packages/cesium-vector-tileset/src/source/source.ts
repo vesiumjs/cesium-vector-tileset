@@ -1,6 +1,5 @@
 import type { SourceSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { CanvasSourceSpecification } from '../source/canvas-source';
-import type { GeoJSONSourceShouldReloadTileOptions } from '../source/geojson-source';
 import type { LoadTileResult } from '../source/vector-tile-source';
 import type { Style } from '../style/style';
 import type { Tile } from '../tile/tile';
@@ -56,11 +55,9 @@ export interface Source {
   /**
    * `true` if zoom levels are rounded to the nearest integer in the source data, `false` if they are floor-ed to the nearest integer.
    */
-  roundZoom?: boolean;
   /**
    * `false` if tiles can be drawn outside their boundaries, `true` if they cannot.
    */
-  isTileClipped?: boolean;
   tileID?: CanonicalTileID;
   /**
    * `true` if tiles should be sent back to the worker for each overzoomed zoom level, `false` if not.
@@ -123,12 +120,6 @@ export interface Source {
    * Allows to execute a prepare step before the source is used.
    */
   prepare?: () => void;
-  /**
-   * Optional function to determine whether a tile should be reloaded, given a
-   * set of options associated with a `MapSourceDataChangedEvent`.
-   * @internal
-   */
-  shouldReloadTile?: (tile: Tile, options: GeoJSONSourceShouldReloadTileOptions) => boolean;
 }
 
 /**

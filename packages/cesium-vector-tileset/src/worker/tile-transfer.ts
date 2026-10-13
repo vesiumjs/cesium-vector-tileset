@@ -42,9 +42,16 @@ export function createTileTransferRegistry(): TransferRegistry {
     restore(expression) {
       const input = expression as CompoundExpression & { overload?: number };
       const definition = CompoundExpression.definitions[expression.name];
-      expression._evaluate = Array.isArray(definition)
-        ? definition[2]
-        : definition.overloads[input.overload][1];
+      if (Array.isArray(definition)) {
+        expression._evaluate = definition[2];
+      }
+      else {
+        const overload = input.overload;
+        const selected = typeof overload === 'number' ? definition.overloads[overload] : undefined;
+        if (!selected)
+          throw new Error(`Invalid overload for expression ${expression.name}`);
+        expression._evaluate = selected[1];
+      }
       delete input.overload;
     },
   });

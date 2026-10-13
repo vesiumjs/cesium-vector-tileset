@@ -100,10 +100,6 @@ export class WorkerChannel implements WorkerMessageSender {
     this.messageHandlers[type] = handler;
   }
 
-  unregisterMessageHandler<T extends MessageType>(type: T): void {
-    delete this.messageHandlers[type];
-  }
-
   /** Post a one-way control message without a cancellable response lease. */
   notify<T extends MessageType>(message: WorkerMessage<T>): void {
     if (this.removed) {

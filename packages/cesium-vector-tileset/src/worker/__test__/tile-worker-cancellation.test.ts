@@ -72,7 +72,6 @@ async function fixture(type: 'vector' | 'geojson') {
     uid: 'tile',
     tileID: new OverscaledTileID(0, 0, 0, 0, 0),
     zoom: 0,
-    tileSize: 512,
     pixelRatio: 1,
     promoteId: undefined,
     request: { url: 'https://example.test/0/0/0.pbf' },
