@@ -1,8 +1,10 @@
 import Point from '@mapbox/point-geometry';
+import { BoundingRectangle, Cartesian2 } from 'cesium';
 
 import Queue from 'tinyqueue';
-import { Bounds } from '../geo/bounds';
 import { distToSegmentSquared } from '../geo/intersection-tests';
+
+const boundsPoint = new Cartesian2();
 
 /**
  * Finds an approximation of a polygon's Pole Of Inaccessibility https://en.wikipedia.org/wiki/Pole_of_inaccessibility
@@ -20,15 +22,23 @@ export function findPoleOfInaccessibility(
   if (!outerRing || outerRing.length === 0) {
     throw new Error('Cannot find a pole of inaccessibility for an empty polygon.');
   }
-  const bounds = Bounds.fromPoints(outerRing);
+  const bounds = new BoundingRectangle(outerRing[0].x, outerRing[0].y, 0, 0);
+  for (const point of outerRing) {
+    boundsPoint.x = point.x;
+    boundsPoint.y = point.y;
+    BoundingRectangle.expand(bounds, boundsPoint, bounds);
+  }
 
-  const cellSize = Math.min(bounds.width(), bounds.height());
+  const cellSize = Math.min(bounds.width, bounds.height);
   let h = cellSize / 2;
 
   // a priority queue of cells in order of their "potential" (max distance to polygon)
   const cellQueue = new Queue([], compareMax);
 
-  const { minX, minY, maxX, maxY } = bounds;
+  const minX = bounds.x;
+  const minY = bounds.y;
+  const maxX = minX + bounds.width;
+  const maxY = minY + bounds.height;
   if (cellSize === 0)
     return new Point(minX, minY);
 

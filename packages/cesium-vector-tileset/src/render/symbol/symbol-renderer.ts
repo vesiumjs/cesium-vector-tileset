@@ -1,3 +1,6 @@
+import type {
+  PrimitiveCollection,
+} from 'cesium';
 import type { ImageAtlas, ImagePosition } from '../../assets/image-atlas';
 import type { StyleImages } from '../../assets/style-images';
 import type { CollisionBoxArray } from '../../data/array-types.g';
@@ -7,39 +10,32 @@ import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { SymbolPrimitiveGeometry, SymbolTileGeometry } from './symbol-geometry';
+import type { SymbolGpuResources, SymbolHalf } from './symbol-gpu-resources';
 import type { PlacementView, SymbolTileSelection } from './symbol-placement';
 import type { SymbolPlacementBatch, SymbolPlacementGeneration, SymbolPlacementPass } from './symbol-placement-pass';
 import {
-  BoundingSphere,
   Cartesian2,
   Cartesian4,
   Color,
-  ComponentDatatype,
-  Geometry,
-  GeometryAttribute,
-  GeometryInstance,
-  GeometryInstanceAttribute,
   Material,
-  MaterialAppearance,
   PixelFormat,
-  Primitive,
-  PrimitiveCollection,
-  PrimitiveType,
 } from 'cesium';
 import {
-  atlasLayoutHash,
+  atlasLayoutKey,
   SharedAtlasTextures,
 } from '../../assets/shared-atlas-textures';
 import { SymbolBucket } from '../../data/bucket-runtime';
 import { geometryBytes } from '../geometry/geometry-bytes';
-import { registerDrawBatch } from '../scene/draw-batch';
 import { RetiredPool } from '../scene/retired-pool';
 import { MinimumProgressBudget } from '../scene/scene-frame-budget';
 import { constantValue, straightAlphaColor } from '../vector/feature-attributes';
 import { symbolBucketGeometry } from './symbol-geometry';
-import { symbolMercatorDelta, symbolMercatorPosition } from './symbol-perspective';
-import { INVALID_LINE_ANGLE, SymbolCollisionIndex, SymbolProjectionContext, updateLineSymbolGeometry } from './symbol-placement';
+import { mergeSymbolHalves, symbolGeometry } from './symbol-gpu-resources';
+import { SymbolCollisionIndex, SymbolProjectionContext, updateLineSymbolGeometry } from './symbol-placement';
 import { copyPlacementView, samePlacementView, SymbolPlacementScope } from './symbol-placement-pass';
+
+export type { MergedSymbolCollections, SymbolGpuResources, SymbolHalf } from './symbol-gpu-resources';
+export { mergeSymbolHalves, SYMBOL_FADE_ATTRIBUTE, SYMBOL_VERTEX_SHADER, SymbolAppearance } from './symbol-gpu-resources';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
@@ -48,7 +44,7 @@ export type SymbolPlacementWork = (operation: (budget: Budget) => void) => void;
 
 /** The evaluated value of a constant symbol paint colour. */
 function symbolColor(layer: SymbolStyleLayer, property: string): Color {
-  const value = constantValue(layer as unknown as { paint: { get: (property: string) => unknown } }, property) as { r: number; g: number; b: number; a: number } | undefined;
+  const value = constantValue(layer, property) as { r: number; g: number; b: number; a: number } | undefined;
   if (!value) {
     return Color.WHITE.clone();
   }
@@ -61,12 +57,12 @@ function symbolColor(layer: SymbolStyleLayer, property: string): Color {
  */
 function symbolHalo(layer: SymbolStyleLayer, part: 'text' | 'icon' = 'text'): TextHalo | undefined {
   const prefix = part === 'text' ? 'text-halo' : 'icon-halo';
-  const widthValue = constantValue(layer as unknown as { paint: { get: (property: string) => unknown } }, `${prefix}-width`);
+  const widthValue = constantValue(layer, `${prefix}-width`);
   const width = typeof widthValue === 'number' && Number.isFinite(widthValue) ? widthValue : 0;
   if (width <= 0) {
     return undefined;
   }
-  const blurValue = constantValue(layer as unknown as { paint: { get: (property: string) => unknown } }, `${prefix}-blur`);
+  const blurValue = constantValue(layer, `${prefix}-blur`);
   const blur = typeof blurValue === 'number' && Number.isFinite(blurValue) ? blurValue : 0;
   return {
     color: symbolColor(layer, `${prefix}-color`),
@@ -74,230 +70,6 @@ function symbolHalo(layer: SymbolStyleLayer, part: 'text' | 'icon' = 'text'): Te
     blur,
   };
 }
-
-/** Project symbol corners in their actual viewport or Mercator label plane. */
-export const SYMBOL_VERTEX_SHADER = `
-uniform float u_camera_zoom;
-uniform float u_symbol_camera_distance;
-uniform float u_symbol_orthographic;
-uniform float u_symbol_mercator_projection;
-in vec3 position3DHigh;
-in vec3 position3DLow;
-in vec2 a_offset;
-in vec2 a_pxoffset;
-in vec2 a_minfontscale;
-in vec2 a_tex;
-in float a_size;
-in vec4 a_size_max;
-in vec3 a_size_zoom;
-in vec4 a_color;
-in vec4 a_halo_color;
-in float a_opacity;
-in vec3 a_dynamic;
-// Per-instance tile fade (see SYMBOL_FADE_ATTRIBUTE): Cesium injects the
-// batch-table lookup for every custom instance attribute, so a whole tile
-// fades without touching vertex buffers, materials, or the shared atlas
-// textures. batchId is already declared below for the injected pick code.
-in float batchId;
-
-out vec2 v_tex;
-out vec3 v_data;
-out float v_is_sdf;
-out vec4 v_color;
-out vec4 v_halo_color;
-// Cesium's MaterialAppearance fragment shader reads these; the symbol shader
-// colours from v_tex, so only the names have to line up.
-out vec3 v_positionEC;
-out vec3 v_normalEC;
-out vec2 v_st;
-
-// Exact WGS84 displacement of a ground point by east/south Mercator metres.
-// Difference formulas retain small corner offsets beside a 6-million-metre
-// ECEF anchor, and work with scene3DOnly without projected attributes.
-vec3 symbolGroundDeltaEC(vec2 metres)
-{
-    vec3 world = position3DHigh + position3DLow;
-    vec3 normal = czm_geodeticSurfaceNormal(world, vec3(0.0),
-        vec3(2.458172257647332e-14, 2.458172257647332e-14, 2.4747391015697002e-14));
-    float cosine = length(normal.xy);
-    vec3 radial = vec3(normal.xy / max(cosine, 1.0e-12), 0.0);
-    vec3 east = vec3(-radial.y, radial.x, 0.0);
-    float t = tanh(-metres.y / 6378137.0);
-    float root = sqrt(max(0.0, 1.0 - t * t));
-    float denominator = 1.0 + normal.z * t;
-    float deltaSin = cosine * cosine * t / denominator;
-    float deltaCos = cosine * (-t * t / (root + 1.0) - normal.z * t) / denominator;
-    float newSin = normal.z + deltaSin;
-    float newCos = cosine + deltaCos;
-    float eccentricitySquared = 0.0066943799901413165;
-    float oldDenominator = 1.0 - eccentricitySquared * normal.z * normal.z;
-    float newDenominator = 1.0 - eccentricitySquared * newSin * newSin;
-    float oldRoot = sqrt(oldDenominator);
-    float newRoot = sqrt(newDenominator);
-    float primeVertical = 6378137.0 / newRoot;
-    float deltaPrimeVertical = 6378137.0 * eccentricitySquared
-        * (2.0 * normal.z * deltaSin + deltaSin * deltaSin)
-        / (oldRoot * newRoot * (oldRoot + newRoot));
-    float radius = primeVertical * newCos;
-    float deltaRadius = deltaPrimeVertical * cosine + primeVertical * deltaCos;
-    float longitudeDelta = metres.x / 6378137.0;
-    float halfSin = sin(longitudeDelta * 0.5);
-    vec3 delta = radial * (deltaRadius - radius * 2.0 * halfSin * halfSin)
-        + east * radius * sin(longitudeDelta)
-        + vec3(0.0, 0.0, (1.0 - eccentricitySquared)
-            * (deltaPrimeVertical * normal.z + primeVertical * deltaSin));
-    vec3 delta3DEC = (czm_modelViewRelativeToEye * vec4(delta, 0.0)).xyz;
-    float latitudeDelta = atan(deltaSin * cosine - deltaCos * normal.z,
-        newSin * normal.z + newCos * cosine);
-    float north = u_symbol_mercator_projection > 0.5 ? -metres.y : latitudeDelta * 6378137.0;
-    vec3 delta2DEC = (czm_modelViewRelativeToEye * vec4(0.0, metres.x, north, 0.0)).xyz;
-    return mix(delta2DEC, delta3DEC, czm_morphTime);
-}
-
-void main()
-{
-    // Batch bounds can span both sides of the horizon. Test each ECEF anchor
-    // against the ellipsoid even when depth testing is disabled for symbols.
-    // Use the live camera so an older collision generation cannot show a
-    // far-side symbol while the next placement is still being computed.
-    if (czm_sceneMode == czm_sceneMode3D)
-    {
-        vec3 camera = czm_viewerPositionWC * czm_ellipsoidInverseRadii;
-        vec3 anchor = (position3DHigh + position3DLow) * czm_ellipsoidInverseRadii;
-        vec3 toAnchor = anchor - camera;
-        float limbSquared = dot(camera, camera) - 1.0;
-        float towardCamera = -dot(toAnchor, camera);
-        bool occluded = limbSquared < 0.0
-            ? towardCamera > 0.0
-            : towardCamera > limbSquared
-                && towardCamera * towardCamera > limbSquared * dot(toAnchor, toAnchor);
-        if (occluded)
-        {
-            gl_Position = vec4(-2.0, -2.0, -2.0, 1.0);
-            return;
-        }
-    }
-    // Cesium injects projected position2DHigh/Low only when the appearance
-    // calls czm_computePosition. Reading the ECEF attributes directly makes
-    // symbols disappear in 2D and Columbus View.
-    vec4 eyeRelative = czm_computePosition();
-    vec4 positionEC = czm_modelViewRelativeToEye * eyeRelative;
-    vec4 clip = czm_projection * positionEC;
-
-    // a_size packs (size * 128) << 2 | isSdf << 1 | isText. MapLibre's
-    // symbol_icon.vertex scales text offsets by size / 24 (they are expressed
-    // in the 24px glyph em) and icon offsets by size directly (they are
-    // already in sprite pixels); dividing icons by 24 rendered every icon at
-    // 1/24th of its size. The kind flag rides in the vertex because Cesium's
-    // material uniform map only reaches the fragment stage.
-    float packed = a_size;
-    float sizeMin = floor(packed / 4.0);
-    float rest = packed - 4.0 * sizeMin;
-    float isSdf = rest >= 2.0 ? 1.0 : 0.0;
-    float isText = rest - 2.0 * isSdf;
-    // A composite size packs both zoom stops (a_data.z/a_data.w) and this
-    // tile's stop range; interpolate to the live camera zoom instead of
-    // freezing at the stop the tile was baked at. Every other size kind
-    // stores one value twice, so the mix leaves it untouched.
-    float zoomT = a_size_zoom.y > a_size_zoom.x
-        ? clamp((u_camera_zoom - a_size_zoom.x) / (a_size_zoom.y - a_size_zoom.x), 0.0, 1.0)
-        : 0.0;
-    float size = mix(sizeMin, max(a_size_max.x, sizeMin), zoomT) / 128.0;
-    bool mapPitch = a_size_zoom.z == 2.0 || a_size_zoom.z == 4.0;
-    vec4 workerClip = clip;
-    if (any(notEqual(a_size_max.yz, vec2(0.0)))) {
-        workerClip += czm_projection * vec4(symbolGroundDeltaEC(a_size_max.yz), 0.0);
-    }
-    if (a_size_zoom.z > 0.5 && a_size_zoom.z < 2.5 && u_symbol_orthographic < 0.5) {
-        if (!(u_symbol_camera_distance > 0.0) || !(workerClip.w > 0.0)) {
-            gl_Position = vec4(-2.0, -2.0, -2.0, 1.0);
-            return;
-        }
-        float distanceRatio = mapPitch ? workerClip.w / u_symbol_camera_distance
-            : u_symbol_camera_distance / workerClip.w;
-        size *= clamp(0.5 + 0.5 * distanceRatio, 0.0, 4.0);
-    }
-
-    // Collision writes per-vertex visibility into a_opacity; the tile fade
-    // scales it per instance, so a leaving tile's symbols ramp out together
-    // while hidden ones stay culled (MapLibre's symbol hold semantics).
-    float effectiveOpacity = a_opacity * czm_batchTable_fade(batchId);
-    // Failed live line projection uses a reserved angle independently of the
-    // last complete collision layout, so a glyph cannot detach from its road.
-    if (effectiveOpacity < 0.1 || a_dynamic.z == ${INVALID_LINE_ANGLE.toFixed(1)})
-    {
-        gl_Position = vec4(-2.0, -2.0, -2.0, 1.0);
-        return;
-    }
-
-    float fontScale = isText > 0.5 ? size / 24.0 : size;
-    // MapLibre offsets are y-down (tile pixels grow south, matching screen
-    // pixels from the top). NDC y grows up, so the combined offset is flipped
-    // to y-up first; the matrix below is then MapLibre's R_down form, which
-    // composes with the flip (F * R_down * F = R_ydown) so the on-screen
-    // rotation equals MapLibre's effective rotation R_ydown(phi) applied to
-    // the tile-space segment angle phi: glyph-east lands on the line
-    // direction without mirroring (the previous R_up form mirrored every
-    // rotated glyph across its baseline). Stretchable icons (icon-text-fit)
-    // contribute a_pixeloffset and a per-vertex minimum scale the same way
-    // symbol_icon.vertex does (max per component).
-    vec2 effectiveScale = max(a_minfontscale, vec2(fontScale));
-    vec2 combined = a_offset * effectiveScale + a_pxoffset;
-    combined.y = -combined.y;
-    vec2 offsetPx = combined * czm_pixelRatio;
-    // The dynamic channel places each line glyph on its projected path each
-    // frame; point symbols leave it at zero.
-    float totalAngle = a_dynamic.z;
-    float angleCos = cos(totalAngle);
-    float angleSin = sin(totalAngle);
-    offsetPx = mat2(angleCos, -angleSin, angleSin, angleCos) * offsetPx;
-
-    gl_Position = clip;
-    if (mapPitch) {
-        float metresPerPixel = 40075016.68557849 / (512.0 * exp2(u_camera_zoom));
-        vec2 metres = a_dynamic.xy + vec2(offsetPx.x, -offsetPx.y) / czm_pixelRatio * metresPerPixel;
-        if (a_size_max.w == 1.0) {
-            // Inverse ground-to-eye XY columns, independently normalized as
-            // MapLibre's viewport-rotated, map-pitched label plane requires.
-            vec3 eastEC = symbolGroundDeltaEC(vec2(1.0, 0.0));
-            vec3 southEC = symbolGroundDeltaEC(vec2(0.0, 1.0));
-            vec2 east = vec2(-southEC.y, eastEC.y);
-            vec2 south = vec2(-southEC.x, eastEC.x);
-            float eastLength = length(east);
-            float southLength = length(south);
-            east = eastLength < 1.0e-9 ? vec2(0.0) : east / eastLength;
-            south = southLength < 1.0e-9 ? vec2(0.0) : south / southLength;
-            metres = east * metres.x + south * metres.y;
-        }
-        gl_Position += czm_projection * vec4(symbolGroundDeltaEC(metres), 0.0);
-    } else {
-        gl_Position.xy += ((offsetPx + vec2(a_dynamic.x, -a_dynamic.y)) / czm_viewport.zw) * clip.w * 2.0;
-    }
-
-    v_tex = a_tex;
-    // MapLibre's SDF gamma is final clip W divided by cos(pitch)*D.
-    // The ordinary viewport coordinate matrix has W=1. Native's clip units
-    // differ, so normalize only the map label plane in matching world units.
-    float gammaScale = 1.0;
-    if (mapPitch && u_symbol_orthographic < 0.5) {
-        vec3 cameraNormal = czm_geodeticSurfaceNormal(czm_viewerPositionWC, vec3(0.0),
-            vec3(2.458172257647332e-14, 2.458172257647332e-14, 2.4747391015697002e-14));
-        float cosine3D = abs((czm_viewRotation * cameraNormal).z);
-        float cosine2D = abs((czm_modelViewRelativeToEye * vec4(1.0, 0.0, 0.0, 0.0)).z);
-        float gammaDistance = mix(cosine2D, cosine3D, czm_morphTime) * u_symbol_camera_distance;
-        // At an exactly horizontal direction the mathematical gamma limit
-        // is infinite. Encode that limit rather than generate NaN coverage.
-        gammaScale = gammaDistance > 0.0 ? gl_Position.w / gammaDistance : -1.0;
-    }
-    v_data = vec3(gammaScale, size, effectiveOpacity);
-    v_is_sdf = isSdf;
-    v_color = a_color;
-    v_halo_color = a_halo_color;
-    v_positionEC = positionEC.xyz;
-    v_normalEC = vec3(0.0, 0.0, 1.0);
-    v_st = vec2(0.0);
-}
-`;
 
 /**
  * The symbol fragment shader as a Cesium material: it samples the glyph/icon
@@ -411,22 +183,6 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
 }
 `;
 
-export class SymbolAppearance extends MaterialAppearance {
-  constructor(options: { translucent: boolean; material: Material }) {
-    super({
-      flat: true,
-      translucent: options.translucent,
-      material: options.material,
-      vertexShaderSource: SYMBOL_VERTEX_SHADER,
-      renderState: {
-        cull: { enabled: false },
-        depthTest: { enabled: false },
-        depthMask: false,
-      },
-    });
-  }
-}
-
 interface AtlasSource {
   canvas: HTMLCanvasElement;
   width: number;
@@ -480,7 +236,7 @@ export function iconAtlasSource(data: Uint8Array | Uint8ClampedArray, width: num
  * not affect sampling. Image updates must advance the sprite revision.
  */
 export function iconAtlasShareKey(positions: Record<string, ImagePosition>): string {
-  return `icon/${atlasLayoutHash(positions)}`;
+  return `icon/${atlasLayoutKey(positions)}`;
 }
 
 function writeAtlasCanvas(data: Uint8Array | Uint8ClampedArray, width: number, height: number, gray: boolean, shareKey: string): AtlasSource {
@@ -491,26 +247,16 @@ function writeAtlasCanvas(data: Uint8Array | Uint8ClampedArray, width: number, h
   if (!context) {
     throw new Error('A 2D canvas context is required to upload the glyph atlas');
   }
-  const rgba = gray
-    ? expandGrayToRgba(data, width, height)
-    : new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength);
-  context.putImageData(new ImageData(rgba as unknown as ImageDataArray, width, height), 0, 0);
-  // Debug tag for e2e probes (kind + dims stay readable after sharing; the
-  // GPU texture adopted later carries width/height instead).
-  (canvas as unknown as { __dbgTag?: string }).__dbgTag = `${shareKey.split('/')[0]}:${width}x${height}`;
-  return { canvas, width, height, shareKey };
-}
-
-function expandGrayToRgba(data: Uint8Array | Uint8ClampedArray, width: number, height: number): Uint8ClampedArray {
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  for (let i = 0; i < width * height; i++) {
-    const value = data[i];
-    rgba[i * 4] = value;
-    rgba[i * 4 + 1] = value;
-    rgba[i * 4 + 2] = value;
-    rgba[i * 4 + 3] = value;
+  const image = context.createImageData(width, height);
+  if (gray) {
+    for (let index = 0; index < data.length; index++)
+      image.data.fill(data[index], index * 4, index * 4 + 4);
   }
-  return rgba;
+  else {
+    image.data.set(data);
+  }
+  context.putImageData(image, 0, 0);
+  return { canvas, width, height, shareKey };
 }
 
 interface TextHalo {
@@ -574,165 +320,6 @@ function symbolMaterial(
   return material;
 }
 
-/** Worst-case metres a screen-space label quad can reach per pixel of offset. */
-const SYMBOL_BOUNDS_PADDING_M_PER_PX = 40;
-
-/**
- * Label quads are expanded in window space, so their world-space bounds are
- * just the anchors - but a label is still drawn while its anchor is off screen
- * by up to the quad's on-screen reach. Pad the sphere by the largest quad so
- * tiles near the viewport edge are not culled while their labels are visible.
- */
-function paddedBounds(geometry: SymbolPrimitiveGeometry): BoundingSphere | undefined {
-  const sphere = BoundingSphere.fromVertices(geometry.positions);
-  if (!sphere) {
-    return undefined;
-  }
-  // Dynamic line glyphs can move to another segment of the worker path as
-  // zoom and pitch change; the baked glyph anchors alone are not their bounds.
-  for (const instance of geometry.instances) {
-    if (instance.line) {
-      BoundingSphere.union(sphere, BoundingSphere.fromVertices(instance.line.pathECEF), sphere);
-    }
-  }
-  let reach = 0;
-  for (let i = 0; i < geometry.offsets.length; i += 2) {
-    // Stretchable icons shift quads by a_pxoffset; include it so edge tiles
-    // are not culled while their shifted labels are still visible.
-    const px = geometry.pxoffsets ? Math.abs(geometry.pxoffsets[i]) + Math.abs(geometry.pxoffsets[i + 1]) : 0;
-    reach = Math.max(reach, Math.abs(geometry.offsets[i]), Math.abs(geometry.offsets[i + 1]), px);
-  }
-  sphere.radius += reach * SYMBOL_BOUNDS_PADDING_M_PER_PX;
-  return sphere;
-}
-
-/**
- * A batch whose attributes disagree on the vertex count would make Cesium's
- * Geometry fail (and stop the whole scene render), so such a batch is dropped
- * instead of submitted.
- */
-function batchIsValid(geometry: SymbolPrimitiveGeometry): boolean {
-  const n = geometry.positions.length / 3;
-  return Math.floor(n) === n
-    && n > 0
-    && geometry.offsets.length === n * 2
-    && geometry.pxoffsets.length === n * 2
-    && geometry.minfontscales.length === n * 2
-    && geometry.tex.length === n * 2
-    && geometry.sizes.length === n
-    && geometry.dynamics.length === n * 3
-    && geometry.opacities.length === n;
-}
-
-function symbolGeometry(geometry: SymbolPrimitiveGeometry, indices: Uint32Array): Geometry | undefined {
-  if (!batchIsValid(geometry)) {
-    return undefined;
-  }
-  const sphere = paddedBounds(geometry);
-  // Native adds four position attributes and batchId. Keep the complete
-  // shader within WebGL's 16 slots by sharing the zoom attribute's free lane.
-  const sizeZooms = new Float32Array(geometry.positions.length);
-  for (let index = 0; index < geometry.positions.length / 3; index++) {
-    sizeZooms[index * 3] = geometry.sizeZooms[index * 2];
-    sizeZooms[index * 3 + 1] = geometry.sizeZooms[index * 2 + 1];
-    sizeZooms[index * 3 + 2] = geometry.mapPitch ? (geometry.sizePerspective ? 2 : 4) : geometry.viewportPerspective ? (geometry.sizePerspective ? 1 : 3) : 0;
-  }
-  // The ratio belongs to the worker label anchor, not each baked glyph.
-  // Store its label-plane delta in the size attribute's unused lanes.
-  const sizeAnchors = new Float32Array(geometry.sizesMax.length * 4);
-  for (let index = 0; index < geometry.sizesMax.length; index++) {
-    sizeAnchors[index * 4] = geometry.sizesMax[index];
-    sizeAnchors[index * 4 + 3] = geometry.pointMapRotation === 'viewport' ? 1 : 0;
-  }
-  for (const instance of geometry.instances) {
-    if (!instance.line || (!geometry.viewportPerspective && !geometry.mapPitch))
-      continue;
-    const worker = symbolMercatorPosition(instance.line.anchorECEF.x, instance.line.anchorECEF.y, instance.line.anchorECEF.z);
-    if (!worker)
-      continue;
-    for (let index = instance.vertexStart; index < instance.vertexStart + instance.vertexCount; index++) {
-      const position = index * 3;
-      const glyph = symbolMercatorPosition(geometry.positions[position], geometry.positions[position + 1], geometry.positions[position + 2]);
-      if (glyph) {
-        sizeAnchors[index * 4 + 1] = symbolMercatorDelta(worker.x, glyph.x);
-        sizeAnchors[index * 4 + 2] = worker.y - glyph.y;
-      }
-    }
-  }
-  return new Geometry({
-    attributes: {
-      // Emitted DOUBLE on purpose: Cesium's pipeline encodes it into the
-      // position3DHigh/position3DLow pair the vertex shader reads.
-      position: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.DOUBLE,
-        componentsPerAttribute: 3,
-        values: geometry.positions,
-      }),
-      a_offset: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
-        values: geometry.offsets,
-      }),
-      a_pxoffset: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
-        values: geometry.pxoffsets,
-      }),
-      a_minfontscale: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
-        values: geometry.minfontscales,
-      }),
-      a_tex: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
-        values: geometry.tex,
-      }),
-      a_size: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 1,
-        values: geometry.sizes,
-      }),
-      a_size_max: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 4,
-        values: sizeAnchors,
-      }),
-      a_size_zoom: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 3,
-        values: sizeZooms,
-      }),
-      a_color: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 4,
-        values: geometry.colors,
-      }),
-      a_halo_color: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 4,
-        values: geometry.halos,
-      }),
-      a_opacity: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 1,
-        values: geometry.opacities,
-      }),
-      a_dynamic: new GeometryAttribute({
-        componentDatatype: ComponentDatatype.FLOAT,
-        componentsPerAttribute: 3,
-        values: geometry.dynamics,
-      }),
-    },
-    indices,
-    // Point anchors become quads in the vertex shader. Cesium's physical
-    // triangle date-line splitter would interpolate their coincident ECEF
-    // vertices and collapse the distinct pixel corners.
-    primitiveType: PrimitiveType.POINTS,
-    boundingSphere: sphere,
-  } as never);
-}
-
 export interface SymbolCollectionOptions {
   tileId: string;
   layerId: string;
@@ -752,242 +339,6 @@ export interface SymbolCollectionOptions {
    */
   textMaterial?: Material;
   iconMaterial?: Material;
-}
-
-/**
- * One drawable half of a symbol layer: baked geometry plus the shared
- * material sampling its atlas. Halves merge within a style layer at commit
- * (see mergeSymbolHalves), retaining a reorderable draw batch per layer.
- * Each layer part stays one Geometry; line glyphs move through a dynamic
- * vertex channel, so they do not create a Primitive per label.
- */
-export interface SymbolHalf {
-  layerId: string;
-  part: 'text' | 'icon';
-  geometry: Geometry;
-  material: Material;
-  opacity?: {
-    geometry: SymbolPrimitiveGeometry;
-    /** Vertex offset after Cesium combines all halves sharing a material. */
-    target?: { primitive: Primitive; vertexStart: number };
-  };
-  dynamic?: {
-    geometry: SymbolPrimitiveGeometry;
-    dirty: boolean;
-    target?: { primitive: Primitive; vertexStart: number };
-  };
-}
-
-/** One SymbolAppearance per shared material (stateless template, safe to share across primitives). */
-const symbolAppearances = new WeakMap<Material, SymbolAppearance>();
-
-function appearanceFor(material: Material): SymbolAppearance {
-  let appearance = symbolAppearances.get(material);
-  if (!appearance) {
-    appearance = new SymbolAppearance({ translucent: true, material });
-    symbolAppearances.set(material, appearance);
-  }
-  return appearance;
-}
-
-/**
- * Per-instance fade attribute name. Every merged instance carries it (Cesium
- * only wires attributes common to all instances of a Primitive), so the
- * vertex shader's `czm_batchTable_fade(batchId)` lookup always compiles and
- * the tile fade ticks through `Primitive.getGeometryInstanceAttributes`
- * without rebuilding geometry, cloning materials, or re-uploading atlases.
- */
-export const SYMBOL_FADE_ATTRIBUTE = 'fade';
-
-/** One merged Primitive plus the instance ids its fade ticks address. */
-export interface MergedSymbolPrimitive {
-  primitive: Primitive;
-  /** The exact id objects handed to Cesium (looked up by identity). */
-  instanceIds: unknown[];
-}
-
-/** Merge result: the scene collection plus the fade-addressable primitives. */
-export interface MergedSymbolCollections {
-  collection: PrimitiveCollection;
-  primitives: MergedSymbolPrimitive[];
-}
-
-/** Keep Cesium's point-anchor pipeline and draw the shader-expanded quads. */
-class SymbolPrimitive extends Primitive {
-  private readonly _halves: SymbolHalf[] = [];
-
-  private readonly _halfVisibility = new Map<SymbolHalf, boolean>();
-
-  private _visibleHalves = 0;
-
-  addHalf(half: SymbolHalf): void {
-    this._halves.push(half);
-    this.syncHalfVisibility(half);
-  }
-
-  /** Only dirty opacity synchronization observes instance-sized CPU arrays. */
-  syncHalfVisibility(half: SymbolHalf): void {
-    const visible = !half.opacity || half.opacity.geometry.opacities.some(opacity => opacity > 0);
-    const previous = this._halfVisibility.get(half) ?? false;
-    if (visible !== previous) {
-      this._visibleHalves += visible ? 1 : -1;
-    }
-    this._halfVisibility.set(half, visible);
-  }
-
-  update(frameState?: { commandList: Array<{ owner?: object; primitiveType: number }> }): void {
-    // Empty owners still prepare their VA and settle Native ready/afterRender.
-    // Dirty streams and fade setters retain the ordinary Native update path.
-    const batchTable = (this as Primitive & { _batchTable?: { _batchValuesDirty: boolean } })._batchTable;
-    if (this.ready && this._visibleHalves === 0 && !batchTable?._batchValuesDirty
-      && !this._halves.some(half => half.opacity?.geometry.opacityDirty || half.dynamic?.dirty)) {
-      return;
-    }
-    const first = frameState.commandList.length;
-    Reflect.apply(Primitive.prototype.update, this, [frameState]);
-    for (let i = first; i < frameState.commandList.length; i++) {
-      const command = frameState.commandList[i];
-      if (command.owner === this) {
-        command.primitiveType = PrimitiveType.TRIANGLES;
-      }
-    }
-  }
-}
-
-/**
- * Merge halves by style layer and material. Material/appearance and atlas
- * textures are still shared, while every Primitive remains a reorderable
- * unit in painter order. Each instance keeps its per-layer pick identity.
- */
-export function mergeSymbolHalves(tileId: string, halves: readonly SymbolHalf[]): MergedSymbolCollections | undefined {
-  interface Group {
-    instances: GeometryInstance[];
-    halves: Array<{ half: SymbolHalf; vertexStart: number }>;
-    vertexCount: number;
-  }
-  const byLayer = new Map<string, Map<Material, Group>>();
-  for (const half of halves) {
-    if (half.material.isDestroyed()) {
-      continue;
-    }
-    let byMaterial = byLayer.get(half.layerId);
-    if (!byMaterial) {
-      byMaterial = new Map();
-      byLayer.set(half.layerId, byMaterial);
-    }
-    let group = byMaterial.get(half.material);
-    if (!group) {
-      group = { instances: [], halves: [], vertexCount: 0 };
-      byMaterial.set(half.material, group);
-    }
-    const instanceAttribute = (value: number | number[], components: number): GeometryInstanceAttribute => new GeometryInstanceAttribute({
-      componentDatatype: ComponentDatatype.FLOAT,
-      componentsPerAttribute: components,
-      value: Array.isArray(value) ? value : [value],
-    });
-    const instance = new GeometryInstance({
-      geometry: half.geometry,
-      id: { type: 'symbol', tileId, layerId: half.layerId, part: half.part },
-      attributes: {
-        [SYMBOL_FADE_ATTRIBUTE]: instanceAttribute(1, 1),
-      },
-    });
-    group.instances.push(instance);
-    group.halves.push({ half, vertexStart: group.vertexCount });
-    group.vertexCount += half.opacity?.geometry.opacities.length ?? 0;
-  }
-  if (byLayer.size === 0) {
-    return undefined;
-  }
-  const collection = new PrimitiveCollection();
-  const primitives: MergedSymbolPrimitive[] = [];
-  for (const [layerId, byMaterial] of byLayer) {
-    for (const [material, group] of byMaterial) {
-      const primitive = new SymbolPrimitive({
-        // An array, not a single instance: Cesium only adds the batchId
-        // attribute (which its injected pick code references) when it combines
-        // a list of instances.
-        geometryInstances: group.instances,
-        appearance: appearanceFor(material),
-        allowPicking: false,
-        asynchronous: false,
-        releaseGeometryInstances: true,
-      });
-      registerDrawBatch(primitive, { layerId, tileId, kind: 'symbol' });
-      collection.add(primitive);
-      primitives.push({ primitive, instanceIds: group.instances.map(instance => instance.id) });
-      for (const { half, vertexStart } of group.halves) {
-        primitive.addHalf(half);
-        if (half.opacity) {
-          half.opacity.target = { primitive, vertexStart };
-        }
-        if (half.dynamic) {
-          half.dynamic.target = { primitive, vertexStart };
-        }
-      }
-    }
-  }
-  return { collection, primitives };
-}
-
-/** Cesium's combined geometry keeps non-interleaved float attributes in the first VA. */
-function uploadSymbolAttribute(
-  primitive: Primitive,
-  name: 'a_opacity' | 'a_dynamic',
-  values: Float32Array,
-  vertexStart: number,
-  components: number,
-): boolean {
-  const gpu = primitive as Primitive & {
-    _va: Array<{ _attributes: Array<{
-      index: number;
-      vertexBuffer?: {
-        copyFromArrayView: (values: Float32Array, offsetInBytes: number) => void;
-      };
-    }>; }>;
-    _attributeLocations: Record<string, number>;
-  };
-  // Cesium creates the VA before setting Primitive.ready in afterRender.
-  // During that interval the CPU Geometry has already been copied, so a
-  // collision flip must update the live VBO even though `ready` is false.
-  if (!gpu._va?.length) {
-    return false;
-  }
-  const attribute = gpu._va[0]?._attributes.find(item => item.index === gpu._attributeLocations[name]);
-  if (gpu._va.length !== 1 || !attribute?.vertexBuffer) {
-    throw new Error(`Cesium symbol ${name} buffer has an unsupported vertex layout`);
-  }
-  attribute.vertexBuffer.copyFromArrayView(values, vertexStart * components * Float32Array.BYTES_PER_ELEMENT);
-  // A pre-ready Primitive can still recreate/fill its VA during the next
-  // update. Keep one final upload pending until Cesium marks it ready.
-  return primitive.ready;
-}
-
-/** Copy changed collision opacity into Cesium's persistent VBO. */
-export function syncHalfOpacity(half: SymbolHalf): void {
-  const opacity = half.opacity;
-  if (!opacity) {
-    return;
-  }
-  const geometry = opacity.geometry;
-  if (geometry.opacityDirty && opacity.target) {
-    const uploaded = uploadSymbolAttribute(opacity.target.primitive, 'a_opacity', geometry.opacities, opacity.target.vertexStart, 1);
-    if (uploaded && opacity.target.primitive instanceof SymbolPrimitive) {
-      opacity.target.primitive.syncHalfVisibility(half);
-    }
-    geometry.opacityDirty = !uploaded;
-  }
-}
-
-/** Stream one layer part's camera-space glyph positions and rotations. */
-export function syncHalfDynamic(half: SymbolHalf): void {
-  const dynamic = half.dynamic;
-  if (!dynamic?.dirty) {
-    return;
-  }
-  if (dynamic.target) {
-    dynamic.dirty = !uploadSymbolAttribute(dynamic.target.primitive, 'a_dynamic', dynamic.geometry.dynamics, dynamic.target.vertexStart, 3);
-  }
 }
 
 /**
@@ -1043,7 +394,7 @@ export function buildSymbolHalves(options: SymbolCollectionOptions): SymbolHalf[
  * The evaluated value of a constant symbol opacity paint.
  */
 function symbolOpacity(layer: SymbolStyleLayer, property: string): number {
-  const value = constantValue(layer as unknown as { paint: { get: (property: string) => unknown } }, property);
+  const value = constantValue(layer, property);
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
 }
 /**
@@ -1107,7 +458,7 @@ interface SymbolTileEntry {
    * instance ids handed to Cesium plus their Primitives, so the tile fade
    * ticks instance attributes without rebuilding (see tickFades).
    */
-  primitives: MergedSymbolPrimitive[];
+  primitives: SymbolGpuResources[];
   /** Parallel to batches: the style layer each batch was built from. */
   layerIds: string[];
   key: string;
@@ -2001,7 +1352,7 @@ export class SymbolTileRenderer {
    * @internal
    */
   private _syncOpacity(half: SymbolHalf): void {
-    syncHalfOpacity(half);
+    half.opacity?.target?.primitive.syncOpacity(half);
     if (half.opacity?.geometry.opacityDirty) {
       this._pendingOpacityHalves.add(half);
     }
@@ -2014,7 +1365,7 @@ export class SymbolTileRenderer {
    * @internal
    */
   private _syncDynamic(half: SymbolHalf): void {
-    syncHalfDynamic(half);
+    half.dynamic?.target?.primitive.syncDynamic(half);
     if (half.dynamic?.dirty) {
       this._pendingDynamicHalves.add(half);
     }
@@ -2136,14 +1487,8 @@ export class SymbolTileRenderer {
       this._retainMaterial(material);
       replacements.set(previous, material);
     }
-    for (const half of entry.halves) {
-      half.material = replacements.get(half.material)!;
-    }
-    for (const { primitive } of entry.primitives) {
-      // Appearances are shared by material. Replace the public appearance
-      // rather than mutating a template still used by another generation.
-      primitive.appearance = appearanceFor(replacements.get(primitive.appearance.material)!);
-    }
+    for (const primitive of entry.primitives)
+      primitive.replaceMaterials(replacements);
     const previousMaterials = entry.materials;
     entry.materials = new Set(replacements.values());
     for (const material of previousMaterials) {
@@ -2402,9 +1747,10 @@ export class SymbolTileRenderer {
         const current = currentBatches.get(batch.entry)?.get(batch.index);
         return this._tiles.get(batch.tileId) === batch.entry && !!current && sameSymbolBatch(batch, current);
       })) {
-        this._commitPlacement(target.pass, target.batches, index =>
-          !separateVisibleScope || this._hiddenPlacementTiles.has(target.batches[index].tileId)
-          || this._visibleEntries.get(target.batches[index].tileId) !== target.batches[index].entry, projections, view);
+        const complete = target;
+        this._commitPlacement(complete.pass, complete.batches, index =>
+          !separateVisibleScope || this._hiddenPlacementTiles.has(complete.batches[index].tileId)
+          || this._visibleEntries.get(complete.batches[index].tileId) !== complete.batches[index].entry, projections, view);
         for (const batch of target.batches) {
           batch.entry.placed = true;
         }
@@ -2471,12 +1817,12 @@ export class SymbolTileRenderer {
     }
     for (const half of this._pendingOpacityHalves) {
       const primitive = half.opacity?.target?.primitive;
-      if (primitive && (primitive as Primitive & { _va: unknown[] })._va?.length > 0)
+      if (primitive?.canUpload)
         return true;
     }
     for (const half of this._pendingDynamicHalves) {
       const primitive = half.dynamic?.target?.primitive;
-      if (primitive && (primitive as Primitive & { _va: unknown[] })._va?.length > 0)
+      if (primitive?.canUpload)
         return true;
     }
     return false;
@@ -2545,28 +1891,11 @@ export class SymbolTileRenderer {
    */
   private _fadeTargets(entry: SymbolTileEntry): Array<{ set: (value: number) => void }> | undefined {
     const targets: Array<{ set: (value: number) => void }> = [];
-    for (const { primitive, instanceIds } of entry.primitives ?? []) {
-      const addressable = primitive as unknown as {
-        ready?: boolean;
-        getGeometryInstanceAttributes?: (id: unknown) => Record<string, unknown> | undefined;
-      };
-      if (!addressable.ready || typeof addressable.getGeometryInstanceAttributes !== 'function') {
+    for (const primitive of entry.primitives ?? []) {
+      const primitiveTargets = primitive.fadeTargets();
+      if (!primitiveTargets)
         return undefined;
-      }
-      for (const id of instanceIds) {
-        const attributes = addressable.getGeometryInstanceAttributes(id) as Record<string, unknown> | undefined;
-        if (!attributes) {
-          return undefined;
-        }
-        targets.push({
-          // Cesium's instance setter takes an array (length 1-4), not a
-          // scalar: a bare number falls through getAttributeValue and throws
-          // inside setBatchedAttribute on every tick.
-          set: (value: number) => {
-            attributes[SYMBOL_FADE_ATTRIBUTE] = [value];
-          },
-        });
-      }
+      targets.push(...primitiveTargets);
     }
     return targets;
   }

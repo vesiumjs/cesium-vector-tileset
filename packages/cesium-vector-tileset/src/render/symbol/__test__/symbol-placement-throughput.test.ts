@@ -142,6 +142,88 @@ function preparedPointBuild(tileId: string, material?: ReturnType<typeof buildSy
   return state;
 }
 
+describe('symbol stream resource lifetime', () => {
+  it('copies the latest collision and line state again after Native becomes ready', () => {
+    const renderer = new SymbolTileRenderer();
+    const state = preparedPointBuild('pending-streams');
+    const half = state.halves[0];
+    const geometry = half.opacity!.geometry;
+    half.dynamic = { geometry, dirty: true };
+    geometry.opacityDirty = true;
+    renderer.stepBuild(state, UNBOUNDED_BUDGET);
+    const owner = state.entry!.primitives[0];
+    const copies: Array<{ channel: string; values: number[] }> = [];
+    const buffer = (channel: string) => ({ copyFromArrayView: (values: Float32Array) => copies.push({ channel, values: Array.from(values) }) });
+    try {
+      owner.syncOpacity(half);
+      owner.syncDynamic(half);
+      expect(copies).toEqual([]);
+      expect(owner.canUpload).toBe(false);
+
+      const attributes = [{ index: 2, vertexBuffer: buffer('opacity') }, { index: 7, vertexBuffer: buffer('dynamic') }];
+      Object.assign(owner, {
+        _attributeLocations: { a_opacity: 2, a_dynamic: 7 },
+        _va: [{ numberOfAttributes: attributes.length, getAttribute: (index: number) => attributes[index], destroy: vi.fn() }],
+      });
+      owner.syncOpacity(half);
+      owner.syncDynamic(half);
+      expect(owner.canUpload).toBe(true);
+      expect(geometry.opacityDirty).toBe(true);
+      expect(half.dynamic.dirty).toBe(true);
+
+      geometry.opacities.fill(1);
+      geometry.dynamics.fill(3);
+      Object.assign(owner, { _ready: true });
+      owner.syncOpacity(half);
+      owner.syncDynamic(half);
+      expect(copies.slice(-2)).toEqual([
+        { channel: 'opacity', values: Array.from({ length: 4 }).fill(1) },
+        { channel: 'dynamic', values: Array.from({ length: 12 }).fill(3) },
+      ]);
+      expect(geometry.opacityDirty).toBe(false);
+      expect(half.dynamic.dirty).toBe(false);
+      owner.syncOpacity(half);
+      owner.syncDynamic(half);
+      expect(copies).toHaveLength(4);
+    }
+    finally {
+      renderer.releaseBuild(state);
+      renderer.removeAll();
+    }
+  });
+
+  it('releases only its own stream bindings when an older owner is destroyed', () => {
+    const renderer = new SymbolTileRenderer();
+    const state = preparedPointBuild('rebound-streams');
+    const half = state.halves[0];
+    const geometry = half.opacity!.geometry;
+    half.dynamic = { geometry, dirty: true };
+    geometry.opacityDirty = true;
+    renderer.stepBuild(state, UNBOUNDED_BUDGET);
+    const replacement = mergeSymbolHalves('replacement', state.halves)!;
+    try {
+      state.entry!.collections[0].destroy();
+      expect(half.opacity!.target?.primitive).toBe(replacement.primitives[0]);
+      expect(half.dynamic.target?.primitive).toBe(replacement.primitives[0]);
+      expect(geometry.opacityDirty).toBe(true);
+      expect(half.dynamic.dirty).toBe(true);
+
+      replacement.collection.destroy();
+      expect(half.opacity!.target).toBeUndefined();
+      expect(half.dynamic.target).toBeUndefined();
+      expect(geometry.opacityDirty).toBe(false);
+      expect(half.dynamic.dirty).toBe(false);
+      expect(half.material.isDestroyed()).toBe(false);
+    }
+    finally {
+      if (!replacement.collection.isDestroyed())
+        replacement.collection.destroy();
+      renderer.releaseBuild(state);
+      renderer.removeAll();
+    }
+  });
+});
+
 describe('uncommitted symbol resource ownership', () => {
   it('releases partially extracted material holds before a Native collection exists', () => {
     const renderer = new SymbolTileRenderer();
@@ -265,7 +347,7 @@ describe('symbol placement throughput through renderer updates', () => {
       renderer.update(VIEW, false);
       expect(visible()).toEqual([1, 1, 0]);
       const primitive = renderer.getTileCollections('returning')[0].get(0);
-      Object.assign(primitive, { _ready: true, _attributeLocations: { a_opacity: 0 }, _va: [{ _attributes: [{ index: 0, vertexBuffer: { copyFromArrayView: upload } }], destroy: vi.fn() }] });
+      Object.assign(primitive, { _ready: true, _attributeLocations: { a_opacity: 0 }, _va: [{ numberOfAttributes: 1, getAttribute: () => ({ index: 0, vertexBuffer: { copyFromArrayView: upload } }), destroy: vi.fn() }] });
       renderer.update(VIEW, false);
       expect(gpuVisible()).toEqual([1, 1, 0]);
       const offscreen = new Float64Array(VIEW.viewProjection);
@@ -317,7 +399,7 @@ describe('symbol placement throughput through renderer updates', () => {
       renderer.update(VIEW, false);
       expect(visible()).toEqual([1, 1, 0]);
       const primitive = renderer.getTileCollections('selected')[0].get(0);
-      Object.assign(primitive, { _ready: true, _attributeLocations: { a_opacity: 0 }, _va: [{ _attributes: [{ index: 0, vertexBuffer: { copyFromArrayView: upload } }], destroy: vi.fn() }] });
+      Object.assign(primitive, { _ready: true, _attributeLocations: { a_opacity: 0 }, _va: [{ numberOfAttributes: 1, getAttribute: () => ({ index: 0, vertexBuffer: { copyFromArrayView: upload } }), destroy: vi.fn() }] });
       renderer.update(VIEW, false);
       upload.mockClear();
       const projection = new Float64Array(VIEW.viewProjection);

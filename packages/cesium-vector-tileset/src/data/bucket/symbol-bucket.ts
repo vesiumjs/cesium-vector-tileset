@@ -15,11 +15,11 @@ import type {
 import { VectorTileFeature as MapboxVectorTileFeature } from '@mapbox/vector-tile';
 
 import { Formatted, ResolvedImage } from '@maplibre/maplibre-gl-style-spec';
-import { rtlWorkerPlugin } from '../../source/rtl-text-plugin-worker';
 import { EvaluationParameters } from '../../style/evaluation-parameters';
 import { getOverlapMode } from '../../style/style-layer/overlap-mode';
+import { getBidiGlyphDependencies } from '../../symbol/bidi';
 import { mergeLines } from '../../symbol/merge-lines';
-import { allowsVerticalWritingMode, stringContainsRTLText } from '../../symbol/script-detection';
+import { allowsVerticalWritingMode } from '../../symbol/script-detection';
 import { WritingMode } from '../../symbol/shaping';
 import { getSizeData, MAX_PACKED_SIZE } from '../../symbol/symbol-size';
 import { transformText } from '../../symbol/transform-text';
@@ -32,8 +32,8 @@ import { ProgramConfigurationSet } from '../program-configuration';
 
 export interface SymbolFeature {
   sortKey: number | void;
-  text: Formatted | void;
-  icon: ResolvedImage;
+  text?: Formatted;
+  icon?: ResolvedImage;
   index: number;
   sourceLayerIndex: number;
   geometry: Point[][];
@@ -56,7 +56,7 @@ function addVertex(
   oy: number,
   tx: number,
   ty: number,
-  sizeVertex: [number, number] | undefined,
+  sizeVertex: [number, number] | null,
   isSDF: boolean,
   pixelOffsetX: number,
   pixelOffsetY: number,
@@ -82,15 +82,6 @@ function addVertex(
     minFontScaleX * 256,
     minFontScaleY * 256,
   );
-}
-
-function containsRTLText(formattedText: Formatted): boolean {
-  for (const section of formattedText.sections) {
-    if (stringContainsRTLText(section.text)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
@@ -152,7 +143,6 @@ export class SymbolBucket extends SymbolBucketRuntime {
     this.sourceLayerIndex = options.sourceLayerIndex;
     this.sourceID = options.sourceID;
     this.hasDependencies = false;
-    this.hasRTLText = false;
     this.justReloaded = false;
     this.iconsInText = false;
     this.iconsNeedLinear = false;
@@ -214,12 +204,16 @@ export class SymbolBucket extends SymbolBucketRuntime {
     allowVerticalPlacement: boolean,
     doesAllowVerticalWritingMode: boolean,
   ): void {
+    for (const codePoint of getBidiGlyphDependencies(text)) {
+      stack[codePoint] = true;
+    }
     for (const char of text) {
-      stack[char.codePointAt(0)] = true;
       if ((textAlongLine || allowVerticalPlacement) && doesAllowVerticalWritingMode) {
         const verticalChar = verticalizedCharacterMap[char];
         if (verticalChar) {
-          stack[verticalChar.codePointAt(0)] = true;
+          const verticalCodePoint = verticalChar.codePointAt(0);
+          if (verticalCodePoint !== undefined)
+            stack[verticalCodePoint] = true;
         }
       }
     }
@@ -265,7 +259,7 @@ export class SymbolBucket extends SymbolBucketRuntime {
       if (!needGeometry)
         evaluationFeature.geometry = loadGeometry(feature);
 
-      let text: Formatted | void;
+      let text: Formatted | undefined;
       if (hasText) {
         // Expression evaluation will automatically coerce to Formatted
         // but plain string token evaluation skips that pathway so do the
@@ -273,18 +267,10 @@ export class SymbolBucket extends SymbolBucketRuntime {
         const resolvedTokens = layer.getValueAndResolveTokens('text-field', evaluationFeature, canonical, availableImages);
         const formattedText = Formatted.factory(resolvedTokens);
 
-        // on this instance: if hasRTLText is already true, all future calls to containsRTLText can be skipped.
-        this.hasRTLText ||= containsRTLText(formattedText);
-        if (
-          !this.hasRTLText // non-rtl text so can proceed safely
-          || rtlWorkerPlugin.getRTLTextPluginStatus() === 'unavailable' // We don't intend to lazy-load the rtl text plugin, so proceed with incorrect shaping
-          || (this.hasRTLText && rtlWorkerPlugin.isParsed()) // Use the rtlText plugin to shape text
-        ) {
-          text = transformText(formattedText, layer, evaluationFeature);
-        }
+        text = transformText(formattedText, layer, evaluationFeature);
       }
 
-      let icon: ResolvedImage;
+      let icon: ResolvedImage | undefined;
       if (hasIcon) {
         // Expression evaluation will automatically coerce to Image
         // but plain string token evaluation skips that pathway so do the
@@ -294,7 +280,7 @@ export class SymbolBucket extends SymbolBucketRuntime {
           icon = resolvedTokens;
         }
         else {
-          icon = ResolvedImage.fromString(resolvedTokens);
+          icon = ResolvedImage.fromString(resolvedTokens) ?? undefined;
         }
       }
 
@@ -360,7 +346,7 @@ export class SymbolBucket extends SymbolBucketRuntime {
     if (anchor.segment !== undefined) {
       let sumForwardLength = anchor.dist(line[anchor.segment + 1]);
       let sumBackwardLength = anchor.dist(line[anchor.segment]);
-      const vertices = {};
+      const vertices: Record<number, { x: number; y: number; tileUnitDistanceFromAnchor: number }> = {};
       for (let i = anchor.segment + 1; i < line.length; i++) {
         vertices[i] = { x: line[i].x, y: line[i].y, tileUnitDistanceFromAnchor: sumForwardLength };
         if (i < line.length - 1) {
@@ -385,7 +371,7 @@ export class SymbolBucket extends SymbolBucketRuntime {
     return result;
   }
 
-  addSymbols(arrays: SymbolBuffers, quads: SymbolQuad[], sizeVertex: any, lineOffset: [number, number], alongLine: boolean, feature: SymbolFeature, writingMode: WritingMode, labelAnchor: Anchor, lineStartIndex: number, lineLength: number, associatedIconIndex: number, canonical: CanonicalTileID): void {
+  addSymbols(arrays: SymbolBuffers, quads: SymbolQuad[], sizeVertex: [number, number] | null, lineOffset: [number, number], alongLine: boolean, feature: SymbolFeature, writingMode: WritingMode, labelAnchor: Anchor, lineStartIndex: number, lineLength: number, associatedIconIndex: number, canonical: CanonicalTileID): void {
     const indexArray = arrays.indexArray;
     const layoutVertexArray = arrays.layoutVertexArray;
 
@@ -426,7 +412,7 @@ export class SymbolBucket extends SymbolBucketRuntime {
       vertexStartIndex,
       lineStartIndex,
       alongLine ? lineLength : 0,
-      labelAnchor.segment,
+      labelAnchor.segment ?? 0,
       sizeVertex ? sizeVertex[0] : 0,
       sizeVertex ? sizeVertex[1] : 0,
       lineOffset[0],
@@ -434,7 +420,7 @@ export class SymbolBucket extends SymbolBucketRuntime {
       writingMode,
       // placedOrientation is null initially; will be updated to horizontal(1)/vertical(2) if placed
       0,
-      false as unknown as number,
+      0,
       // The crossTileID is only filled/used on the foreground for dynamic text anchors
       0,
       associatedIconIndex,

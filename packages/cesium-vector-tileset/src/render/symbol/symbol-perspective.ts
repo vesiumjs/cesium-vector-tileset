@@ -1,5 +1,5 @@
 import { Cartesian3, Ellipsoid } from 'cesium';
-import { WGS84_A, wgs84CartographicToCartesian } from '../geometry/tile-to-ecef';
+import { WGS84_A } from '../geometry/tile-to-ecef';
 
 /** MapLibre viewport-pitched point symbol ratio, in matching world units. */
 export function symbolPerspectiveRatio(cameraToCenterDistance: number | undefined, clipW: number, orthographic: boolean): number | undefined {
@@ -42,7 +42,7 @@ export function symbolMercatorDelta(x: number, referenceX: number): number {
 }
 
 export function symbolGroundPosition(x: number, y: number): { x: number; y: number; z: number } {
-  return wgs84CartographicToCartesian(x / WGS84_A, Math.atan(Math.sinh(-y / WGS84_A)));
+  return Cartesian3.fromRadians(x / WGS84_A, Math.atan(Math.sinh(-y / WGS84_A)), 0, Ellipsoid.WGS84);
 }
 
 /** MapLibre's viewport-rotated ground label axes: normalize each inverse column independently. */

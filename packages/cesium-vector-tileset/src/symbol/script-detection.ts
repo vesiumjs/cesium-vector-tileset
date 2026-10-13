@@ -86,56 +86,7 @@ export function charInComplexShapingScript(char: number): boolean {
   return /\p{sc=Arab}/u.test(String.fromCodePoint(char));
 }
 
-/**
- * ISO 15924 script codes of scripts that are primarily written horizontally
- * right-to-left according to Unicode 16.0.0.
- */
-const rtlScriptCodes = [
-  'Adlm', // Adlam
-  'Arab', // Arabic
-  'Armi', // Imperial Aramaic
-  'Avst', // Avestan
-  'Chrs', // Chorasmian
-  'Cprt', // Cypriot
-  'Egyp', // Egyptian Hieroglyphs
-  'Elym', // Elymaic
-  'Gara', // Garay
-  'Hatr', // Hatran
-  'Hebr', // Hebrew
-  'Hung', // Old Hungarian
-  'Khar', // Kharoshthi
-  'Lydi', // Lydian
-  'Mand', // Mandaic
-  'Mani', // Manichaean
-  'Mend', // Mende Kikakui
-  'Merc', // Meroitic Cursive
-  'Mero', // Meroitic Hieroglyphs
-  'Narb', // Old North Arabian
-  'Nbat', // Nabataean
-  'Nkoo', // NKo
-  'Orkh', // Old Turkic
-  'Palm', // Palmyrene
-  'Phli', // Inscriptional Pahlavi
-  'Phlp', // Psalter Pahlavi
-  'Phnx', // Phoenician
-  'Prti', // Inscriptional Parthian
-  'Rohg', // Hanifi Rohingya
-  'Samr', // Samaritan
-  'Sarb', // Old South Arabian
-  'Sogo', // Old Sogdian
-  'Syrc', // Syriac
-  'Thaa', // Thaana
-  'Todr', // Todhri
-  'Yezi', // Yezidi
-];
-
-const rtlScriptRegExp = sanitizedRegExpFromScriptCodes(rtlScriptCodes);
-
-export function charInRTLScript(char: number): boolean {
-  return rtlScriptRegExp.test(String.fromCodePoint(char));
-}
-
-export function charInSupportedScript(char: number, canRenderRTL: boolean): boolean {
+export function charInSupportedScript(char: number): boolean {
   // This is a rough heuristic: whether we "can render" a script
   // actually depends on the properties of the font being used
   // and whether differences from the ideal rendering are considered
@@ -143,24 +94,12 @@ export function charInSupportedScript(char: number, canRenderRTL: boolean): bool
 
   // Even in Latin script, we "can't render" combinations such as the fi
   // ligature, but we don't consider that semantically significant.
-  if (!canRenderRTL && charInRTLScript(char)) {
-    return false;
-  }
   return !codePointRequiresComplexTextShaping(char);
 }
 
-export function stringContainsRTLText(chars: string): boolean {
+export function isStringInSupportedScript(chars: string): boolean {
   for (const char of chars) {
-    if (charInRTLScript(codePointAtStart(char))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function isStringInSupportedScript(chars: string, canRenderRTL: boolean): boolean {
-  for (const char of chars) {
-    if (!charInSupportedScript(codePointAtStart(char), canRenderRTL)) {
+    if (!charInSupportedScript(codePointAtStart(char))) {
       return false;
     }
   }

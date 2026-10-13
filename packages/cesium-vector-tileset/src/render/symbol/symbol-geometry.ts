@@ -484,7 +484,7 @@ function extractGeometry(
       : instance.numVerticalIconVertices;
 
     const linePlacement = line ? linePlacedSymbol(instance, kind, line) : undefined;
-    if (linePlacement) {
+    if (line && linePlacement) {
       // The placed-driven branch owns its vertices; the instance cursor
       // range is skipped below so nothing double-draws.
       const placedBefore = placed.length;

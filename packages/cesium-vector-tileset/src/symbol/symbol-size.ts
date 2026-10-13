@@ -1,9 +1,9 @@
 import type { InterpolationType } from '@maplibre/maplibre-gl-style-spec';
 import type { PossiblyEvaluatedPropertyValue, PropertyValue } from '../style/properties';
 import { Interpolate, interpolates } from '@maplibre/maplibre-gl-style-spec';
+import { Math as CesiumMath } from 'cesium';
 
 import { EvaluationParameters } from '../style/evaluation-parameters';
-import { clamp } from '../util/math';
 
 const MAX_GLYPH_ICON_SIZE = 255;
 const SIZE_PACK_FACTOR = 128;
@@ -114,7 +114,7 @@ function evaluateSizeForZoom(sizeData: SizeData, zoom: number): EvaluatedZoomSiz
     // restriction on composite functions
     const t = !interpolationType
       ? 0
-      : clamp(
+      : CesiumMath.clamp(
           Interpolate.interpolationFactor(interpolationType, zoom, minZoom, maxZoom),
           0,
           1,

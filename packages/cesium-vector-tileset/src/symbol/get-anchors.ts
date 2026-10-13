@@ -15,7 +15,7 @@ function getLineLength(line: Point[]): number {
 }
 
 function getAngleWindowSize(
-  shapedText: Shaping,
+  shapedText: Shaping | undefined,
   glyphSize: number,
   boxScale: number,
 ): number {
@@ -31,7 +31,7 @@ function getShapedLabelLength(shapedText?: Shaping | null, shapedIcon?: Position
   );
 }
 
-function getCenterAnchor(line: Point[], maxAngle: number, shapedText: Shaping, shapedIcon: PositionedIcon, glyphSize: number, boxScale: number): Anchor | undefined {
+function getCenterAnchor(line: Point[], maxAngle: number, shapedText: Shaping | undefined, shapedIcon: PositionedIcon | undefined, glyphSize: number, boxScale: number): Anchor | undefined {
   const angleWindowSize = getAngleWindowSize(shapedText, glyphSize, boxScale);
   const labelLength = getShapedLabelLength(shapedText, shapedIcon) * boxScale;
 
@@ -50,7 +50,7 @@ function getCenterAnchor(line: Point[], maxAngle: number, shapedText: Shaping, s
       const x = interpolates.number(a.x, b.x, t);
       const y = interpolates.number(a.y, b.y, t);
 
-      const anchor = new Anchor(x, y, b.angleTo(a), i);
+      const anchor = new Anchor(x, y, i);
       anchor._round();
       if (!angleWindowSize || checkMaxAngle(line, anchor, labelLength, angleWindowSize, maxAngle)) {
         return anchor;
@@ -64,7 +64,7 @@ function getCenterAnchor(line: Point[], maxAngle: number, shapedText: Shaping, s
   return undefined;
 }
 
-function getAnchors(line: Point[], spacing: number, maxAngle: number, shapedText: Shaping, shapedIcon: PositionedIcon, glyphSize: number, boxScale: number, overscaling: number, tileExtent: number): Anchor[] {
+function getAnchors(line: Point[], spacing: number, maxAngle: number, shapedText: Shaping | undefined, shapedIcon: PositionedIcon | undefined, glyphSize: number, boxScale: number, overscaling: number, tileExtent: number): Anchor[] {
   // Resample a line to get anchor points for labels and check that each
   // potential label passes text-max-angle check and has enough room to fit
   // on the line.
@@ -110,7 +110,6 @@ function resample(line: Point[], offset: number, spacing: number, angleWindowSiz
     const b = line[i + 1];
 
     const segmentDist = a.dist(b);
-    const angle = b.angleTo(a);
 
     while (markedDistance + spacing < distance + segmentDist) {
       markedDistance += spacing;
@@ -125,7 +124,7 @@ function resample(line: Point[], offset: number, spacing: number, angleWindowSiz
       if (x >= 0 && x < tileExtent && y >= 0 && y < tileExtent
         && markedDistance - halfLabelLength >= 0
         && markedDistance + halfLabelLength <= lineLength) {
-        const anchor = new Anchor(x, y, angle, i);
+        const anchor = new Anchor(x, y, i);
         anchor._round();
 
         if (!angleWindowSize || checkMaxAngle(line, anchor, labelLength, angleWindowSize, maxAngle)) {

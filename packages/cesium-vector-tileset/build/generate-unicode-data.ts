@@ -317,13 +317,210 @@ async function requiresComplexTextShaping(): Promise<string> {
   return set.toString();
 }
 
+const downloadedRows = new Map<string, Promise<string[][]>>();
+/**
+ * The rows of one file of the Unicode Character Database, each split into its fields, with the
+ * comments and blank lines dropped. A file is downloaded from unicode.org and parsed once, and kept
+ * for the rest of the run.
+ */
+function unicodeDataRows(file: string): Promise<string[][]> {
+  if (!downloadedRows.has(file)) {
+    downloadedRows.set(file, (async () => {
+      const url = `https://www.unicode.org/Public/${unicodeVersion}/ucd/${file}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+      }
+      return (await response.text())
+        .split('\n')
+        .map(line => line.split('#')[0])
+        .filter(line => line.trim())
+        .map(line => line.split(';').map(field => field.trim()));
+    })());
+  }
+  return downloadedRows.get(file);
+}
+
+/**
+ * The blocks the Arabic script is written from, plus the two joiners that steer it.
+ *
+ * Letters outside these blocks have no Arabic presentation forms. Transparent marks and format
+ * controls from any block still affect joining between Arabic letters and are tabulated separately.
+ */
+const arabicBlocks: Array<[number, number]> = [
+  [0x0600, 0x06FF],
+  [0x0750, 0x077F],
+  [0x0870, 0x089F],
+  [0x08A0, 0x08FF],
+  [0xFB50, 0xFDFF],
+  [0xFE70, 0xFEFF],
+  [0x200C, 0x200D],
+];
+
+function isArabic(codePoint: number): boolean {
+  return arabicBlocks.some(([start, end]) => codePoint >= start && codePoint <= end);
+}
+
+/**
+ * How a character joins to the ones beside it: `R` to the character before it, `L` to the one after
+ * it, `D` to both, `C` without being written itself, `T` not at all while letting the two around it
+ * join through it, and `U` not at all.
+ */
+type JoiningType = 'R' | 'L' | 'D' | 'C' | 'U' | 'T';
+
+/**
+ * The joining type of every character: which side, if any, it joins the letters beside it on.
+ *
+ * `DerivedJoiningType.txt` states the property for every code point, the combining marks and format
+ * characters that join through included.
+ */
+async function readJoiningTypes(): Promise<Map<number, JoiningType>> {
+  const joiningTypes = new Map<number, JoiningType>();
+
+  for (const [codePoints, type] of await unicodeDataRows('extracted/DerivedJoiningType.txt')) {
+    const [first, last] = codePoints.split('..').map(hex => Number.parseInt(hex, 16));
+    for (let codePoint = first; codePoint <= (last ?? first); codePoint++) {
+      joiningTypes.set(codePoint, type as JoiningType);
+    }
+  }
+
+  return joiningTypes;
+}
+
+/** The four shapes a cursive script writes a letter in. */
+interface PresentationForms { isolated: number; final: number; initial: number; medial: number }
+
+/**
+ * Tatweel, the stroke a word is stretched along, and the space a mark is shown over on its own.
+ *
+ * A mark has no shape without a letter under it, so the database gives its presentation forms as
+ * decompositions onto one of these: `<medial> 0640 064B` is "fathatan, as written over a letter
+ * mid-word", and `<isolated> 0020 064B` is the same mark standing by itself.
+ */
+const markCarriers = new Set([0x0020, 0x0640]);
+
+/**
+ * The Presentation Forms shape of each Arabic letter, and the two shapes of each lam-alef ligature.
+ *
+ * The shapes come from the compatibility decompositions of the presentation blocks: `<final> 0628`
+ * is what says U+FE90 is the final form of beh.
+ *
+ * Of the two-character decompositions only lam-alef is taken. It is the one ligature Arabic shaping
+ * is required to form; the rest of the presentation blocks are typographic ligatures, which a font
+ * offers and the text is free to do without.
+ */
+async function readPresentationForms(): Promise<{
+  forms: Map<number, PresentationForms>;
+  ligatures: Map<string, { isolated: number; final: number }>;
+}> {
+  const forms = new Map<number, PresentationForms>();
+  const ligatures = new Map<string, { isolated: number; final: number }>();
+
+  for (const row of await unicodeDataRows('UnicodeData.txt')) {
+    const codePoint = Number.parseInt(row[0], 16);
+    if (codePoint < 0xFB50 || codePoint > 0xFEFF)
+      continue;
+
+    const match = /^<(isolated|final|initial|medial)>\s+(\S.*)$/.exec(row[5]);
+    if (!match)
+      continue;
+
+    const shape = match[1] as keyof PresentationForms;
+    const bases = match[2].split(/\s+/).map(base => Number.parseInt(base, 16));
+    const carried = bases.length === 2 && markCarriers.has(bases[0]);
+
+    if (bases.length === 1 || carried) {
+      const base = carried ? bases[1] : bases[0];
+      const existing = forms.get(base) ?? { isolated: 0, final: 0, initial: 0, medial: 0 };
+      existing[shape] = codePoint;
+      forms.set(base, existing);
+    }
+    else if (codePoint >= 0xFEF5 && codePoint <= 0xFEFC) {
+      const pair = String.fromCodePoint(...bases);
+      const existing = ligatures.get(pair) ?? { isolated: 0, final: 0 };
+      existing[shape as 'isolated' | 'final'] = codePoint;
+      ligatures.set(pair, existing);
+    }
+  }
+
+  return { forms, ligatures };
+}
+
+/**
+ * Packs a sorted list of code points into `start,length` pairs, delta-encoded in base 36.
+ *
+ * The joining types run in long unbroken stretches, so the ranges take a fraction of the space the
+ * code points would.
+ */
+function encodeCodePointRanges(codePoints: number[]): string {
+  const ranges: number[][] = [];
+  for (const codePoint of codePoints.sort((a, b) => a - b)) {
+    const last = ranges[ranges.length - 1];
+    if (last && last[0] + last[1] === codePoint) {
+      last[1]++;
+    }
+    else {
+      ranges.push([codePoint, 1]);
+    }
+  }
+
+  let previousEnd = 0;
+  return ranges
+    .map(([start, length]) => {
+      const encoded = `${(start - previousEnd).toString(36)},${length.toString(36)}`;
+      previousEnd = start + length;
+      return encoded;
+    })
+    .join(';');
+}
+
+/** The joining types, as one encoded set of ranges per type, ready to print as an object literal. */
+async function encodedJoiningTypes(): Promise<string> {
+  const byType = new Map<JoiningType, number[]>();
+  for (const [codePoint, type] of await readJoiningTypes()) {
+    if (type === 'U' || (type !== 'T' && !isArabic(codePoint)))
+      continue;
+    byType.set(type, (byType.get(type) ?? []).concat(codePoint));
+  }
+
+  return [...byType]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([type, codePoints]) => `    ${type}: '${encodeCodePointRanges(codePoints)}',`)
+    .join('\n');
+}
+
+/** Each Arabic letter's four presentation forms, ready to print as an object literal. */
+async function encodedPresentationForms(): Promise<string> {
+  return [...(await readPresentationForms()).forms]
+    .sort(([a], [b]) => a - b)
+    .map(([base, { isolated, final, initial, medial }]) =>
+      `    ${base}: [${isolated}, ${final}, ${initial}, ${medial}],`)
+    .join('\n');
+}
+
+/** The lam-alef ligatures, ready to print as an object literal. */
+async function encodedLigatures(): Promise<string> {
+  return [...(await readPresentationForms()).ligatures]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([pair, { isolated, final }]) => {
+      const escaped = [...pair]
+        .map(character => `\\u${character.codePointAt(0).toString(16).padStart(4, '0')}`)
+        .join('');
+      return `    '${escaped}': [${isolated}, ${final}],`;
+    })
+    .join('\n');
+}
+
 async function main(): Promise<void> {
-  const [localIdeographFontFamily, ideographicBreaking, uprightOrientation, neutralOrientation, complexTextShaping] = await Promise.all([
+  const [localIdeographFontFamily, ideographicBreaking, uprightOrientation, neutralOrientation, complexTextShaping, joiningTypes, presentationForms, ligatures] = await Promise.all([
     usesLocalIdeographFontFamily(),
     allowsIdeographicBreaking(),
     hasUprightVerticalOrientation(),
     hasNeutralVerticalOrientation(),
     requiresComplexTextShaping(),
+    encodedJoiningTypes(),
+    encodedPresentationForms(),
+    encodedLigatures(),
   ]);
 
   fs.writeFileSync(new URL('../src/util/unicode-properties.g.ts', import.meta.url), `// This file is generated. Edit build/generate-unicode-data.ts, then run \`npm run generate-unicode-data\`.
@@ -384,6 +581,21 @@ export function codePointRequiresComplexTextShaping(codePoint: number): boolean 
     // eslint-disable-next-line regexp/no-dupe-characters-character-class -- Unicode ranges overlap by design
     return /${complexTextShaping}/gim.test(String.fromCodePoint(codePoint));
 }
+
+/** Delta-encoded Arabic joining types from Unicode ${unicodeVersion}. */
+export const ENCODED_JOINING_TYPES: Record<string, string> = {
+${joiningTypes}
+};
+
+/** Arabic glyph forms, indexed as isolated, final, initial, medial. */
+export const PRESENTATION_FORMS: Record<number, [number, number, number, number]> = {
+${presentationForms}
+};
+
+/** Required lam-alef ligatures, indexed as isolated, final. */
+export const LIGATURES: Record<string, [number, number]> = {
+${ligatures}
+};
 `);
 }
 

@@ -30,7 +30,7 @@ const PUAend = 0xF8FF;
 interface Break {
   index: number;
   x: number;
-  priorBreak: Break;
+  priorBreak: Break | null;
   badness: number;
 }
 
@@ -143,7 +143,7 @@ function evaluateBreak(
   //  ...and when targetWidth and maxWidth are close, strictly enforcing maxWidth can give
   //     more lopsided results.
 
-  let bestPriorBreak: Break = null;
+  let bestPriorBreak: Break | null = null;
   let bestBreakBadness = calculateBadness(breakX, targetWidth, penalty, isLastBreak);
 
   for (const potentialBreak of potentialBreaks) {
@@ -241,7 +241,7 @@ export class TaggedString {
   }
 
   /**
-   * Converts a UTF-16 character index to a UTF-16 code unit (JavaScript character index).
+   * Converts a Unicode code point index to a UTF-16 code unit index.
    */
   toCodeUnitIndex(unicodeIndex: number): number {
     return [...this.text].slice(0, unicodeIndex).join('').length;
@@ -330,7 +330,7 @@ export class TaggedString {
     imagePositions: { [_: string]: ImagePosition },
     layoutTextSize: number,
   ): number[] {
-    const potentialLineBreaks = [];
+    const potentialLineBreaks: Break[] = [];
     const targetWidth = this.determineAverageLineWidth(spacing, maxWidth, glyphMap, imagePositions, layoutTextSize);
 
     const hasZeroWidthSpaces = this.hasZeroWidthSpaces();
@@ -350,7 +350,8 @@ export class TaggedString {
 
     while (!char.done) {
       const section = this.getSection(i);
-      const codePoint = char.value.codePointAt(0);
+      // A non-done string iterator result always contains a code point.
+      const codePoint = char.value.codePointAt(0)!;
       if (!charIsWhitespace(codePoint))
         currentX += getGlyphAdvance(codePoint, section, glyphMap, imagePositions, spacing, layoutTextSize);
 
@@ -358,7 +359,7 @@ export class TaggedString {
       // surrounding spaces.
       if (!nextChar.done) {
         const ideographicBreak = codePointAllowsIdeographicBreaking(codePoint);
-        const nextCodePoint = nextChar.value.codePointAt(0);
+        const nextCodePoint = nextChar.value.codePointAt(0)!;
         if (breakable[codePoint] || ideographicBreak || 'imageName' in section || (!nextNextChar.done && breakableBefore[nextCodePoint])) {
           potentialLineBreaks.push(
             evaluateBreak(
@@ -406,7 +407,8 @@ export class TaggedString {
     let index = 0;
     for (const char of this.text) {
       const section = this.getSection(index);
-      totalWidth += getGlyphAdvance(char.codePointAt(0), section, glyphMap, imagePositions, spacing, layoutTextSize);
+      // String iteration cannot yield an empty character.
+      totalWidth += getGlyphAdvance(char.codePointAt(0)!, section, glyphMap, imagePositions, spacing, layoutTextSize);
       index++;
     }
 

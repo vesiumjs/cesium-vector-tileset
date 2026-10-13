@@ -1,17 +1,20 @@
+import type Point from '@mapbox/point-geometry';
 import type { SymbolFeature } from '../data/bucket/symbol-bucket';
 
 export function mergeLines(features: SymbolFeature[]): SymbolFeature[] {
   const leftIndex: { [_: string]: number } = {};
   const rightIndex: { [_: string]: number } = {};
-  const mergedFeatures = [];
+  const mergedFeatures: SymbolFeature[] = [];
+  // Consumed joins leave the result without invalidating feature geometry.
+  const removedFeatures = new Set<SymbolFeature>();
   let mergedIndex = 0;
 
-  function add(k) {
+  function add(k: number) {
     mergedFeatures.push(features[k]);
     mergedIndex++;
   }
 
-  function mergeFromRight(leftKey: string, rightKey: string, geom) {
+  function mergeFromRight(leftKey: string, rightKey: string, geom: Point[][]) {
     const i = rightIndex[leftKey];
     delete rightIndex[leftKey];
     rightIndex[rightKey] = i;
@@ -21,7 +24,7 @@ export function mergeLines(features: SymbolFeature[]): SymbolFeature[] {
     return i;
   }
 
-  function mergeFromLeft(leftKey: string, rightKey: string, geom) {
+  function mergeFromLeft(leftKey: string, rightKey: string, geom: Point[][]) {
     const i = leftIndex[rightKey];
     delete leftIndex[rightKey];
     leftIndex[leftKey] = i;
@@ -31,7 +34,7 @@ export function mergeLines(features: SymbolFeature[]): SymbolFeature[] {
     return i;
   }
 
-  function getKey(text, geom, onRight?) {
+  function getKey(text: string, geom: Point[][], onRight = false) {
     const point = onRight ? geom[0][geom[0].length - 1] : geom[0][0];
     return `${text}:${point.x}:${point.y}`;
   }
@@ -58,7 +61,7 @@ export function mergeLines(features: SymbolFeature[]): SymbolFeature[] {
       delete rightIndex[rightKey];
 
       rightIndex[getKey(text, mergedFeatures[i].geometry, true)] = i;
-      mergedFeatures[j].geometry = null;
+      removedFeatures.add(mergedFeatures[j]);
     }
     else if (leftKey in rightIndex) {
       // found mergeable line adjacent to the start of the current line, merge
@@ -76,5 +79,5 @@ export function mergeLines(features: SymbolFeature[]): SymbolFeature[] {
     }
   }
 
-  return mergedFeatures.filter(f => f.geometry);
+  return mergedFeatures.filter(feature => !removedFeatures.has(feature));
 }

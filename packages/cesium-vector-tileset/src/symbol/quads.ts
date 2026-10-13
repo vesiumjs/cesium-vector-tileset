@@ -4,8 +4,7 @@ import type { Rect } from '../assets/glyph-atlas';
 
 import type { StyleImage } from '../style/style-image';
 import type { SymbolStyleLayer } from '../style/style-layer/symbol-style-layer';
-import type { Anchor } from './anchor';
-import type { Box, PositionedIcon, Shaping } from './shaping';
+import type { Box, PositionedIcon, Shaping, WritingMode } from './shaping';
 import Point from '@mapbox/point-geometry';
 import { IMAGE_PADDING } from '../assets/image-atlas';
 import { GLYPH_PBF_BORDER } from '../style/parse-glyph-pbf';
@@ -36,12 +35,17 @@ export interface SymbolQuad {
   };
   pixelOffsetTL: Point;
   pixelOffsetBR: Point;
-  writingMode: any | void;
+  writingMode: WritingMode | undefined;
   glyphOffset: [number, number];
   sectionIndex: number;
   isSDF: boolean;
   minFontScaleX: number;
   minFontScaleY: number;
+}
+
+interface StretchCut {
+  fixed: number;
+  stretch: number;
 }
 
 // If you have a 10px icon that isn't perfectly aligned to the pixel grid it will cover 11 actual
@@ -58,7 +62,7 @@ export function getIconQuads(
   isSDFIcon: boolean,
   hasIconTextFit: boolean,
 ): SymbolQuad[] {
-  const quads = [];
+  const quads: SymbolQuad[] = [];
 
   const image = shapedIcon.image;
   const pixelRatio = image.pixelRatio;
@@ -72,10 +76,10 @@ export function getIconQuads(
     y2: shapedIcon.bottom,
   };
 
-  const stretchX = image.stretchX || [[0, imageWidth]];
-  const stretchY = image.stretchY || [[0, imageHeight]];
+  const stretchX: Array<[number, number]> = image.stretchX || [[0, imageWidth]];
+  const stretchY: Array<[number, number]> = image.stretchY || [[0, imageHeight]];
 
-  const reduceRanges = (sum, range) => sum + range[1] - range[0];
+  const reduceRanges = (sum: number, range: [number, number]) => sum + range[1] - range[0];
   const stretchWidth = stretchX.reduce(reduceRanges, 0);
   const stretchHeight = stretchY.reduce(reduceRanges, 0);
   const fixedWidth = imageWidth - stretchWidth;
@@ -113,7 +117,7 @@ export function getIconQuads(
   const iconWidth = icon.x2 - iconLeft;
   const iconHeight = icon.y2 - iconTop;
 
-  const makeBox = (left, top, right, bottom) => {
+  const makeBox = (left: StretchCut, top: StretchCut, right: StretchCut, bottom: StretchCut): SymbolQuad => {
     const leftEm = getEmOffset(left.stretch - stretchOffsetX, stretchContentWidth, iconWidth, iconLeft);
     const leftPx = getPxOffset(left.fixed - fixedOffsetX, fixedContentWidth, left.stretch, stretchWidth);
 
@@ -191,7 +195,7 @@ export function getIconQuads(
   return quads;
 }
 
-function sumWithinRange(ranges, min, max) {
+function sumWithinRange(ranges: Array<[number, number]>, min: number, max: number): number {
   let sum = 0;
   for (const range of ranges) {
     sum += Math.max(min, Math.min(max, range[1])) - Math.max(min, Math.min(max, range[0]));
@@ -199,7 +203,7 @@ function sumWithinRange(ranges, min, max) {
   return sum;
 }
 
-function stretchZonesToCuts(stretchZones, fixedSize, stretchSize) {
+function stretchZonesToCuts(stretchZones: Array<[number, number]>, fixedSize: number, stretchSize: number): StretchCut[] {
   const cuts = [{ fixed: -border, stretch: 0 }];
 
   for (const [c1, c2] of stretchZones) {
@@ -220,11 +224,11 @@ function stretchZonesToCuts(stretchZones, fixedSize, stretchSize) {
   return cuts;
 }
 
-function getEmOffset(stretchOffset, stretchSize, iconSize, iconOffset) {
+function getEmOffset(stretchOffset: number, stretchSize: number, iconSize: number, iconOffset: number): number {
   return stretchOffset / stretchSize * iconSize + iconOffset;
 }
 
-function getPxOffset(fixedOffset, fixedSize, stretchOffset, stretchSize) {
+function getPxOffset(fixedOffset: number, fixedSize: number, stretchOffset: number, stretchSize: number): number {
   return fixedOffset - fixedSize * stretchOffset / stretchSize;
 }
 
@@ -232,7 +236,6 @@ function getPxOffset(fixedOffset, fixedSize, stretchOffset, stretchSize) {
  * Create the quads used for rendering a text label.
  */
 export function getGlyphQuads(
-  _anchor: Anchor,
   shaping: Shaping,
   textOffset: [number, number],
   layer: SymbolStyleLayer,
@@ -242,13 +245,13 @@ export function getGlyphQuads(
   allowVerticalPlacement: boolean,
 ): SymbolQuad[] {
   const textRotate = layer.layout.get('text-rotate').evaluate(feature, {}) * Math.PI / 180;
-  const quads = [];
+  const quads: SymbolQuad[] = [];
 
   for (const line of shaping.positionedLines) {
     for (const positionedGlyph of line.positionedGlyphs) {
       if (!positionedGlyph.rect)
         continue;
-      const textureRect: Rect = positionedGlyph.rect || {} as Rect;
+      const textureRect: Rect = positionedGlyph.rect;
 
       // The rects have an additional buffer that is not included in their size.
       const glyphPadding = 1.0;
@@ -274,7 +277,7 @@ export function getGlyphQuads(
         rectBuffer = IMAGE_PADDING / pixelRatio;
       }
 
-      const glyphOffset = alongLine
+      const glyphOffset: [number, number] = alongLine
         ? [positionedGlyph.x + halfAdvance, positionedGlyph.y]
         : [0, 0];
 
