@@ -74,11 +74,11 @@ if (!tileset.isDestroyed()) {
 - 支持 MapLibre 表达式、过滤器、数据驱动样式、虚线、图片图案、文字与图标。当前实现覆盖 MapLibre 的部分渲染能力；不支持 `heatmap`、`hillshade` 和 `raster-dem`，`line-gradient` 会被拒绝。
 - 场景提供 Cesium vector provider 时，`heightReference` 可让普通填充面贴附。线、点、标注、挤出建筑与图片图案保留椭球高度。文字与图标暂不支持拾取。
 - 从样式 URL 加载时，数据源 URL、瓦片模板、sprite 与 glyphs 的相对地址按样式 URL 解析。远程 GeoJSON `data` 和视频 `urls` 请使用绝对地址。
-- Cesium peer 范围为 `^1.146.0`，已有渲染基线使用 1.146.0。部分渲染集成访问 Cesium 内部接口，声明范围不代表每个后续版本都已测试。验证范围见[验收记录](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/research/performance-baseline.md)。
+- Cesium peer 范围为 `^1.146.0`，已有渲染基线使用 1.146.0。部分渲染集成访问 Cesium 内部接口，声明范围不代表每个后续版本都已测试。
 
-## 文档与支持
+## 支持
 
-实现细节见[架构](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/architecture.md)与[模块职责](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/module-responsibilities.md)。遇到问题可提交 [GitHub issue](https://github.com/vesiumjs/cesium-vector-tileset/issues)，附上可复现的样式、受影响的视角和 Cesium 版本。
+遇到问题可提交 [GitHub issue](https://github.com/vesiumjs/cesium-vector-tileset/issues)，附上可复现的样式、受影响的视角和 Cesium 版本。
 
 ## 许可与致谢
 

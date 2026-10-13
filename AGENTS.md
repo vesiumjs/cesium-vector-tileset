@@ -50,8 +50,8 @@ pnpm generate-unicode-data  # Unicode 属性表
 
 ### Triage labels
 
-The five canonical triage roles use English labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+The five canonical triage roles use English labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 
 ### Domain docs
 
-Single-context layout: `CONTEXT.md` at the repo root + `docs/adr/`. See `docs/agents/domain.md`.
+Domain terminology lives in `CONTEXT.md` at the repo root.

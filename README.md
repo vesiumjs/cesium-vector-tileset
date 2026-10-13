@@ -74,11 +74,11 @@ if (!tileset.isDestroyed()) {
 - MapLibre expressions and filters, data-driven styling, dashed lines, image patterns, text, and icons are supported. This is a subset of MapLibre's rendering capabilities; `heatmap`, `hillshade`, and `raster-dem` are unavailable, and `line-gradient` is rejected.
 - `heightReference` can drape ordinary fill polygons when the scene provides Cesium's vector provider. Lines, points, labels, extrusions, and image patterns keep ellipsoid heights. Label and icon picking is currently unavailable.
 - Style URL loading resolves relative source URLs, tile templates, sprites, and glyphs against the style URL. Use absolute URLs for remote GeoJSON `data` and video `urls`.
-- The Cesium peer range is `^1.146.0`; the recorded rendering baseline uses 1.146.0. Some rendering integrations use Cesium internals, so the declared range does not mean every later release has been tested. See the [validation record](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/research/performance-baseline.md).
+- The Cesium peer range is `^1.146.0`; the recorded rendering baseline uses 1.146.0. Some rendering integrations use Cesium internals, so the declared range does not mean every later release has been tested.
 
-## Documentation and support
+## Support
 
-See the [architecture](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/architecture.md) and [module responsibilities](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/docs/module-responsibilities.md) for implementation details. Report problems through [GitHub issues](https://github.com/vesiumjs/cesium-vector-tileset/issues), including a reproducible style, the affected view, and your Cesium version.
+Report problems through [GitHub issues](https://github.com/vesiumjs/cesium-vector-tileset/issues), including a reproducible style, the affected view, and your Cesium version.
 
 ## License and credits
 
