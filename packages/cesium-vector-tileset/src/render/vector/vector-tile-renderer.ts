@@ -7,6 +7,7 @@ import type {
 import type { DashAtlas } from '../../assets/dash-atlas';
 import type { DashRow } from '../../source/worker-source';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
+import type { TileGeneration } from '../scene/tile-generation';
 import type { ExtrusionLighting } from './extrusion-geometry';
 import type { TileRenderResult } from './tile-conversion';
 import type { VectorCameraPaintSnapshot, VectorCollectionReplacement, VectorPaintFrame, VectorPaintPreparation, VectorPaintState } from './vector-paint-updater';
@@ -53,6 +54,7 @@ export function isClampHeightReference(heightReference: HeightReference): boolea
  */
 export type VectorCollection = BufferCollection | PrimitiveCollection;
 export interface VectorTileRecord {
+  generation?: TileGeneration;
   generationId: number;
   complete: boolean;
   buckets: BucketMap;
@@ -77,6 +79,12 @@ export class VectorTileRenderer {
   private _records: Map<string, VectorTileRecord> = new Map();
 
   private readonly _tileForCollection = new WeakMap<object, string>();
+
+  // Scene owns destruction after a record hands off its physical collections.
+  // Keep their allocation identities until that destruction actually happens.
+  private readonly _heldCollections = new Map<VectorCollection, number>();
+
+  private _nextHeldId = 0;
 
   private _pixelRatio: number;
 
@@ -251,6 +259,12 @@ export class VectorTileRenderer {
     }
   }
 
+  /** Scene calls this after destroying an allocation handed off by the renderer. */
+  releaseCollection(collection: VectorCollection): void {
+    this._heldCollections.delete(collection);
+    this.releaseDrapedCollection(collection);
+  }
+
   /** Detach every active and retired polygon collection from the provider. */
   undrapeAll(): void {
     this._undrapeAll(this._vectorProvider);
@@ -334,21 +348,31 @@ export class VectorTileRenderer {
    * paint updates. Read its public capacity when the budget is dirty; ordinary
    * Primitive geometry was measured before Cesium released the input arrays.
    *
-   * Live records are reported `pinned` (attached to the scene, never an
-   * eviction target); only pooled retired records are evictable.
+   * Live records and physical collections awaiting Scene destruction are
+   * pinned; only pooled retired records are evictable. Shared owners count once.
    */
   visitMemoryEntries(visit: MemoryBudgetVisitor): void {
+    const owners = new Set<object>();
     for (const [tileId, record] of this._records) {
       let bytes = 0;
       for (const collection of record.collections.values()) {
-        bytes += collectionGpuBytes(collection);
+        bytes += collectionGpuBytes(collection, owners);
       }
       visit(tileId, bytes, true);
+    }
+    for (const [collection, id] of this._heldCollections) {
+      if (collection.isDestroyed()) {
+        this._heldCollections.delete(collection);
+        continue;
+      }
+      const bytes = collectionGpuBytes(collection, owners);
+      if (bytes > 0)
+        visit(`held:${id}`, bytes, true);
     }
     for (const [tileId, entry] of this._retired.entries()) {
       let bytes = 0;
       for (const collection of entry.collections.values()) {
-        bytes += collectionGpuBytes(collection);
+        bytes += collectionGpuBytes(collection, owners);
       }
       visit(tileId, bytes);
     }
@@ -376,7 +400,7 @@ export class VectorTileRenderer {
    * Replace a tile's registered collections with a build's first stage.
    * The line and point tracks may append after the fills are visible.
    */
-  commitTileBuild(state: VectorTileBuildState): VectorCollection | null {
+  commitTileBuild(state: VectorTileBuildState, generation?: TileGeneration): VectorCollection | null {
     const { tileId, buckets, tileID, skipLayerIds, result, entries, styleZoom, mode, styleRevision, lightRevision, generationId } = state;
     this.removeTile(tileId, entries.length > 0);
     if (entries.length === 0) {
@@ -390,6 +414,7 @@ export class VectorTileRenderer {
       this._registerDrawLayers(kind, collection, result!.linePrimitives, tileId);
     }
     this._records.set(tileId, {
+      generation,
       generationId,
       complete: state.phase === 'done',
       buckets,
@@ -453,6 +478,7 @@ export class VectorTileRenderer {
         discardLineBuild(record.paint.lineBuild);
       record.paint.lineBuild = undefined;
       for (const collection of record.collections.values()) {
+        this._holdCollection(collection);
         if (retainDrape && collection instanceof BufferPolygonCollection && this._isDraping()) {
           this._drapeHolds.add(collection);
         }
@@ -464,8 +490,14 @@ export class VectorTileRenderer {
     this._records.delete(tileId);
     for (const collection of this.takeRetired(tileId)) {
       collection.destroy();
+      this.releaseCollection(collection);
     }
     return !!record;
+  }
+
+  /** The publication lifecycle follows geometry into and out of its resident cache. */
+  tileGeneration(tileId: string): TileGeneration | undefined {
+    return (this._records.get(tileId) ?? this._retired.get(tileId))?.generation;
   }
 
   /**
@@ -512,6 +544,7 @@ export class VectorTileRenderer {
         if (kind === 'lines' || kind === 'extrusions')
           continue;
         this._undrape(this._vectorProvider, collection);
+        this._holdCollection(collection);
         record.collections.delete(kind);
         removed.push(collection);
       }
@@ -533,6 +566,7 @@ export class VectorTileRenderer {
       record.paint.lineBuild = undefined;
     }
     this._records.clear();
+    this._heldCollections.clear();
     const retired: VectorCollection[] = [];
     for (const entry of this._retired.values()) {
       retired.push(...entry.collections.values());
@@ -577,6 +611,8 @@ export class VectorTileRenderer {
     // Held predecessors cannot become current again, even if a cancelled
     // mode change returns to their mode before the replacement commits.
     if (!record.complete || record.mode !== mode || record.paint.frozen) {
+      for (const collection of record.collections.values())
+        this._holdCollection(collection);
       return [...record.collections.values()];
     }
     // A replaced same-key entry is gone for good; the pool returns it for
@@ -585,6 +621,7 @@ export class VectorTileRenderer {
     for (const gone of this._retired.retire(tileId, record)) {
       for (const collection of gone.value.collections.values()) {
         this._undrape(this._vectorProvider, collection);
+        this._holdCollection(collection);
       }
       evicted.push(...gone.value.collections.values());
     }
@@ -602,6 +639,7 @@ export class VectorTileRenderer {
       const collections: VectorCollection[] = [];
       for (const collection of gone.value.collections.values()) {
         this._undrape(this._vectorProvider, collection);
+        this._holdCollection(collection);
         collections.push(collection);
       }
       byTile.set(gone.key, collections);
@@ -657,6 +695,8 @@ export class VectorTileRenderer {
     if (!entry) {
       return [];
     }
+    for (const collection of entry.collections.values())
+      this._holdCollection(collection);
     return [...entry.collections.values()];
   }
 
@@ -681,6 +721,7 @@ export class VectorTileRenderer {
     if (record.collections.get(kind) === old) {
       this._registerDrawLayers(kind, replacement, record.linePrimitives, tileId);
       record.collections.set(kind, replacement);
+      this._holdCollection(old);
       // The scene keeps the old collection visible until the replacement's
       // first GPU update. Continue marking its drape until that handoff.
       if (old instanceof BufferPolygonCollection && this._isDraping()) {
@@ -688,6 +729,12 @@ export class VectorTileRenderer {
       }
       replacements.push({ tileId, old, replacement });
     }
+  }
+
+  /** Track a physical allocation transferred to Scene until it is destroyed. */
+  private _holdCollection(collection: VectorCollection): void {
+    if (!collection.isDestroyed() && !this._heldCollections.has(collection))
+      this._heldCollections.set(collection, ++this._nextHeldId);
   }
 
   /**

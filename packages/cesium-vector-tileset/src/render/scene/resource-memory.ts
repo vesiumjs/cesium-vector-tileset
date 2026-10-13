@@ -1,4 +1,5 @@
 import type { GeometryInstanceAttribute } from 'cesium';
+import type { NativePrimitiveRuntime } from '../geometry/geometry-primitive';
 import { BufferPointCollection, BufferPolygonCollection, ComponentDatatype, PointPrimitiveCollection, Primitive, PrimitiveCollection } from 'cesium';
 import { geometryBytes } from '../geometry/geometry-bytes';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
@@ -10,12 +11,6 @@ const sharedPrimitives = new WeakMap<object, { primitive: Primitive; additionalB
 
 interface NativeBuffer {
   readonly sizeInBytes: number;
-}
-
-interface NativeVertexArray {
-  readonly numberOfAttributes: number;
-  readonly indexBuffer?: NativeBuffer;
-  getAttribute: (index: number) => { vertexBuffer?: NativeBuffer };
 }
 
 // Public at runtime in Cesium; omitted from the generated declarations.
@@ -73,7 +68,7 @@ export function captureUploadedPrimitiveBytes(primitive: Primitive): boolean {
     || primitive.isDestroyed() || !primitive.ready) {
     return false;
   }
-  const vertexArrays = (primitive as Primitive & { _va: NativeVertexArray[] })._va;
+  const vertexArrays = (primitive as NativePrimitiveRuntime)._va;
   if (!Array.isArray(vertexArrays)) {
     throw new TypeError('Cesium Primitive._va buffer contract is unavailable');
   }
@@ -115,10 +110,13 @@ export function captureUploadedPrimitiveBytes(primitive: Primitive): boolean {
  * collections whose buffers/textures are uploaded later by VectorProvider.
  * Driver overhead, native batch textures and terrain-owned textures are excluded.
  */
-export function collectionGpuBytes(collection: object): number {
+export function collectionGpuBytes(collection: object, owners = new Set<object>()): number {
+  if (owners.has(collection))
+    return 0;
+  owners.add(collection);
   const shared = sharedPrimitives.get(collection);
   if (shared) {
-    return collectionGpuBytes(shared.primitive) + shared.additionalBytes;
+    return collectionGpuBytes(shared.primitive, owners) + shared.additionalBytes;
   }
   if (collection instanceof BufferPolygonCollection) {
     const positionBytes = 3 * componentBytes(collection.positionDatatype);
@@ -137,7 +135,7 @@ export function collectionGpuBytes(collection: object): number {
   if (collection instanceof PrimitiveCollection) {
     let bytes = 0;
     for (let index = 0; index < collection.length; index++)
-      bytes += collectionGpuBytes(collection.get(index));
+      bytes += collectionGpuBytes(collection.get(index), owners);
     return bytes;
   }
   return primitiveBytes.get(collection) ?? 0;
