@@ -1,9 +1,15 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { StyleSpecification as NativeStyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { HeightReference } from 'cesium';
+import type { AnySourceSpecification } from './source/source';
 import type { RequestTransformFunction } from './util/request';
 
+/** A MapLibre style with the tileset's declarative Canvas source support. */
+export type TilesetStyleSpecification = Omit<NativeStyleSpecification, 'sources'> & {
+  sources: Record<string, AnySourceSpecification>;
+};
+
 export interface CesiumVectorTilesetOptions {
-  style: StyleSpecification;
+  style: TilesetStyleSpecification;
   /** Whether the tileset is shown. Defaults to true. */
   show?: boolean;
   /** Estimated GPU cache budget in bytes. Defaults to 256 MiB; active tiles are retained. */

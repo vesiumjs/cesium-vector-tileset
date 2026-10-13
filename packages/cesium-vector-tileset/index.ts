@@ -4,6 +4,6 @@ export type { PatternPrimitiveID as PatternPickObject } from './src/render/patte
 export type { RasterPrimitivePickObject as RasterPickObject } from './src/render/raster/raster-renderer';
 export type { TilePickObject } from './src/render/vector/tile-conversion';
 export type { VectorDrapingProvider } from './src/render/vector/vector-tile-renderer';
-export type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions } from './src/tileset-options';
+export type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions, TilesetStyleSpecification } from './src/tileset-options';
 export type { TilesetImage, TilesetImageOptions, TilesetStats } from './src/tileset-types';
 export type { RequestTransformFunction } from './src/util/request';

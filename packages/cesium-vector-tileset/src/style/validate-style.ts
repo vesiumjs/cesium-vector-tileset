@@ -1,8 +1,9 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { TilesetStyleSpecification as StyleSpecification } from '../tileset-options';
 import type { Evented } from '../util/evented';
 import type { StyleSetterOptions } from './style';
 
-import { derefLayers, latest as styleSpec, validateStyleMin, ValidationError } from '@maplibre/maplibre-gl-style-spec';
+import { derefLayers, latest as styleSpec, validate, validateStyleMin, ValidationError } from '@maplibre/maplibre-gl-style-spec';
 import { warnOnce } from '../util/errors';
 import { ErrorEvent } from '../util/evented';
 
@@ -10,7 +11,17 @@ import { ErrorEvent } from '../util/evented';
  * Validates a single part of a style, e.g. a source, a filter or a paint property.
  * The options it takes are the ones assembled by {@link validateAndEmit}.
  */
-export type Validator = (options: any) => readonly ValidationError[];
+export interface ValidatorOptions {
+  value: unknown;
+  styleSpec: typeof styleSpec;
+  key?: string;
+  style?: StyleSpecification;
+  arrayIndex?: number;
+  layerType?: LayerSpecification['type'];
+  objectKey?: string;
+}
+
+export type Validator = (options: ValidatorOptions) => readonly ValidationError[];
 
 interface ValidateStyle {
   source: Validator;
@@ -23,10 +34,40 @@ interface ValidateStyle {
   filter: Validator;
   paintProperty: Validator;
   layoutProperty: Validator;
-  (b: any, a?: any | null): readonly ValidationError[];
+  (style: StyleSpecification): readonly ValidationError[];
 }
 
-export const validateStyle = validateStyleMin as unknown as ValidateStyle;
+export const validateStyle = validateStyleMin as ValidateStyle;
+
+const canvasStyleSpec = {
+  ...styleSpec,
+  source_canvas: {
+    type: { type: 'enum', values: ['canvas'], required: true },
+    coordinates: styleSpec.source_image.coordinates,
+    canvas: { type: '*', required: true },
+    animate: { type: 'boolean' },
+  },
+};
+
+/** Validate the adapter's Canvas fields with the same object/array rules as native sources. */
+export function validateCanvasSource(options: ValidatorOptions): readonly ValidationError[] {
+  const key = options.key ?? '';
+  const errors = validate({
+    ...options,
+    key,
+    valueSpec: { type: 'source_canvas' },
+    styleSpec: canvasStyleSpec,
+    style: options.style,
+  });
+  if (typeof options.value !== 'object' || options.value === null)
+    return errors;
+  const canvas = (options.value as Record<string, unknown>).canvas;
+  if (canvas !== undefined && typeof canvas !== 'string'
+    && !(typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement)) {
+    errors.push(new ValidationError(key ? `${key}.canvas` : 'canvas', canvas, 'string or HTMLCanvasElement expected'));
+  }
+  return errors;
+}
 
 export const SPEC_SOURCE_TYPES: ReadonlySet<string> = new Set(
   Object.keys(styleSpec)
@@ -34,25 +75,20 @@ export const SPEC_SOURCE_TYPES: ReadonlySet<string> = new Set(
     .map(key => key.slice('source_'.length).replaceAll('_', '-')),
 );
 
-/** Canvas sources are supported by this adapter outside the style schema. */
-function unjudgeableSourceKeys(style: StyleSpecification): string[] {
-  return Object.entries(style.sources ?? {})
-    .filter(([, source]) => (source as { type: string }).type === 'canvas')
-    .map(([id]) => `sources.${id}`);
-}
-
 /**
- * Validates a whole style and emits what it finds, ignoring the sources the spec cannot judge.
+ * Validates the native style schema and the adapter's declarative Canvas sources.
  *
  * @param emitter - the object to fire {@link ErrorEvent}s on
  * @param style - the style to validate
  * @returns whether validation failed, i.e. whether the caller should give up on the style
  */
 export function validateStyleAndEmit(emitter: Evented, style: StyleSpecification): boolean {
-  const ignored = unjudgeableSourceKeys(style);
-  const errors = validateStyle(style).filter(({ message }) =>
-    !ignored.some(key => message.startsWith(`${key}:`) || message.startsWith(`${key}.`)),
-  );
+  const errors = validateStyle(style).filter(error => error.identifier !== 'source.canvas');
+  for (const [id, source] of Object.entries(style.sources ?? {})) {
+    if (source.type === 'canvas') {
+      errors.push(...validateCanvasSource({ value: source, key: `sources.${id}`, style, styleSpec }));
+    }
+  }
   if (!errors.some(error => error.severity !== 'warning')) {
     for (const [index, layer] of derefLayers(style.layers).entries()) {
       if (layer.type === 'line' && layer.paint?.['line-gradient'] !== undefined) {
@@ -101,7 +137,7 @@ export function emitValidationErrors(emitter: Evented, errors: readonly Validati
 export function validateAndEmit(
   emitter: Evented,
   validator: Validator,
-  params: { value: unknown } & Record<string, unknown>,
+  params: Omit<ValidatorOptions, 'styleSpec'>,
   options?: StyleSetterOptions,
 ): boolean {
   if (options?.validate === false) {

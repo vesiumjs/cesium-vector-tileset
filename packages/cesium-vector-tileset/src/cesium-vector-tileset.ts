@@ -1,9 +1,8 @@
-import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { PatternPrimitiveID } from './render/pattern/pattern-renderer';
 import type { RasterPrimitivePickObject } from './render/raster/raster-renderer';
 import type { RenderFrameState } from './render/scene/render-frame';
 import type { TilePickObject } from './render/vector/tile-conversion';
-import type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions } from './tileset-options';
+import type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions, TilesetStyleSpecification as StyleSpecification } from './tileset-options';
 import type { TilesetImage, TilesetImageOptions, TilesetStats } from './tileset-types';
 import { Event, PrimitiveCollection } from 'cesium';
 import { TilesetRenderer } from './render/scene/tileset-renderer';

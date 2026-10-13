@@ -1,13 +1,12 @@
 import type { Evented } from '../util/evented';
 import type { WorkerDispatcher } from '../worker/dispatcher';
-import { ValidationError } from '@maplibre/maplibre-gl-style-spec';
 import { ErrorEvent } from '../util/evented';
 
 import { SourceDataEvent } from '../util/events';
 import { ImageSource } from './image-source';
 
 /**
- * Options to add a canvas source type to the map.
+ * Canvas source options for the tileset style's sources.
  */
 export interface CanvasSourceSpecification {
   /**
@@ -26,40 +25,15 @@ export interface CanvasSourceSpecification {
   /**
    * Canvas source from which to read pixels. Can be a string representing the ID of the canvas element, or the `HTMLCanvasElement` itself.
    */
-  canvas?: string | HTMLCanvasElement;
+  canvas: string | HTMLCanvasElement;
 }
 
 /**
- * A data source containing the contents of an HTML canvas. See {@link CanvasSourceSpecification} for detailed documentation of options.
+ * Places HTML canvas pixels at four geographical corners; see CanvasSourceSpecification.
+ * Configure the canvas source in the tileset style's sources and apply changes with CesiumVectorTileset.setStyle.
+ * Animated sources refresh their pixels each frame; use animate: false for a static canvas.
  *
- * @group Sources
- *
- * @example
- * ```ts
- * // add to map
- * map.addSource('some id', {
- *    type: 'canvas',
- *    canvas: 'idOfMyHTMLCanvas',
- *    animate: true,
- *    coordinates: [
- *        [-76.54, 39.18],
- *        [-76.52, 39.18],
- *        [-76.52, 39.17],
- *        [-76.54, 39.17]
- *    ]
- * });
- *
- * // update
- * let mySource = map.getSource('some id');
- * mySource.setCoordinates([
- *     [-76.54335737228394, 39.18579907229748],
- *     [-76.52803659439087, 39.1838364847587],
- *     [-76.5295386314392, 39.17683392507606],
- *     [-76.54520273208618, 39.17876344106642]
- * ]);
- *
- * map.removeSource('some id');  // remove
- * ```
+ * @internal
  */
 export class CanvasSource extends ImageSource {
   declare options: CanvasSourceSpecification;
@@ -68,7 +42,7 @@ export class CanvasSource extends ImageSource {
   width = 0;
   height = 0;
   /**
-   * Enables animation. The image will be copied from the canvas to the map on each frame.
+   * Enables animation and requests rendering of changing canvas pixels.
    */
   play = (): void => {
     this._playing = true;
@@ -76,7 +50,7 @@ export class CanvasSource extends ImageSource {
   };
 
   /**
-   * Disables animation. The map will display a static copy of the canvas image.
+   * Disables animation while retaining the current canvas image.
    */
   pause = (): void => {
     if (this._playing) {
@@ -93,26 +67,6 @@ export class CanvasSource extends ImageSource {
   constructor(id: string, options: CanvasSourceSpecification, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super(id, options, dispatcher, eventedParent);
     this.type = 'canvas';
-
-    // We build in some validation here, since canvas sources aren't included in the style spec:
-    if (!options.coordinates) {
-      this.fire(new ErrorEvent(new ValidationError(`sources.${id}`, null, 'missing required property "coordinates"')));
-    }
-    else if (!Array.isArray(options.coordinates) || options.coordinates.length !== 4
-      || options.coordinates.some(c => !Array.isArray(c) || c.length !== 2 || c.some(l => typeof l !== 'number'))) {
-      this.fire(new ErrorEvent(new ValidationError(`sources.${id}`, null, '"coordinates" property must be an array of 4 longitude/latitude array pairs')));
-    }
-
-    if (options.animate && typeof options.animate !== 'boolean') {
-      this.fire(new ErrorEvent(new ValidationError(`sources.${id}`, null, 'optional "animate" property must be a boolean value')));
-    }
-
-    if (!options.canvas) {
-      this.fire(new ErrorEvent(new ValidationError(`sources.${id}`, null, 'missing required property "canvas"')));
-    }
-    else if (typeof options.canvas !== 'string' && !(options.canvas instanceof HTMLCanvasElement)) {
-      this.fire(new ErrorEvent(new ValidationError(`sources.${id}`, null, '"canvas" must be either a string representing the ID of the canvas element from which to read, or an HTMLCanvasElement instance')));
-    }
 
     this.options = options;
     this.animate = options.animate !== undefined ? options.animate : true;
@@ -229,9 +183,6 @@ export class CanvasSource extends ImageSource {
     const configuredCanvas = this.options.canvas;
     if (configuredCanvas instanceof HTMLCanvasElement) {
       return configuredCanvas;
-    }
-    if (typeof configuredCanvas !== 'string') {
-      return undefined;
     }
     const element = document.getElementById(configuredCanvas);
     return element instanceof HTMLCanvasElement ? element : undefined;
