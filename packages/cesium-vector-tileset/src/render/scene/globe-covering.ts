@@ -22,21 +22,21 @@ export interface GlobeLike {
 
 function tilesForRectangle(
   rectangle: GlobeQuadtreeTileLike['rectangle'],
-  minZoom: number,
   maxZoom: number,
 ): OverscaledTileID[] {
   const longitudeSpan = rectangle.east >= rectangle.west
     ? rectangle.east - rectangle.west
     : rectangle.east - rectangle.west + 2 * Math.PI;
   const terrainZoom = Math.round(Math.log2(2 * Math.PI / longitudeSpan));
-  if (terrainZoom < minZoom) {
-    return [];
-  }
   const zoom = Math.min(maxZoom, terrainZoom);
   const world = 2 ** zoom;
   const south = Math.max(-MAX_LATITUDE, rectangle.south * 180 / Math.PI);
   const north = Math.min(MAX_LATITUDE, rectangle.north * 180 / Math.PI);
-  if (north <= south) {
+  // Tiled globe sources extend their Mercator edge row to the poles. A
+  // rendered terrain rectangle wholly in that cap still authorizes the row.
+  const northCap = south >= MAX_LATITUDE;
+  const southCap = north <= -MAX_LATITUDE;
+  if (north <= south && !northCap && !southCap) {
     return [];
   }
 
@@ -45,8 +45,8 @@ function tilesForRectangle(
   // visible at every otherwise exact edge.
   const x0 = Math.floor((rectangle.west + Math.PI) / (2 * Math.PI) * world + TILE_EDGE_EPSILON);
   const x1 = Math.ceil((rectangle.west + longitudeSpan + Math.PI) / (2 * Math.PI) * world - TILE_EDGE_EPSILON) - 1;
-  const y0 = Math.max(0, Math.floor(mercatorYfromLat(north) * world + TILE_EDGE_EPSILON));
-  const y1 = Math.min(world - 1, Math.ceil(mercatorYfromLat(south) * world - TILE_EDGE_EPSILON) - 1);
+  const y0 = northCap ? 0 : southCap ? world - 1 : Math.max(0, Math.floor(mercatorYfromLat(north) * world + TILE_EDGE_EPSILON));
+  const y1 = northCap ? 0 : southCap ? world - 1 : Math.min(world - 1, Math.ceil(mercatorYfromLat(south) * world - TILE_EDGE_EPSILON) - 1);
   const result: OverscaledTileID[] = [];
   for (let x = x0; x <= x1; x++) {
     const wrappedX = ((x % world) + world) % world;
@@ -133,7 +133,7 @@ export function globeVisibleTileIDs(
   const ceiling = Math.min(lod?.maxZoom ?? targetZoom, MAX_TILE_ZOOM);
   const onScreen = visible ?? (() => true);
   for (const tile of globe._surface._tilesToRender) {
-    for (const root of tilesForRectangle(tile.rectangle, minZoom, ceiling)) {
+    for (const root of tilesForRectangle(tile.rectangle, ceiling)) {
       if (lod) {
         collectCovering(root, ceiling, lod, onScreen, seen, result, true);
       }
@@ -143,5 +143,7 @@ export function globeVisibleTileIDs(
       }
     }
   }
-  return result;
+  // Terrain rectangles seed the traversal even below source minzoom. Only
+  // selected source nodes must satisfy it, including the no-LOD path.
+  return result.filter(id => id.canonical.z >= minZoom);
 }

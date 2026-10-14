@@ -28,7 +28,6 @@ interface GlobeCoveringCacheEntry {
   overscale: number;
   pose?: object;
   zoom: RenderZoom;
-  lod: SourceTileLod;
   revision: number;
   // Retained IDs can outlive both desired zoom and observed Globe changes.
   // Only actual primary sampling establishes these inputs; loaded extras do not.
@@ -84,6 +83,8 @@ export class SceneTileCovering {
 
   private _deferredCovering = false;
 
+  private _deferredPyramids = new Set<CoveringTilePyramid & Pick<TilePyramid, 'getLoadedTileIDs'>>();
+
   private _observedGlobe?: GlobeLike;
 
   private _observedTiles = new Set<string>();
@@ -126,6 +127,7 @@ export class SceneTileCovering {
       this._observedCamera = undefined;
       this._supplemented = false;
       this._deferredCovering = false;
+      this._deferredPyramids.clear();
       this._cameraCoverings = new WeakMap();
       this._removePreRender = scene?.preRender?.addEventListener(() => {
         if (this._mode !== scene.mode) {
@@ -135,6 +137,7 @@ export class SceneTileCovering {
           this._observedCamera = undefined;
           this._supplemented = false;
           this._deferredCovering = false;
+          this._deferredPyramids.clear();
         }
         const frame = scene._frameState;
         this._cameraPose = frame ? cameraPoseForFrame(frame, this._cameraCoverings, scene.mode) : undefined;
@@ -149,9 +152,26 @@ export class SceneTileCovering {
           const becameReady = !this._globeReady;
           const deferred = this._deferredCovering;
           this._deferredCovering = false;
+          const pending = this._deferredPyramids.size ? [...this._deferredPyramids] : undefined;
+          this._deferredPyramids.clear();
           const changed = this._captureGlobe();
           this._globeReady = true;
-          if (becameReady || changed || deferred)
+          let coveringChanged = false;
+          if (frame && pending) {
+            // Globe.render has now completed this camera's surface selection.
+            // Sample with its paired LOD and clipping state before another
+            // moving frame can replace the camera. Retain only source caches;
+            // publication and tile requests still happen in primitive.update.
+            for (const pyramid of pending) {
+              const cached = this._globeCoverings.get(pyramid);
+              if (!cached)
+                continue;
+              const previous = cached.tileIds;
+              const covering = this.covering(pyramid, frame, cached.overscale);
+              coveringChanged ||= Boolean(covering && covering.idealTileIDs !== previous);
+            }
+          }
+          if (becameReady || changed || deferred || coveringChanged)
             this._requestRender();
         }
       });
@@ -202,10 +222,10 @@ export class SceneTileCovering {
     const sameSource = cached?.source === source && cached.minZoom === minZoom
       && cached.sourceType === source.type && cached.maxZoom === source.maxzoom
       && cached.tileSize === source.tileSize && cached.overscale === overscale && cached.reparseOverscaled === source.reparseOverscaled;
-    // A completed Globe uses the desired source zoom of its observed pose,
-    // even while the next pose is already moving. If that pairing is unknown,
-    // retain source IDs until postRender; never resample old rectangles with
-    // the new pose's zoom or indefinitely hold the initial IDs during motion.
+    // Until Globe.render completes the current pose, keep its preceding
+    // authorized source IDs. Reusing an old LOD with the new frustum would
+    // refine a tilted horizon at the nadir level. postRender refreshes this
+    // source with the complete current pose, including during continuous motion.
     const deferred = Boolean(cached && sameSource && this._scene.globe?.show !== false
       && this._cameraPose !== this._observedCamera);
     let tileIds = cached?.tileIds;
@@ -216,25 +236,23 @@ export class SceneTileCovering {
     if (!cached || !sameSource || cached.revision !== this._revision || cached.zoom.zoom !== zoom.zoom
       || cached.pose !== this._cameraPose || cached.supplementalPose !== supplementalPose
       || cached.deferred !== deferred || cached.loadedTileIds !== loaded) {
-      const confirmed = deferred && cached?.pose === this._observedCamera;
-      const selectionZoom = confirmed ? cached!.zoom.zoom : zoom.zoom;
-      const retained = deferred && !confirmed;
+      const retained = deferred;
       primaryTileIds = retained
         ? cached!.primaryTileIds
         : globeVisibleTileIDs(
             this._renderedGlobe,
             minZoom,
-            selectionZoom,
-            confirmed ? cached!.lod : lod,
+            zoom.zoom,
+            lod,
             frameState.cullingVolume ? id => this._isVisible(id, frameState) : undefined,
           );
       // Retain only Globe-authorized requests across unconfirmed poses.
       // Loaded refinements are rechecked below, never promoted into requests.
       const selected = primaryTileIds.slice();
       if (!retained) {
-        primaryZoom = selectionZoom;
+        primaryZoom = zoom.zoom;
         primaryRevision = this._revision;
-        primaryLod = confirmed ? cached!.lod : lod;
+        primaryLod = lod;
       }
       if (loaded) {
         // A retained coarse owner masks its descendants by whole layer.
@@ -279,6 +297,8 @@ export class SceneTileCovering {
     // already sampled this Globe at its desired source zoom. Unknown or
     // stale sampling and loaded extras still owe a frame; Globe changes
     // independently wake through postRender's capture.
+    if (deferred)
+      this._deferredPyramids.add(tilePyramid);
     if (deferred && (primaryZoom !== zoom.zoom || primaryRevision !== this._revision || !primaryLod?.sameSelection(lod) || this._supplemented))
       this._deferredCovering = true;
     if (sameSource && cached?.zoom === zoom && cached.tileIds === tileIds) {
@@ -291,7 +311,6 @@ export class SceneTileCovering {
       cached.loadedTileIds = loaded;
       cached.primaryTileIds = primaryTileIds!;
       cached.pose = this._cameraPose;
-      cached.lod = lod;
       return cached.covering;
     }
     const covering = { ...zoom, idealTileIDs: tileIds! };
@@ -304,7 +323,6 @@ export class SceneTileCovering {
       overscale,
       pose: this._cameraPose,
       zoom,
-      lod,
       revision: this._revision,
       primaryZoom,
       primaryRevision,
@@ -371,6 +389,7 @@ export class SceneTileCovering {
     this._observedCamera = undefined;
     this._supplemented = false;
     this._deferredCovering = false;
+    this._deferredPyramids.clear();
     this._cameraCoverings = new WeakMap();
     this._observedGlobe = undefined;
     this._observedTiles.clear();

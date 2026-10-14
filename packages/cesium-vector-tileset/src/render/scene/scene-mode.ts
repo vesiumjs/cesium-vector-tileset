@@ -4,4 +4,5 @@
  * importing Cesium.
  */
 export const MORPHING = 0;
+export const COLUMBUS_VIEW = 1;
 export const SCENE3D = 3;

@@ -1,6 +1,6 @@
 import type { OrthographicOffCenterFrustum } from 'cesium';
 import type { WorkerDispatcher } from '../../../worker/dispatcher';
-import { Ellipsoid, SceneMode, WebMercatorProjection, WebMercatorTilingScheme } from 'cesium';
+import { Cartesian3, Ellipsoid, SceneMode, WebMercatorProjection, WebMercatorTilingScheme } from 'cesium';
 import { describe, expect, it, vi } from 'vitest';
 /* eslint-disable antfu/no-import-node-modules-by-path -- Independent pinned primary-source oracle; MapLibre does not export these source APIs. */
 import { LngLat } from '../../../../../../node_modules/maplibre-gl/src/geo/lng_lat';
@@ -12,6 +12,7 @@ import { cameraMercatorCoordinate } from '../../../../../../node_modules/maplibr
 import { GeoJSONSource } from '../../../source/geojson-source';
 import { OverscaledTileID } from '../../../tile/tile-id';
 import { Evented } from '../../../util/evented';
+import { globeCameraFocus } from '../camera-focus';
 import { globeVisibleTileIDs } from '../globe-covering';
 import { planarCoveringForFrame, sourceTileLodForFrame, zoomForFrame } from '../render-frame';
 import { sourceLodCamera, SourceTileLod } from '../source-tile-lod';
@@ -90,7 +91,7 @@ describe('source perspective LOD', () => {
     expect(sourceLodCamera(rotated, rotated.mapProjection, 1569, 906)!.variable).toBe(true);
   });
 
-  it('uses the current sky source focus while retaining local styles and distance-based detail', () => {
+  it('uses the current sky style focus while retaining distance-based source detail', () => {
     const frame = cameraFrame({ projection: new WebMercatorProjection(), longitude: 121.483, latitude: 31.226, height: 1800, heading: Math.PI / 4, pitch: -25 * Math.PI / 180, width: 1569, heightPixels: 906, fovY: 36.87511294314776 * Math.PI / 180 });
     const source = { type: 'vector', minzoom: 0, maxzoom: 24, tileSize: 512 };
     const pyramid = { getSource: () => source };
@@ -99,13 +100,10 @@ describe('source perspective LOD', () => {
     frame.camera.setView({ orientation: { heading: Math.PI / 4, pitch: 5 * Math.PI / 180, roll: 0 } });
     expect(sourceLodCamera(frame, frame.mapProjection, 1569, 906)!.variable).toBe(true);
     const sky = sourceTileLodForFrame(pyramid, frame, cache, 0)!;
-    const location = frame.mapProjection.ellipsoid.cartesianToCartographic(frame.camera.positionWC)!;
-    const official = new MercatorTransform({ maxPitch: 180, maxZoom: 24, renderWorldCopies: true });
-    official.resize(1569, 906);
-    official.setFov(36.87511294314776);
-    const expected = official.calculateCenterFromCameraLngLatAlt({ lng: location.longitude * 180 / Math.PI, lat: location.latitude * 180 / Math.PI }, location.height, frame.camera.heading * 180 / Math.PI, 90 + frame.camera.pitch * 180 / Math.PI);
+    const expected = globeCameraFocus(frame.camera, frame.mapProjection, 1569, 906)!;
     const current = zoomForFrame(pyramid, frame, cache)!;
-    expect(current.styleZoom).toBeCloseTo(initial.styleZoom, 10);
+    expect(current.styleZoom).toBeCloseTo(expected.zoom, 10);
+    expect(current.styleZoom).not.toBe(initial.styleZoom);
     expect(current.zoom).toBe(Math.floor(expected.zoom));
     expect(current.zoom).not.toBe(initial.zoom);
     const cold = cameraFrame({ projection: new WebMercatorProjection(), longitude: 121.483, latitude: 31.226, height: 1800, heading: Math.PI / 4, pitch: 5 * Math.PI / 180, width: 1569, heightPixels: 906, fovY: 36.87511294314776 * Math.PI / 180 });
@@ -119,6 +117,33 @@ describe('source perspective LOD', () => {
     expect(sourceTileLodForFrame(pyramid, frame, cache, 0)).toBe(sky);
     expect(zoomForFrame(pyramid, frame, cache)).toBe(current);
     expect(rays).not.toHaveBeenCalled();
+  });
+
+  it('keeps actual high-altitude horizon range out of the virtual Mercator focus', () => {
+    const frame = cameraFrame({ projection: new WebMercatorProjection(), width: 1280, heightPixels: 720 });
+    const position = Cartesian3.fromRadians(-0.5046846638637892, 0.8254161107998728, 1624731.2362690112);
+    const direction = new Cartesian3(0.0011260286238370942, 0.961477206042762, -0.27488236451206305);
+    const right = Cartesian3.normalize(Cartesian3.cross(direction, Cartesian3.UNIT_Z, new Cartesian3()), new Cartesian3());
+    frame.camera.setView({ destination: position, orientation: { direction, up: Cartesian3.cross(right, direction, new Cartesian3()) } });
+    const pyramid = { getSource: () => ({ type: 'vector', maxzoom: 18, reparseOverscaled: true }) };
+    const cache = new WeakMap();
+    const zoom = zoomForFrame(pyramid, frame, cache)!;
+    const camera = sourceLodCamera(frame, frame.mapProjection, 1280, 720)!;
+    const focus = globeCameraFocus(frame.camera, frame.mapProjection, 1280, 720)!;
+    expect(focus.center.elevation).toBe(0);
+    expect(focus.cameraToCenterDistance).toBeGreaterThan(1624731);
+    expect(zoom.styleZoom).toBeLessThan(5);
+    expect(camera.centerDistance).toBeGreaterThanOrEqual(camera.height);
+    const lod = sourceTileLodForFrame(pyramid, frame, cache, 0)!;
+    const world = new OverscaledTileID(0, 0, 0, 0, 0);
+    const far = new OverscaledTileID(5, 0, 5, 31, 10);
+    expect(lod.desiredZoom(world)).toBeLessThan(5);
+    expect(lod.desiredZoom(far)).toBeLessThan(5);
+    // Even a full-world ground authorization has a bounded mathematical
+    // covering at the actual scale; no ad hoc tile-count cap participates.
+    const ids = globeVisibleTileIDs({ _surface: { _tilesToRender: [{ level: 0, x: 0, y: 0, rectangle: { west: -Math.PI, south: -1.4, east: Math.PI, north: 1.4 } }] } }, 0, 18, lod);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.length).toBeLessThanOrEqual(4 ** 4);
   });
 
   it('rechecks source limits without a pose or center zoom change', () => {

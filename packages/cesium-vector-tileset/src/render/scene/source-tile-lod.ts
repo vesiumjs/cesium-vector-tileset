@@ -14,6 +14,7 @@ interface SourceLodCamera {
   centerDistance: number;
   fov: number;
   variable: boolean;
+  globe: boolean;
 }
 
 /** Capture the actual ground camera once per pose, including projected CV axes. */
@@ -35,11 +36,9 @@ export function sourceLodCamera(frame: RenderFrameState, projection: MapProjecti
     position = projection.ellipsoid.cartesianToCartographic(frame.camera.positionWC);
     normal = projection.ellipsoid.geodeticSurfaceNormal(frame.camera.positionWC);
     if (finiteFocus) {
-      // The optical target can be above the ellipsoid. Keep real ground
-      // height for tile distances and the focus's own Mercator distance for
-      // its source zoom, so fine nearby tiles survive a missing center hit.
-      center = position && { ...position, height: 0 };
-      finiteCenterDistance = height / (2 * Math.tan(fov / 2) * 512 * 2 ** finiteFocus.zoom);
+      // Globe focus is an actual surface/horizon point. Source zoom and
+      // ground range share that point; no virtual sky elevation is involved.
+      center = { longitude: finiteFocus.center.longitude * Math.PI / 180, latitude: finiteFocus.center.latitude * Math.PI / 180, height: 0 };
     }
     else {
       if (!ray)
@@ -109,7 +108,8 @@ export function sourceLodCamera(frame: RenderFrameState, projection: MapProjecti
     : 0;
   const zfov = fov * degrees * (Math.sqrt(1 - sinRoll ** 2) * height + sinRoll * width) / height;
   const maxConstantZoomPitch = Math.max(0, Math.min(60, 78.5 - zfov / 2));
-  return { x, y, height: distanceZ, centerDistance, fov, variable: pitch > maxConstantZoomPitch };
+  const globe = frame.mode === SceneMode.SCENE3D;
+  return { x, y, height: distanceZ, centerDistance, fov, variable: globe || pitch > maxConstantZoomPitch, globe };
 }
 
 function integralCos(power: number, from: number, to: number): number {
@@ -122,7 +122,7 @@ function integralCos(power: number, from: number, to: number): number {
 }
 
 /**
- * Source LOD from MapLibre GL JS 6.12 geo/projection/covering_tiles.ts
+ * Source LOD from MapLibre GL JS 6.14 geo/projection/covering_tiles.ts
  * createCalculateTileZoomFunction and MercatorCoveringTilesDetailsProvider.
  * Defaults 9.314/3.0, horizon 89.25 and midpoint integration are source rules,
  * not Native tuning. Globe still authorizes the candidate footprint.
@@ -161,13 +161,16 @@ export class SourceTileLod {
   }
 
   constructor(camera: SourceLodCamera | undefined, centerZoom: number, minZoom: number, maxZoom: number, round: boolean, reparse = false) {
-    this._camera = camera;
+    // Globe permits variable source detail above covering zoom four,
+    // independently of pitch (GlobeCoveringTilesDetailsProvider).
+    this._camera = camera?.globe && (round ? Math.round(centerZoom) : Math.floor(centerZoom)) <= 4 ? { ...camera, variable: false } : camera;
     this._centerZoom = centerZoom;
     this._minZoom = minZoom;
     this._maxZoom = maxZoom;
     this._round = round;
     this._reparse = reparse;
-    if (camera?.variable) {
+    if (this._camera?.variable) {
+      const camera = this._camera;
       const horizon = 89.25 * Math.PI / 180;
       const behavior = 2 * ((9.314 - 1) / Math.log2(Math.cos(horizon - camera.fov) / Math.cos(horizon)) - 1);
       const pitch = Math.acos(Math.min(1, camera.height / camera.centerDistance));

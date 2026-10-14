@@ -2,6 +2,7 @@ import type { RenderTransitionFlags } from '../../style/render-transition';
 import type { Style } from '../../style/style';
 import type { ExtrusionLighting } from '../vector/extrusion-geometry';
 import type { RenderLayerIndex } from './render-layer-index';
+import { Cartesian2 } from 'cesium';
 import { EvaluationParameters } from '../../style/evaluation-parameters';
 import { samePaintZoom } from '../../style/render-transition';
 
@@ -61,9 +62,12 @@ export class StyleEvaluation {
 
   private _evaluationId = 0;
 
-  constructor(style: Style, layers: RenderLayerIndex) {
+  private readonly _viewportRotation: Cartesian2;
+
+  constructor(style: Style, layers: RenderLayerIndex, viewportRotation = new Cartesian2(1, 0)) {
     this._style = style;
     this._layers = layers;
+    this._viewportRotation = viewportRotation;
     this.acceptVisibility();
   }
 
@@ -96,6 +100,7 @@ export class StyleEvaluation {
       now: time,
       zoomHistory: style.zoomHistory,
       fadeDuration: zoomChanged ? 0 : style.fadeDuration,
+      transition: style.getTransition(),
     })) ?? style.getRenderTransitionFlags();
 
     const currentVisibility = this._layers.visibility();
@@ -107,13 +112,16 @@ export class StyleEvaluation {
       const position = light.getCartesianPosition();
       const color = light.properties.get('color');
       const intensity = light.properties.get('intensity');
+      const viewportRotation = light.properties.get('anchor') === 'viewport' ? this._viewportRotation : undefined;
       const previous = this._lighting;
       if (!previous || previous.position[0] !== position.x || previous.position[1] !== position.y || previous.position[2] !== position.z
-        || previous.color.red !== color.r || previous.color.green !== color.g || previous.color.blue !== color.b || previous.intensity !== intensity) {
+        || previous.color.red !== color.r || previous.color.green !== color.g || previous.color.blue !== color.b || previous.intensity !== intensity
+        || previous.viewportRotation !== viewportRotation) {
         this._lighting = {
           position: [position.x, position.y, position.z],
           color: { red: color.r, green: color.g, blue: color.b },
           intensity,
+          viewportRotation,
         };
         this._lightRevision++;
       }

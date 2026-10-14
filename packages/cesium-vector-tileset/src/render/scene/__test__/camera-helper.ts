@@ -29,6 +29,7 @@ export function cameraFrame(options: CameraOptions = {}) {
   });
   const scene = {
     canvas,
+    mode,
     mapProjection: options.projection ?? new GeographicProjection(),
     drawingBufferWidth: width * pixelRatio,
     drawingBufferHeight: height * pixelRatio,
