@@ -17,7 +17,6 @@ export default defineConfig({
     ],
     include: [
       'packages/cesium-vector-tileset/src/**/__test__/*.test.ts',
-      'src/**/__test__/*.test.ts',
     ],
   },
 });

@@ -16,7 +16,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "pnpm build:ci && pnpm build && playwright test",
-    "test:e2e:live": "E2E_LIVE=1 playwright test",
     "test:e2e:install": "playwright install chromium",
     "lint": "pnpm lint:eslint && pnpm lint:tsc",
     "lint:eslint": "eslint . --fix",

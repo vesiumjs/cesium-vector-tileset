@@ -1,15 +1,12 @@
 import process from 'node:process';
 import { defineConfig } from 'playwright/test';
 
-const live = process.env.E2E_LIVE === '1';
 const hardware = process.env.E2E_GPU === 'hardware';
 
 export default defineConfig({
   testDir: './e2e',
   outputDir: './node_modules/.cache/playwright/test-results',
   testMatch: '**/*.spec.ts',
-  grep: live ? /@live/ : undefined,
-  grepInvert: live ? undefined : /@live/,
   workers: 1,
   timeout: 120_000,
   expect: { timeout: 15_000 },
