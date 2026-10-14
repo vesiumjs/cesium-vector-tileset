@@ -33,23 +33,17 @@ export interface DemoPreset {
   heading: number;
   pitch: number;
   roll: number;
-  styleId: StyleId;
 }
 
+// Camera presets describe views only. Any style can be used with any preset.
 export const demoPresets = [
-  { id: 'shanghai', name: '上海 · 跨江高层白模', longitude: 121.478, latitude: 31.224, height: 1600, heading: 55, pitch: -30, roll: 0, styleId: 'buildings' },
-  { id: 'manhattan', name: '曼哈顿 · 滨水高楼白模', longitude: -74.018, latitude: 40.699, height: 1000, heading: 32, pitch: -25, roll: 0, styleId: 'buildings' },
-  { id: 'hong-kong', name: '香港 · 海岸高楼白模', longitude: 114.177, latitude: 22.2865, height: 1000, heading: 250, pitch: -25, roll: 0, styleId: 'buildings' },
-  { id: 'shinjuku', name: '东京新宿 · 高负载', longitude: 139.7005, latitude: 35.6905, height: 1500, heading: 15, pitch: -45, roll: 0, styleId: 'liberty' },
-  { id: 'london', name: '伦敦桥 · 接缝与标注', longitude: -0.0863, latitude: 51.5078, height: 900, heading: 110, pitch: -35, roll: 0, styleId: 'osm' },
-  { id: 'amsterdam', name: '阿姆斯特丹 · 密集小建筑', longitude: 4.8954, latitude: 52.3728, height: 350, heading: 60, pitch: -40, roll: 0, styleId: 'buildings' },
-  { id: 'san-francisco', name: '旧金山 · 长距离斜视', longitude: -122.392, latitude: 37.803, height: 1000, heading: 225, pitch: -25, roll: 0, styleId: 'versatiles' },
-  { id: 'paris', name: '巴黎 · 复杂路口与小建筑', longitude: 2.285, latitude: 48.867, height: 900, heading: 45, pitch: -40, roll: 0, styleId: 'osm' },
-  { id: 'sao-paulo', name: '圣保罗 · 大片密集城区', longitude: -46.6559, latitude: -23.5614, height: 1500, heading: 50, pitch: -35, roll: 0, styleId: 'liberty' },
-  { id: 'dateline', name: '斐济 · 日期变更线', longitude: 179.99, latitude: -16.8, height: 45000, heading: 90, pitch: -70, roll: 0, styleId: 'bright' },
-  { id: 'chicago', name: '芝加哥 · 湖岸高层街区', longitude: -87.606, latitude: 41.884, height: 1200, heading: 270, pitch: -30, roll: 0, styleId: 'liberty' },
-  { id: 'barcelona', name: '巴塞罗那 · 密集网格路口', longitude: 2.149, latitude: 41.380, height: 1500, heading: 45, pitch: -55, roll: 0, styleId: 'liberty' },
-  { id: 'chongqing', name: '重庆 · 两江桥梁与路网', longitude: 106.596, latitude: 29.578, height: 1600, heading: 240, pitch: -45, roll: 0, styleId: 'liberty' },
+  { id: 'barcelona', name: '巴塞罗那 · 城区俯视', longitude: 2.17, latitude: 41.39, height: 12000, heading: 0, pitch: -90, roll: 0 },
+  { id: 'world', name: '全球 · 地球俯视', longitude: 110, latitude: 25, height: 18000000, heading: 0, pitch: -90, roll: 0 },
+  { id: 'manhattan', name: '曼哈顿 · 高层建筑', longitude: -74.018, latitude: 40.699, height: 1000, heading: 32, pitch: -30, roll: 0 },
+  { id: 'amsterdam', name: '阿姆斯特丹 · 密集街区', longitude: 4.886, latitude: 52.368, height: 450, heading: 60, pitch: -40, roll: 0 },
+  { id: 'london', name: '伦敦 · 河流与桥梁', longitude: -0.091, latitude: 51.498, height: 1800, heading: 0, pitch: -55, roll: 0 },
+  { id: 'paris', name: '巴黎 · 放射路网', longitude: 2.295, latitude: 48.874, height: 4000, heading: 0, pitch: -90, roll: 0 },
+  { id: 'shanghai', name: '上海 · 滨江高层', longitude: 121.478, latitude: 31.224, height: 1600, heading: 55, pitch: -35, roll: 0 },
 ] as const satisfies readonly DemoPreset[];
 
 export type DemoPresetId = typeof demoPresets[number]['id'];

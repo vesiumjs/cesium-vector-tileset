@@ -1,161 +1,177 @@
 <script setup lang="ts">
 import type { DemoSelection } from './demo-selection';
 import { ref, watch } from 'vue';
-import { createDemoSelection } from './demo-selection';
 import { demoPresets, modeOptions, stylePresets } from './preset-catalog';
 
-defineProps<{ hasTileset: boolean; loading: boolean }>();
-const emit = defineEmits<{ add: []; remove: [] }>();
 const selection = defineModel<DemoSelection>({ required: true });
 const customStyleInput = ref(selection.value.style);
+const controlsOpen = ref(false);
 
 watch(() => selection.value.style, style => customStyleInput.value = style);
-
-function selectPreset(): void {
-  Object.assign(selection.value, createDemoSelection(selection.value.preset), { resolutionRatio: selection.value.resolutionRatio });
-  customStyleInput.value = '';
-}
-
-function selectSource(): void {
-  selection.value.style = customStyleInput.value = '';
-}
 </script>
 
 <template>
-  <aside class="controls" aria-label="地图预设">
-    <label>
-      预设
-      <select v-model="selection.preset" data-testid="preset-select" @change="selectPreset">
-        <option v-for="item in demoPresets" :key="item.id" :value="item.id">{{ item.name }}</option>
-      </select>
-    </label>
-    <label>
-      矢量地图
-      <select v-model="selection.source" data-testid="source-select" @change="selectSource">
-        <option v-for="item in stylePresets" :key="item.id" :value="item.id">{{ item.name }}</option>
-      </select>
-    </label>
-    <label>
-      视图
-      <select v-model="selection.mode" data-testid="scene-select">
-        <option v-for="item in modeOptions" :key="item.id" :value="item.id">{{ item.name }}</option>
-      </select>
-    </label>
-    <slot name="camera" />
-    <details>
-      <summary>自定义 Style JSON 地址</summary>
-      <form class="custom-style" @submit.prevent="selection.style = customStyleInput">
-        <input
-          v-model="customStyleInput"
-          type="url"
-          pattern="https?://.*"
-          required
-          aria-label="Style JSON 地址"
-          placeholder="https://…/style.json"
-        >
-        <button type="submit">
-          加载
-        </button>
+  <aside class="controls" :data-expanded="controlsOpen" aria-label="地图设置">
+    <button
+      class="controls-toggle"
+      data-testid="controls-toggle"
+      :aria-expanded="controlsOpen"
+      aria-controls="controls-content"
+      @click="controlsOpen = !controlsOpen"
+    >
+      地图设置 <span>{{ controlsOpen ? '收起 −' : '展开 +' }}</span>
+    </button>
+    <div id="controls-content" class="controls-content">
+      <label class="field">
+        场景
+        <select v-model="selection.preset" data-testid="preset-select">
+          <option v-for="item in demoPresets" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select>
+      </label>
+      <label class="field">
+        样式
+        <select v-model="selection.source" data-testid="source-select" @change="selection.style = ''">
+          <option v-for="item in stylePresets" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select>
+      </label>
+      <label class="field">
+        视图
+        <select v-model="selection.mode" data-testid="scene-select">
+          <option v-for="item in modeOptions" :key="item.id" :value="item.id">{{ item.id === '3d' ? '三维地球' : item.id === '2d' ? '二维地图' : '哥伦布视图' }}</option>
+        </select>
+      </label>
+      <label class="high-dpi">
+        <input v-model="selection.highDpi" type="checkbox" data-testid="high-dpi-switch">
+        高清显示
+      </label>
+      <form class="custom-style" @submit.prevent="selection.style = customStyleInput.trim()">
+        <label for="style-url">自定义 Style JSON 地址</label>
+        <div>
+          <input
+            id="style-url"
+            v-model="customStyleInput"
+            type="url"
+            pattern="https?://.*"
+            required
+            placeholder="https://…/style.json"
+          >
+          <button type="submit">
+            加载
+          </button>
+        </div>
       </form>
-    </details>
-    <p v-if="selection.style" class="hint">
-      当前使用自定义样式
-    </p>
-    <div class="actions">
-      <button data-testid="add-tileset" :disabled="loading" @click="emit('add')">
-        添加
-      </button>
-      <button data-testid="remove-tileset" :disabled="!hasTileset && !loading" @click="emit('remove')">
-        移除
-      </button>
-      <a href="https://github.com/vesiumjs/cesium-vector-tileset/blob/main/README.zh-CN.md" target="_blank" rel="noreferrer">使用说明</a>
-      <a href="https://github.com/vesiumjs/cesium-vector-tileset/issues" target="_blank" rel="noreferrer">反馈</a>
+      <slot name="camera" />
+      <slot />
+      <a class="github" href="https://github.com/vesiumjs/cesium-vector-tileset" target="_blank" rel="noreferrer">GitHub ↗</a>
     </div>
-    <slot />
   </aside>
 </template>
 
 <style scoped>
 .controls {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  width: min(310px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top));
+  left: calc(12px + env(safe-area-inset-left));
+  width: 300px;
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   overflow-y: auto;
-  box-sizing: border-box;
-  padding: 14px;
-  border: 1px solid #ffffff26;
-  border-radius: 10px;
-  background: #18212ded;
-  color: #edf2f7;
-  font:
-    13px/1.5 system-ui,
-    sans-serif;
-  box-shadow: 0 4px 24px #0004;
+  border: 1px solid var(--demo-border);
+  border-radius: 4px;
+  background: var(--demo-surface);
+  color: var(--demo-text);
+  font-size: 12px;
 }
-label {
-  display: flex;
+.controls-toggle {
+  display: none;
+}
+.controls-content {
+  padding: 10px;
+}
+.field {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-select {
-  flex: 1;
-  min-width: 0;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 select,
 button,
-input {
-  padding: 6px 8px;
-  border: 1px solid #ffffff30;
-  border-radius: 5px;
-  background: #263445;
+input[type='url'] {
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 6px;
+  border: 1px solid var(--demo-border);
+  border-radius: 3px;
+  background: var(--demo-surface);
   color: inherit;
-  font: inherit;
 }
-button,
-summary {
+.high-dpi {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+}
+input[type='checkbox'] {
+  margin: 0;
+  accent-color: var(--demo-accent);
+}
+.custom-style {
+  margin-bottom: 8px;
+}
+.custom-style label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--demo-muted);
+}
+.custom-style div {
+  display: flex;
+  gap: 6px;
+}
+input[type='url'] {
+  flex: 1;
+  width: 0;
+}
+button {
   cursor: pointer;
-}
-button:hover {
-  background: #365b7a;
-}
-button:disabled {
-  cursor: default;
-  opacity: 0.5;
 }
 button:focus-visible,
 select:focus-visible,
 input:focus-visible,
-summary:focus-visible,
 a:focus-visible {
-  outline: 2px solid #7dd3fc;
+  outline: 2px solid var(--demo-accent);
   outline-offset: 2px;
 }
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 12px;
-}
-details {
-  margin-top: 10px;
-}
-.hint {
-  color: #b9c7d6;
-  margin: 8px 0;
-}
-.custom-style {
-  display: flex;
-  gap: 6px;
+.github {
+  display: inline-block;
   margin-top: 8px;
+  color: var(--demo-accent);
 }
-input {
-  min-width: 0;
-  flex: 1;
-}
-a {
-  color: #7dd3fc;
+@media (max-width: 720px) {
+  .controls {
+    right: calc(12px + env(safe-area-inset-right));
+    width: auto;
+  }
+  .controls-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 44px;
+    padding: 8px 10px;
+    border: 0;
+  }
+  .controls-content {
+    display: none;
+    padding-top: 0;
+  }
+  .controls[data-expanded='true'] .controls-content {
+    display: block;
+  }
+  select,
+  button,
+  input[type='url'],
+  .high-dpi {
+    min-height: 40px;
+  }
 }
 </style>

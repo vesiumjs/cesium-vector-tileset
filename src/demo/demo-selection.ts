@@ -7,24 +7,21 @@ export interface DemoSelection {
   style: string;
   mode: DemoMode;
   resolutionRatio: number;
+  highDpi: boolean;
 }
 
 export const demoDefaults: DemoSelection = {
   preset: demoPresets[0].id,
-  source: demoPresets[0].styleId,
+  source: stylePresets[0].id,
   style: '',
   mode: modeOptions[0].id,
   resolutionRatio: 1,
+  highDpi: true,
 };
-
-export function createDemoSelection(id: DemoPresetId = demoDefaults.preset): DemoSelection {
-  const preset = demoPresets.find(preset => preset.id === id)!;
-  return { ...demoDefaults, preset: id, source: preset.styleId };
-}
 
 export function readDemoSelection(parameters: URLSearchParams): DemoSelection {
   const preset = demoPresets.find(preset => preset.id === parameters.get('preset')) ?? demoPresets[0];
-  const selection = createDemoSelection(preset.id);
+  const selection = { ...demoDefaults, preset: preset.id };
   const source = stylePresets.find(style => style.id === parameters.get('source'));
   const mode = modeOptions.find(mode => mode.id === parameters.get('mode'));
   let style = '';
@@ -43,6 +40,7 @@ export function readDemoSelection(parameters: URLSearchParams): DemoSelection {
     mode: mode?.id ?? selection.mode,
     style,
     resolutionRatio: Number.isFinite(resolutionRatio) && resolutionRatio > 0 ? resolutionRatio : selection.resolutionRatio,
+    highDpi: parameters.get('hd') !== '0',
   };
 }
 
@@ -57,5 +55,7 @@ export function demoSearchParameters(selection: DemoSelection): URLSearchParams 
     parameters.set('style', selection.style);
   if (selection.resolutionRatio !== demoDefaults.resolutionRatio)
     parameters.set('resolutionRatio', String(selection.resolutionRatio));
+  if (!selection.highDpi)
+    parameters.set('hd', '0');
   return parameters;
 }

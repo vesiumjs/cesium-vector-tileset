@@ -9,9 +9,9 @@ export const widgetOptions = {
   mapProjection: new WebMercatorProjection(),
   requestRenderMode: true,
   maximumRenderTimeChange: Infinity,
+  useBrowserRecommendedResolution: false,
 } satisfies NonNullable<ConstructorParameters<typeof CesiumWidget>[1]>;
 
-export const sceneOptions = { debugShowFramesPerSecond: true };
 const sceneModes = {
   '3d': { value: SceneMode.SCENE3D, morph: 'morphTo3D' },
   '2d': { value: SceneMode.SCENE2D, morph: 'morphTo2D' },

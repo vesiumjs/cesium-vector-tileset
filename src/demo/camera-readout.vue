@@ -95,18 +95,18 @@ function formatBearing(value: number | undefined): string {
       </div>
       <div>
         <dt>{{ scene.mode === SceneMode.SCENE2D ? '视野宽度' : '高度' }}</dt>
-        <dd><output data-testid="camera-height" :data-value="pose?.height">{{ format(pose?.height, 2) }} m</output></dd>
+        <dd><output data-testid="camera-height" :data-value="pose?.height">{{ format(pose?.height, 0) }} m</output></dd>
       </div>
       <div>
-        <dt>Heading</dt>
+        <dt>方位角</dt>
         <dd><output data-testid="camera-heading" :data-value="pose?.heading">{{ formatBearing(pose?.heading) }}°</output></dd>
       </div>
       <div>
-        <dt>Pitch</dt>
+        <dt>俯仰角</dt>
         <dd><output data-testid="camera-pitch" :data-value="pose?.pitch">{{ format(pose?.pitch, 1) }}°</output></dd>
       </div>
       <div>
-        <dt>Roll</dt>
+        <dt>横滚角</dt>
         <dd><output data-testid="camera-roll" :data-value="pose?.roll">{{ formatBearing(pose?.roll) }}°</output></dd>
       </div>
     </dl>
@@ -115,24 +115,23 @@ function formatBearing(value: number | undefined): string {
 
 <style scoped>
 .camera {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid #ffffff26;
+  padding: 8px 0;
+  border-top: 1px solid var(--demo-border);
 }
 dl {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 6px;
+  gap: 6px;
   margin: 0;
   font-variant-numeric: tabular-nums;
 }
 dt {
-  color: #b9c7d6;
+  color: var(--demo-muted);
   font-size: 11px;
 }
 dd {
   margin: 0;
-  font-size: 12px;
-  overflow-wrap: anywhere;
+  font-size: 11px;
+  white-space: nowrap;
 }
 </style>

@@ -5,7 +5,8 @@ import { computed, onBeforeUnmount, onMounted, onUnmounted, ref, shallowRef, use
 import CameraReadout from './demo/camera-readout.vue';
 import ConfigPanel from './demo/config-panel.vue';
 import { demoMapConfig, demoSearchParameters, readDemoSelection } from './demo/demo-selection';
-import { demoCameraConfig, sceneOptions, widgetOptions } from './demo/scene-config';
+import PerformanceReadout from './demo/performance-readout.vue';
+import { demoCameraConfig, widgetOptions } from './demo/scene-config';
 
 const container = useTemplateRef<HTMLDivElement>('container');
 const selection = ref(readDemoSelection(new URLSearchParams(location.search)));
@@ -15,7 +16,6 @@ const error = ref('');
 const loading = ref(false);
 const mapConfig = computed(() => demoMapConfig(selection.value));
 const cameraConfig = computed(() => demoCameraConfig(selection.value));
-const status = computed(() => error.value ? '地图加载失败' : loading.value ? '正在加载地图' : tileset.value ? '地图已加载' : '地图已移除');
 let loadController: AbortController | undefined;
 let credit: Credit | undefined;
 let removeError: (() => void) | undefined;
@@ -46,6 +46,7 @@ async function addTileset(): Promise<void> {
   error.value = '';
   let candidate: CesiumVectorTileset | undefined;
   try {
+    // Pass cancellation to the SDK; superseded loads must stop their own work.
     candidate = await CesiumVectorTileset.fromUrl(config.url, { signal: controller.signal });
     controller.signal.throwIfAborted();
     loadController = undefined;
@@ -75,6 +76,8 @@ async function addTileset(): Promise<void> {
   }
 }
 
+// Style and camera depend on separate selection fields: changing a scene
+// moves only the camera; changing a style replaces only the tileset.
 watch([widget, mapConfig], () => void addTileset());
 watch([widget, cameraConfig], ([current, config], previous) => {
   if (!current)
@@ -86,9 +89,13 @@ watch([widget, cameraConfig], ([current, config], previous) => {
     scene[config.mode.morph](0);
   scene.camera.flyTo({ destination: config.destination, orientation: config.orientation, duration });
 });
-watch([widget, () => selection.value.resolutionRatio], ([current, ratio]) => {
-  if (current)
-    current.resolutionScale = ratio;
+watch([widget, () => selection.value.resolutionRatio, () => selection.value.highDpi], ([current, ratio, highDpi]) => {
+  if (!current)
+    return;
+  current.useBrowserRecommendedResolution = !highDpi;
+  current.resolutionScale = ratio;
+  current.resize();
+  current.scene.requestRender();
 });
 watch(() => demoSearchParameters(selection.value).toString(), (search) => {
   const url = new URL(location.href);
@@ -98,8 +105,12 @@ watch(() => demoSearchParameters(selection.value).toString(), (search) => {
 
 onMounted(() => {
   try {
-    const current = new CesiumWidget(container.value!, { ...widgetOptions, sceneMode: cameraConfig.value.mode.value });
-    Object.assign(current.scene, sceneOptions);
+    const current = new CesiumWidget(container.value!, {
+      ...widgetOptions,
+      sceneMode: cameraConfig.value.mode.value,
+      useBrowserRecommendedResolution: !selection.value.highDpi,
+    });
+    current.scene.debugShowFramesPerSecond = true;
     widget.value = current;
     removeFrame = current.scene.postRender.addEventListener(() => {
       if (!loadController && !error.value && tileset.value)
@@ -119,12 +130,13 @@ onUnmounted(() => widget.value?.destroy());
 
 <template>
   <div ref="container" class="map" />
-  <ConfigPanel v-model="selection" :has-tileset="!!tileset" :loading="loading" @add="addTileset" @remove="removeTileset">
+  <ConfigPanel v-model="selection">
     <template #camera>
       <CameraReadout v-if="widget" :scene="widget.scene" />
     </template>
-    <p class="status" data-testid="tileset-status" role="status" :aria-busy="loading">
-      {{ status }}
+    <PerformanceReadout v-if="widget" :scene="widget.scene" :tileset="tileset" />
+    <p v-if="loading" class="loading" role="status">
+      正在加载…
     </p>
     <p v-if="error" role="alert">
       {{ error }}
@@ -132,17 +144,54 @@ onUnmounted(() => widget.value?.destroy());
   </ConfigPanel>
 </template>
 
+<style>
+:root {
+  color-scheme: dark;
+  --demo-surface: #202830;
+  --demo-border: #56606a;
+  --demo-text: #eef0f2;
+  --demo-muted: #b7bec5;
+  --demo-accent: #abd4fb;
+  font:
+    14px/1.5 system-ui,
+    sans-serif;
+}
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+body {
+  background: #101b23;
+}
+button,
+select,
+input {
+  font: inherit;
+}
+* {
+  box-sizing: border-box;
+}
+</style>
+
 <style scoped>
 .map {
-  position: absolute;
+  position: fixed;
   inset: 0;
 }
-.status {
-  margin: 12px 0 0;
-  color: #b9c7d6;
+.loading,
+[role='alert'] {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.loading {
+  color: var(--demo-muted);
 }
 [role='alert'] {
-  color: #fca5a5;
+  color: #ffb0b0;
   overflow-wrap: anywhere;
 }
 </style>
