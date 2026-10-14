@@ -2,85 +2,86 @@
 
 English | [简体中文](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/README.zh-CN.md)
 
-Add a styled vector map to your Cesium scene: roads, land and water, points, labels, and extruded buildings. Use MapLibre-style JSON to control the map's appearance alongside your existing Cesium content.
+A vector map for Cesium. Display roads, water, labels, icons and buildings with a MapLibre-style JSON, alongside the other content in your scene.
 
-The library supports 3D, 2D, and Columbus View, works with any frontend framework, and includes TypeScript declarations. It adapts MapLibre GL JS's style and tile processing to Cesium's rendering APIs.
+Use it in 3D, 2D or Columbus View, with any frontend framework. TypeScript declarations are included.
 
-[Live demo](https://vesiumjs.github.io/cesium-vector-tileset/) — choose a view preset, map style, and scene mode; add or remove the tileset, and follow your current camera position and heading, pitch, and roll.
+[Try the demo](https://vesiumjs.github.io/cesium-vector-tileset/) · [Example styles](https://github.com/vesiumjs/cesium-vector-tileset/tree/main/src/styles) · [GitHub](https://github.com/vesiumjs/cesium-vector-tileset)
 
 ## Gallery
 
-Click a screenshot to explore the map in the live demo.
+Choose a scene, style and view independently. Each image opens one combination in the demo; changing the scene keeps your selected style.
 
-| Shanghai · Lujiazui skyline                                                                                                                                                                                                            | Hong Kong · Central waterfront                                                                                                                                                                                                              |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [![Shanghai · Lujiazui skyline](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/shanghai-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=shanghai&source=buildings&mode=3d) | [![Hong Kong · Central waterfront](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/hong-kong-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=hong-kong&source=buildings&mode=3d) |
-| **London · 2D roads and labels**                                                                                                                                                                                                       | **Barcelona · Dense street grid**                                                                                                                                                                                                           |
-| [![London · 2D roads and labels](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/london-2d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=liberty&mode=2d)             | [![Barcelona · Dense street grid](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/barcelona-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=barcelona&source=liberty&mode=3d)           |
-| **Chicago · Buildings and labels**                                                                                                                                                                                                     | **Chongqing · Rivers and bridges**                                                                                                                                                                                                          |
-| [![Chicago · Buildings and labels](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/chicago-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chicago&source=liberty&mode=3d)         | [![Chongqing · Rivers and bridges](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/chongqing-3d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=chongqing&source=liberty&mode=3d)          |
+| Scenes                                                                                                                                                                                                                                       | More scenes                                                                                                                                                                                                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [![Barcelona · City overview](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-barcelona-overview.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=barcelona&source=liberty&mode=3d)     | [![Manhattan · Skyline](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-manhattan-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=manhattan&source=buildings&mode=3d) |
+| [![London · River and bridges](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-london-bridge.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=liberty&mode=3d)            | [![World · Globe](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-world-overview.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=world&source=world&mode=3d)                    |
+| [![Amsterdam · Canal district](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-amsterdam-buildings.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=amsterdam&source=buildings&mode=3d) | [![Paris · Street network](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-paris-streets.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=paris&source=bright&mode=3d)           |
+| [![Shanghai · Riverside](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-shanghai-river.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=shanghai&source=liberty&mode=3d)               | [![London · 2D map](https://raw.githubusercontent.com/vesiumjs/cesium-vector-tileset/main/docs/images/demo-london-2d.jpg)](https://vesiumjs.github.io/cesium-vector-tileset/?preset=london&source=positron&mode=2d)                   |
 
-Map data: [OpenFreeMap](https://openfreemap.org/) / [OpenMapTiles](https://www.openmaptiles.org/) / © [OpenStreetMap](https://www.openstreetmap.org/copyright).
+Data: [OpenFreeMap](https://openfreemap.org/), © [OpenStreetMap](https://www.openstreetmap.org/copyright), and [MapLibre demo tiles](https://demotiles.maplibre.org/).
 
-## Quick start
-
-Install the library and Cesium:
+## Install
 
 ```bash
 pnpm add cesium@^1.146.0 cesium-vector-tileset
 ```
 
-The default entry is unminified. Import from `cesium-vector-tileset/min` to use the minified version; CDN files use the `.min.mjs` suffix, including their Workers.
+Configure Cesium's static assets as you normally would. For Vite, the demo's [configuration](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/vite.config.ts) uses `unplugin-cesium`. Give your map container a height, for example `<div id="map" style="height: 100vh"></div>`.
 
-The example assumes you already have a Cesium `Scene` and a render loop. Serve a version 8 style JSON at `/styles/map.json`, or replace the URL with your map provider's style URL:
+## Add a map
 
 ```ts
-import type { Scene } from 'cesium';
+import { Viewer } from 'cesium';
 import { CesiumVectorTileset } from 'cesium-vector-tileset';
+import 'cesium/Build/Cesium/Widgets/widgets.css';
 
-export async function addVectorMap(scene: Scene) {
-  const tileset = await CesiumVectorTileset.fromUrl('/styles/map.json');
-  tileset.errorEvent.addEventListener((error) => {
-    console.error('Vector map error:', error);
-  });
-  return scene.primitives.add(tileset);
-}
+const viewer = new Viewer('map', { baseLayer: false });
+const map = await CesiumVectorTileset.fromUrl(
+  'https://tiles.openfreemap.org/styles/liberty',
+);
+viewer.scene.primitives.add(map);
+
+map.errorEvent.addEventListener(error => console.error(error));
 ```
 
-Move the camera to an area covered by your source. Vector tile layers need a `source-layer` that matches the tile data. You can also pass an inline style, including GeoJSON, to `new CesiumVectorTileset({ style })` and await `whenReady()` before adding it to the scene. See the demo's [example styles](https://github.com/vesiumjs/cesium-vector-tileset/tree/main/src/styles) for map definitions.
+Already have a Cesium viewer? Add the map to its `scene.primitives`; the library leaves your camera under your control. `fromUrl()` initializes the style, then the visible tiles load as the camera moves. Catch its rejected promise for initialization errors.
 
-Deploy Cesium's static assets with your application, using the same Cesium installation as your scene. Keep the library's distributed modules together, including `worker.mjs` and `geometry-worker.mjs`; browser rendering requires WebGL and module Workers. The demo's [Vite configuration](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/vite.config.ts) shows asset setup with `unplugin-cesium`.
+Use any compatible version 8 style JSON. For your own data, pass an inline style to `new CesiumVectorTileset({ style })`; [these examples](https://github.com/vesiumjs/cesium-vector-tileset/tree/main/src/styles) show map definitions. A vector layer's `source-layer` must match the layer name in its tile data. Your server needs to allow browser requests for styles, tiles, sprites and fonts.
 
-## Working with the map
-
-`fromUrl()` and `whenReady()` wait for style initialization. Viewport tiles load after the map joins the scene; `tilesLoaded` reports whether current loading and rendering preparation have settled, and can change as the camera moves. Catch initialization failures and listen to `errorEvent` for later errors.
-
-Change `show` to toggle visibility and call `setStyle(nextStyle)` to change the map's style. The library requests frames for its asynchronous work in Cesium's demand rendering mode. Your application continues to own the scene and camera.
-
-For authenticated or customized resource requests, pass `transformRequest` when creating the tileset. `gpuMemoryBudgetBytes` controls the estimated resident tile GPU cache budget (256 MiB by default); active tiles remain resident, so it is not a hard limit on total GPU memory. `stats()` helps inspect loading and resource use. Options and method signatures are included in the package's TypeScript declarations.
-
-Remove and dispose of the map when it is no longer needed. Cesium collections normally destroy removed primitives; this also handles collections configured to retain them:
+## Common operations
 
 ```ts
-scene.primitives.remove(tileset);
-if (!tileset.isDestroyed()) {
-  tileset.destroy();
-}
+map.show = false; // Hide the map without removing it.
+map.show = true;
+map.setStyle(nextStyle); // Apply a new style JSON object.
+const loading = !map.tilesLoaded;
+const stats = map.stats(); // Tile, rendering and memory counters.
+
+viewer.scene.primitives.remove(map); // Cesium normally destroys removed primitives.
 ```
 
-## Styles and compatibility
+If your primitive collection has `destroyPrimitives: false`, call `map.destroy()` after removal. For authenticated resources, provide `transformRequest` when creating the map. Other options and image methods are documented in the package's TypeScript declarations.
 
-- Sources: MVT, MLT, GeoJSON, raster tiles, images, video, and canvas. Layers: `background`, `fill`, `line`, `circle`, `fill-extrusion`, `symbol`, and `raster`.
-- MapLibre expressions and filters, data-driven styling, dashed lines, image patterns, text, and icons are supported. This is a subset of MapLibre's rendering capabilities; `heatmap`, `hillshade`, and `raster-dem` are unavailable, and `line-gradient` is rejected.
-- Text includes Arabic shaping and bidirectional reordering. The style's glyph fonts must contain the corresponding glyphs.
-- `heightReference` can drape ordinary fill polygons when the scene provides Cesium's vector provider. Lines, points, labels, extrusions, and image patterns keep ellipsoid heights. Label and icon picking is currently unavailable.
-- Style URL loading resolves relative source URLs, tile templates, sprites, and glyphs against the style URL. Use absolute URLs for remote GeoJSON `data` and video `urls`.
-- The Cesium peer range is `^1.146.0`; the recorded rendering baseline uses 1.146.0. Some rendering integrations use Cesium internals, so the declared range does not mean every later release has been tested.
+Use `cesium-vector-tileset/min` instead of the default import for the minified build. When copying distributed files, keep the main module and its Worker files together. Use the same Cesium installation for the library and your scene.
 
-## Support
+## Supported maps
 
-Report problems through [GitHub issues](https://github.com/vesiumjs/cesium-vector-tileset/issues), including a reproducible style, the affected view, and your Cesium version.
+MVT, MLT and GeoJSON vector data, raster tiles, images, video and canvas are supported. Styles can use fills, lines, circles, symbols and extruded buildings, including expressions, filters, icons, image patterns and bidirectional text.
 
-## License and credits
+This is a subset of MapLibre's style features: `heatmap`, `hillshade`, `raster-dem` and `line-gradient` are unavailable. Glyph fonts must cover your text. Ordinary fills can be draped with `heightReference` on compatible Cesium scenes; other layers remain at their ellipsoid heights. Label and icon picking is unavailable.
 
-Licensed under the [MIT License](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/LICENSE). The implementation adapts MapLibre GL JS code and designs and uses Cesium for rendering. Distributed builds include third-party notices; dependencies and map data retain their own licenses. Display the attribution required by your map provider.
+The Cesium peer range is `^1.146.0`; rendering integrations are verified with 1.146.0. Display the attribution required by your data provider.
+
+## Development and support
+
+```bash
+pnpm install
+pnpm dev
+```
+
+See [AGENTS.md](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/AGENTS.md) for contribution and validation conventions. Report reproducible problems through [GitHub issues](https://github.com/vesiumjs/cesium-vector-tileset/issues), with the style, view and Cesium version.
+
+## License
+
+[MIT](https://github.com/vesiumjs/cesium-vector-tileset/blob/main/LICENSE). The project adapts MapLibre GL JS code and uses Cesium for rendering. Distributed builds include third-party notices; map data retains its provider's license.
