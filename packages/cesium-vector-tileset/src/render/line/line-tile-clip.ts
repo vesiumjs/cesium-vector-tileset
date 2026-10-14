@@ -3,6 +3,25 @@ import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { RenderFrameState } from '../scene/render-frame';
 import { Cartesian3, Cartesian4, Cartographic, Ellipsoid, Matrix4 } from 'cesium';
 
+const SURFACE_GLOBE_CLIP_FRAGMENT = `
+uniform vec4 u_surface_globe_camera;
+void clipSurfaceGlobe(vec3 positionEC)
+{
+    if (czm_sceneMode != czm_sceneMode3D)
+        return;
+    // Later style layers bypass scene depth to paint over buildings. Keep
+    // ellipsoid occlusion independent of that policy, per fragment so a
+    // segment crossing the limb retains its visible portion.
+    vec3 toSurface = (czm_inverseViewRotation * positionEC) * czm_ellipsoidInverseRadii;
+    float limbSquared = u_surface_globe_camera.w;
+    float towardCamera = -dot(toSurface, u_surface_globe_camera.xyz);
+    bool occluded = limbSquared < 0.0 ? towardCamera > 0.0
+        : towardCamera > limbSquared && towardCamera * towardCamera > limbSquared * dot(toSurface, toSurface);
+    if (occluded)
+        discard;
+}
+`;
+
 /** Clip canonical geographic tile boundaries in both scene modes. */
 export const LINE_TILE_CLIP_FRAGMENT = `
 #ifdef LINE_TILE_CLIP
@@ -11,6 +30,7 @@ in vec3 v_lineClip2DEye;
 uniform mat4 u_line_clip_planes;
 uniform mat4 u_line_clip_latitudes;
 uniform mat4 u_line_clip_planar;
+${SURFACE_GLOBE_CLIP_FRAGMENT}
 
 float lineLatitudeSide(vec3 originEC, vec4 shape)
 {
@@ -36,6 +56,7 @@ void clipLineTile2D()
 
 void clipLineTile3D()
 {
+    clipSurfaceGlobe(v_lineClip3DEye);
     vec4 positionEC = vec4(v_lineClip3DEye, 1.0);
     // A z1 longitude interval is a hemisphere; its two edges share a plane.
     // Its across axis distinguishes the inclusive and exclusive endpoints.
@@ -68,8 +89,10 @@ void clipLineTile()
 export const SURFACE_TILE_CLIP_FRAGMENT = `
 in vec3 v_centerEye;
 uniform mat4 u_line_clip_planar;
+${SURFACE_GLOBE_CLIP_FRAGMENT}
 void clipSurfaceTile()
 {
+    clipSurfaceGlobe(v_centerEye);
     if (czm_morphTime == 0.0)
     {
         // Native LINES interpolate the centreline, while the tile mask must
@@ -108,9 +131,10 @@ void clipSurfaceTile()
 
 interface ClipUniformState {
   readonly view: Matrix4;
+  readonly ellipsoid: Ellipsoid;
 }
 
-type UniformMap = Readonly<Record<string, () => Matrix4>>;
+type UniformMap = Readonly<Record<string, () => Matrix4 | Cartesian4>>;
 
 /** Immutable tile bounds, shared by all layers/chunks; Native owns the view. */
 export class LineTileClip {
@@ -142,6 +166,8 @@ export class LineTileClip {
   private readonly _packedLatitudes = new Matrix4();
 
   private readonly _packedPlanar = new Matrix4();
+
+  private readonly _globeCamera = new Cartesian4();
 
   private readonly _originColumn = new Cartesian4();
 
@@ -189,6 +215,10 @@ export class LineTileClip {
       u_line_clip_planes: packed(this._packedPlanes),
       u_line_clip_latitudes: packed(this._packedLatitudes),
       u_line_clip_planar: packed(this._packedPlanar),
+      u_surface_globe_camera: () => {
+        this._updateView();
+        return this._globeCamera;
+      },
     };
   }
 
@@ -252,6 +282,15 @@ export class LineTileClip {
     // fragments, including those in wide tiles at small zoom levels.
     const cameraX = -(view[0] * view[12] + view[1] * view[13] + view[2] * view[14]);
     const cameraY = -(view[4] * view[12] + view[5] * view[13] + view[6] * view[14]);
+    const cameraZ = -(view[8] * view[12] + view[9] * view[13] + view[10] * view[14]);
+    const inverseRadii = this._uniformState.ellipsoid.oneOverRadii;
+    const camera = this._globeCamera;
+    camera.x = cameraX * inverseRadii.x;
+    camera.y = cameraY * inverseRadii.y;
+    camera.z = cameraZ * inverseRadii.z;
+    // Compute the limb in double precision before upload: subtracting 1
+    // in the shader loses sub-metre camera heights near the surface.
+    camera.w = camera.x * camera.x + camera.y * camera.y + camera.z * camera.z - 1;
     const longitude = Math.atan2(cameraY, cameraX);
     const cosine = Math.cos(longitude);
     const sine = Math.sin(longitude);

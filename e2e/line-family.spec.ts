@@ -1,4 +1,4 @@
-import type { LineLayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { FillLayerSpecification, LineLayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { PrimitiveCollection } from 'cesium';
 import type { LineFamilyChunk } from '../packages/cesium-vector-tileset/src/render/line/line-family';
 import type { DrawBatch } from '../packages/cesium-vector-tileset/src/render/scene/draw-batch';
@@ -372,4 +372,122 @@ test('roads, fill outlines and buildings retain paint and picking through 2D, CV
   });
   assert.ok(destroyed.primitives && destroyed.arrays && destroyed.textures, 'Native family resources survived tileset removal');
   assert.ok(destroyed.outlines, 'Native fill outline owners or vertex arrays survived tileset removal');
+});
+
+test('surface lines after a building layer remain occluded by the globe', async ({ page, renderUrl }, testInfo) => {
+  const style = {
+    version: 8,
+    transition: { duration: 0, delay: 0 },
+    sources: {
+      world: {
+        type: 'geojson',
+        maxzoom: 0,
+        data: {
+          type: 'FeatureCollection',
+          features: [
+            ...([-70, 40] as const).flatMap((longitude, index) => [
+              ...([3, 12] as const).map((latitude, row) => ({
+                type: 'Feature' as const,
+                properties: { side: index === 0 ? 'front' : 'back', kind: row === 0 ? 'solid' : 'dash' },
+                geometry: { type: 'LineString' as const, coordinates: [[longitude - 10, latitude], [longitude, latitude], [longitude + 10, latitude]] },
+              })),
+              {
+                type: 'Feature' as const,
+                properties: { side: index === 0 ? 'front' : 'back', kind: 'outline' },
+                geometry: { type: 'Polygon' as const, coordinates: [[[longitude - 8, -18], [longitude + 8, -18], [longitude + 8, -8], [longitude - 8, -8], [longitude - 8, -18]]] },
+              },
+            ]),
+            {
+              type: 'Feature',
+              properties: { kind: 'crossing' },
+              geometry: { type: 'LineString', coordinates: [[-20, 25], [0, 25], [30, 25]] },
+            },
+          ],
+        },
+      },
+    },
+    layers: [
+      { id: 'ground', type: 'background', paint: { 'background-color': '#224455' } },
+      // Liberty retains its 3D paint cutoff even when no building is visible
+      // at world zoom. The following surfaces consequently bypass scene depth.
+      { id: 'buildings', type: 'fill-extrusion', source: 'world', filter: ['==', 'kind', 'building'], paint: { 'fill-extrusion-height': 100 } },
+      ...(['front', 'back'] as const).flatMap(side => [
+        ...(['solid', 'dash'] as const).map(kind => ({
+          id: `${side}-${kind}`,
+          type: 'line' as const,
+          source: 'world',
+          filter: ['all', ['==', 'side', side], ['==', 'kind', kind]],
+          paint: { 'line-color': side === 'front' ? '#ff0000' : '#00ff00', 'line-width': 8, ...(kind === 'dash' ? { 'line-dasharray': [2, 1] } : {}) },
+        } satisfies LineLayerSpecification)),
+        {
+          id: `${side}-outline`,
+          type: 'fill' as const,
+          source: 'world',
+          filter: ['all', ['==', 'side', side], ['==', 'kind', 'outline']],
+          paint: { 'fill-color': '#224455', 'fill-outline-color': side === 'front' ? '#ff00ff' : '#00ffff' },
+        } satisfies FillLayerSpecification,
+      ]),
+      { id: 'crossing', type: 'line', source: 'world', filter: ['==', 'kind', 'crossing'], paint: { 'line-color': '#0000ff', 'line-width': 8 } },
+    ],
+  } satisfies StyleSpecification;
+  await page.route('**/globe-line-style.json', route => route.fulfill({ json: style }));
+  const query = new URLSearchParams({ center: '-70.59279,3.68351', cameraHeight: '17500704', style: `${renderUrl}/globe-line-style.json`, readback: '0', atlas: '1' });
+  await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
+  await expect.poll(() => page.evaluate(() => {
+    const validation = window.renderValidation;
+    return validation?.tileset.tilesLoaded && validation.tileset.stats().renderableTiles > 0 && validation.viewer.scene.globe.tilesLoaded;
+  }), { timeout: 60_000 }).toBe(true);
+
+  async function capture() {
+    return page.evaluate(async () => {
+      const { viewer } = window.renderValidation;
+      let counts = { front: 0, back: 0, frontOutline: 0, backOutline: 0, crossing: 0 };
+      const stop = viewer.scene.postRender.addEventListener(() => {
+        counts = { front: 0, back: 0, frontOutline: 0, backOutline: 0, crossing: 0 };
+        const pixels = viewer.scene.context.readPixels({ width: viewer.canvas.width, height: viewer.canvas.height });
+        for (let index = 0; index < pixels.length; index += 4) {
+          const red = pixels[index] > 180;
+          const green = pixels[index + 1] > 180;
+          const blue = pixels[index + 2] > 180;
+          if (red && pixels[index + 1] < 60 && pixels[index + 2] < 60)
+            counts.front++;
+          if (green && pixels[index] < 60 && pixels[index + 2] < 60)
+            counts.back++;
+          if (red && blue && pixels[index + 1] < 60)
+            counts.frontOutline++;
+          if (green && blue && pixels[index] < 60)
+            counts.backOutline++;
+          if (blue && pixels[index] < 60 && pixels[index + 1] < 60)
+            counts.crossing++;
+        }
+      });
+      try {
+        for (let frame = 0; frame < 5; frame++) {
+          viewer.scene.requestRender();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }
+        return counts;
+      }
+      finally { stop(); }
+    });
+  }
+  const front = await capture();
+  await page.screenshot({ path: testInfo.outputPath('globe-line-front.png') });
+  assert.ok(front.front > 100 && front.frontOutline > 20 && front.crossing > 20, JSON.stringify(front));
+  assert.equal(front.back, 0, 'back-side solid/dashed lines must contribute no pixels');
+  assert.equal(front.backOutline, 0, 'back-side fill outlines must contribute no pixels');
+  await page.evaluate(() => {
+    const { Cartesian3 } = window.renderValidation.atlas!.cesium;
+    window.renderValidation.viewer.camera.setView({
+      destination: Cartesian3.fromDegrees(40, 3, 17500704),
+      orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
+    });
+  });
+  const back = await capture();
+  await page.screenshot({ path: testInfo.outputPath('globe-line-back.png') });
+  await writeFile(testInfo.outputPath('globe-line-occlusion.json'), JSON.stringify({ front, back }, null, 2));
+  assert.ok(back.back > 100 && back.backOutline > 20 && back.crossing > 20, JSON.stringify(back));
+  assert.equal(back.front, 0, 'original front-side lines must be hidden after rotating the camera');
+  assert.equal(back.frontOutline, 0, 'original front-side outlines must be hidden after rotating the camera');
+  assert.deepEqual(await page.evaluate(() => window.renderValidation.renderErrors), []);
 });

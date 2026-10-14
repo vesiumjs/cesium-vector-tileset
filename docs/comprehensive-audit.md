@@ -37,6 +37,7 @@
 | 高空虚拟 focus 造成过细覆盖并卡死 | 跨洲飞行相机高度 1624km，却用 10km 虚拟 focus 选择全可见地球 zoom 12，265087 个 ideal tile；主页面停在瓦片创建 | 实际地平线焦距约 4837km、zoom≈3.75，同一输入覆盖 64 个 z3 tile，没有硬数量上限；原跨洲与 60/15m 实际建筑流程 20.8s 通过 |
 | 表面抬升造成近地巨大视差 | zoom23/75° 圆点偏移约108px，道路也错位 | 删除 raster/vector/pattern 地面 1m 与层序 epsilon 的高度排序，直接复用 worker/grid 地面几何；zoom23 圆点中心与面积对齐，模式切换/alpha/pick 回归通过 |
 | 后置 surface 被建筑深度遮挡 | 同 globe 相机、后置线条，MapLibre 红，Native 蓝 | 按上游首个 3D 样式层 cutoff 决定后续 surface painter order；保留旧样式时 cutoff 和 order 同一代拥有；同像素对比及后续真实 depth/source handoff/移除释放硬件回归通过 |
+| 后置边界线透出地球背面 | Liberty 整球视角中，大西洋出现背面国家边界；空建筑层之后的实线/虚线也绕过地球深度，最小 GPU 回归检测到 420 个背面像素 | 保留建筑 cutoff，在共享线/面轮廓片元入口独立判断椭球遮挡；当前 Native view 的地平线参数用 CPU 双精度计算。修复后背面线与轮廓像素均为 0，转到另一侧正常显示，跨地平线线段保留可见部分；同相机 Liberty 原始画面复现与修复截图存于 `node_modules/.cache/playwright/globe-line-occlusion/` |
 | 重排后 color/pick 深度策略分叉 | 跨 cutoff 同一 command 的 color false，但普通/log-depth pick 都保持 true | 同步实际颜色深度策略到 Native 缓存 pick state，保留 Native 其他设置；真实 Native 派生缓存的下→上→下回归先红后绿 |
 
 与上游相同也不代表正确：SourceFeatureState 的部分删除缺陷同样出现在当前 MapLibre 实现，仍按本项目的公开状态语义修复。图标沿线旋转候选则与上游行为一致，已撤回，未作猜测式修改。
