@@ -1,5 +1,6 @@
 import type { Color, GeometryInstance } from 'cesium';
 import type { LineBucket } from '../../data/bucket-runtime';
+import type { FeatureIndex } from '../../data/feature-index';
 import type { LineStyleLayer } from '../../style/style-layer/line-style-layer';
 import type { GeometryBatchTable } from '../geometry/geometry-primitive';
 import type { LinePaintUniforms } from '../scene/draw-batch';
@@ -12,6 +13,7 @@ import { Cartesian3, Cartesian4, Color as CesiumColor, ColorGeometryInstanceAttr
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { registerDrawBatch, registerLinePaint, registerUniformLineExtent } from '../scene/draw-batch';
 import { DrawCommandReplay } from '../scene/draw-command-replay';
+import { FeaturePicking } from '../scene/feature-picking';
 import { sharePrimitiveBytes } from '../scene/resource-memory';
 import { layerFor, lineStyleForFeature } from '../vector/feature-attributes';
 import { freezeLineCameraPaint, freezeLineFeaturePaint } from './frozen-line-paint';
@@ -73,10 +75,18 @@ export interface LineFamilyLayer {
   instanceCameraPaint?: ReadonlyMap<number, FrozenLineCameraPaint>;
 }
 
+interface ReplayPickAttributes { show: Uint8Array }
+
+interface LayerOwner {
+  show?: boolean;
+  getGeometryInstanceAttributes?: (id: InstanceId) => ReplayPickAttributes | undefined;
+}
+
 interface LayerPaint {
   layer: LineFamilyLayer;
   uniforms: LinePaintUniforms;
-  owner: object;
+  owner: GeometryPrimitive | LayerOwner;
+  pickAttributes?: Map<number, ReplayPickAttributes>;
   table?: GeometryBatchTable;
   pickIds: Array<{ destroy: () => void }>;
   held?: { evaluate: FrozenLineCameraPaint; zoom?: number };
@@ -133,6 +143,12 @@ export class LineFamilyChunk {
 
   private readonly _generationId: number;
 
+  private readonly _picking: FeaturePicking;
+
+  private readonly _featureIndex?: FeatureIndex;
+
+  private readonly _featureInstances?: Map<number, number[]>;
+
   private readonly _clones = new Map<ReplayDrawCommand, CommandClone[]>();
 
   private _zoom: number;
@@ -152,24 +168,46 @@ export class LineFamilyChunk {
     appearance: Cesium.PolylineColorAppearance,
     clip: LineTileClip,
     maximumMiterLimit?: number,
+    picking = new FeaturePicking(),
+    featureIndex?: FeatureIndex,
   ) {
     this._maximumMiterLimit = maximumMiterLimit;
+    this._picking = picking;
+    this._featureIndex = featureIndex;
     this._ids = instances.map(instance => instance.id as InstanceId);
+    if (picking.enabled('line')) {
+      this._featureInstances = new Map();
+      for (const [index, id] of this._ids.entries()) {
+        const indices = this._featureInstances.get(id.featureIndex);
+        if (indices)
+          indices.push(index);
+        else this._featureInstances.set(id.featureIndex, [index]);
+      }
+    }
     this._tileId = tileId;
     this._generationId = generationId;
     this._zoom = zoom;
     this.primitive = new GeometryPrimitive({
+      allowPicking: this._picking.enabled('line'),
       geometryInstances: instances,
       appearance,
     }, 'line', lineAppearanceForMode);
     registerDrawBatch(this.primitive, { layerId: layers[0].layerId, tileId, kind: 'line' });
     sharePrimitiveBytes(this, this.primitive);
     this._layers = layers.map((layer, index): LayerPaint => {
-      const owner = index === 0 ? this.primitive : {};
+      const owner = index === 0
+        ? this.primitive
+        : picking.enabled('line')
+          ? {
+              show: true,
+              getGeometryInstanceAttributes: (id: InstanceId) => this._replayPickAttributes(this._layers[index], id),
+            }
+          : {};
       const uniforms = linePaintUniforms(clip, 1, CesiumColor.WHITE, zoom);
       registerDrawBatch(owner, { layerId: layer.layerId, tileId, kind: 'line' });
       registerLinePaint(owner, uniforms);
-      return { layer, uniforms, owner, pickIds: [], committedInstances: layer.instancePaint, committedPaint: layer.instanceCameraPaint };
+      const paint: LayerPaint = { layer, uniforms, owner, pickIds: [], committedInstances: layer.instancePaint, committedPaint: layer.instanceCameraPaint };
+      return paint;
     });
     for (const paint of this._layers) {
       this._writeUniform(paint);
@@ -211,6 +249,8 @@ export class LineFamilyChunk {
       const clones = this._clones.get(original) ?? [];
       for (let index = 1; index < this._layers.length; index++) {
         const paint = this._layers[index];
+        if (paint.owner.show === false)
+          continue;
         const entry = clones[index - 1] ?? { replay: new DrawCommandReplay(original) };
         const clone = entry.replay.update(original);
         if (entry.baseUniformMap !== original.uniformMap) {
@@ -301,9 +341,11 @@ export class LineFamilyChunk {
     for (const paint of this._layers.slice(1)) {
       for (const pickId of paint.pickIds) pickId.destroy();
       paint.table?.destroy();
+      paint.pickAttributes?.clear();
     }
     this.primitive.destroy();
     this._clones.clear();
+    this._featureInstances?.clear();
   }
 
   /**
@@ -315,7 +357,8 @@ export class LineFamilyChunk {
       throw new TypeError('Cesium line Primitive did not create a batch table');
     }
     const pickAttribute = base.attributes.findIndex(attribute => attribute.functionName === 'czm_batchTable_pickColor');
-    if (pickAttribute < 0 || base.numberOfInstances !== this._ids.length) {
+    const showAttribute = base.attributes.findIndex(attribute => attribute.functionName === 'czm_batchTable_show');
+    if ((this._picking.enabled('line') && (pickAttribute < 0 || showAttribute < 0)) || base.numberOfInstances !== this._ids.length) {
       throw new TypeError('Cesium line batch table does not match its instances');
     }
     this._layers[0].table = base;
@@ -327,12 +370,14 @@ export class LineFamilyChunk {
       table._batchValues.set(base._batchValues);
       table._batchValuesDirty = true;
       paint.table = table;
+      if (!this._picking.enabled('line'))
+        continue;
       const pickColor = new Cartesian4();
       for (let index = 0; index < this._ids.length; index++) {
         const id = frame.context.createPickId({
-          primitive: this,
+          primitive: paint.owner,
           id: {
-            type: 'line',
+            ...this._picking.feature(layerFor(paint.layer.bucket, paint.layer.layerId), this._featureIndex, this._ids[index].featureIndex),
             tileId: this._tileId,
             layerId: paint.layer.layerId,
             featureIndex: this._ids[index].featureIndex,
@@ -351,6 +396,34 @@ export class LineFamilyChunk {
       this._writePaint(paint, paint.committedInstances);
     }
     this._initialized = true;
+  }
+
+  /** Native drillPick hides only this replay's feature, then restores its show value. */
+  private _replayPickAttributes(paint: LayerPaint, id: InstanceId): ReplayPickAttributes | undefined {
+    const instances = this._featureInstances?.get(id.featureIndex);
+    if (!instances)
+      return undefined;
+    const cached = paint.pickAttributes?.get(id.featureIndex);
+    if (cached)
+      return cached;
+    const table = paint.table;
+    if (!table)
+      throw new Error('Picking a line replay requires its initialized batch table');
+    const attribute = table.attributes.findIndex(candidate => candidate.functionName === 'czm_batchTable_show');
+    if (attribute < 0)
+      throw new Error('Picking a line replay requires the Native show attribute');
+    const show = new Uint8Array([1]);
+    const attributes = {
+      get show(): Uint8Array { return show; },
+      set show(value: Uint8Array) {
+        show[0] = value[0];
+        for (const instance of instances)
+          table.setBatchedAttribute(instance, attribute, show[0]);
+      },
+    };
+    paint.pickAttributes ??= new Map();
+    paint.pickAttributes.set(id.featureIndex, attributes);
+    return attributes;
   }
 
   /**

@@ -2,10 +2,10 @@ import type { Bucket } from '../../data/bucket';
 import type { StyleLayer } from '../../style/style-layer';
 import type { DashMaterial } from '../line/dash-material';
 import type { LineBuildState } from '../line/line-renderer';
+import type { FeaturePicking } from '../scene/feature-picking';
 import type { Budget } from '../scene/frame-budget';
 import type { ExtrusionLighting } from './extrusion-geometry';
 import type { ExtrusionPrimitive } from './extrusion-primitive';
-import type { TilePickObject } from './tile-conversion';
 import type { VectorCollection, VectorTileRecord } from './vector-tile-renderer';
 import {
   BlendOption,
@@ -27,7 +27,7 @@ import { drawBatchForOwner } from '../scene/draw-batch';
 import { UNBOUNDED_BUDGET } from '../scene/frame-budget';
 import { deferredExtrusionLayers } from './extrusion-primitive';
 import { constantValue, fillStyleForFeature, layerFor, paintRevision } from './feature-attributes';
-import { buildExtrusionCollection } from './vector-tile-builder';
+import { bufferPolygonFeatureIndices, buildExtrusionCollection } from './vector-tile-builder';
 
 const colorValue = new Uint8Array(4);
 const showValue = new Uint8Array(1);
@@ -141,6 +141,7 @@ export function createVectorPaintState(seed: VectorPaintSeed): VectorPaintState 
 }
 
 interface VectorPaintOptions {
+  picking: FeaturePicking;
   records: () => Iterable<[string, VectorTileRecord]>;
   pixelRatio: () => number;
   lighting: () => ExtrusionLighting | undefined;
@@ -480,7 +481,7 @@ export class VectorPaintUpdater {
         if (!record.paint.lineBuild || !canResumeLineBuild(record.paint.lineBuild)) {
           if (record.paint.lineBuild)
             discardLineBuild(record.paint.lineBuild);
-          record.paint.lineBuild = beginLineBuild(record.linePrimitives, record.buckets, tileId, record.tileID, record.generationId, zoom, record.mode !== SceneMode.SCENE3D, dash);
+          record.paint.lineBuild = beginLineBuild(record.linePrimitives, record.buckets, tileId, record.tileID, record.generationId, zoom, record.mode !== SceneMode.SCENE3D, dash, this._options.picking, record.featureIndex);
         }
         const build = record.paint.lineBuild;
         build.zoom = zoom;
@@ -529,15 +530,17 @@ export class VectorPaintUpdater {
           if (!(collection instanceof BufferPolygonCollection)) {
             continue;
           }
+          const layerId = drawBatchForOwner(collection)!.layerId;
+          const bucket = record.buckets[layerId];
+          if (!(bucket instanceof FillBucket))
+            throw new Error(`Missing fill bucket ${layerId}`);
+          const features = bufferPolygonFeatureIndices.get(collection);
+          if (!features || features.length !== collection.primitiveCount)
+            throw new Error(`Fill collection ${layerId} is missing its paint feature ordinals`);
           let opaque = true;
           for (let index = 0; index < collection.primitiveCount; index++) {
             collection.get(index, polygon);
-            const { layerId, featureIndex } = polygon.pickObject as TilePickObject;
-            const bucket = record.buckets[layerId];
-            if (!(bucket instanceof FillBucket)) {
-              continue;
-            }
-            const style = fillStyleForFeature(bucket, featureIndex, layerId, zoom);
+            const style = fillStyleForFeature(bucket, features[index], layerId, zoom);
             const currentMaterial = polygon.getMaterial(polygonMaterial);
             opaque &&= style.color.alpha >= 1;
             if (!samePackedColor(currentMaterial.color, style.color)) {
@@ -648,7 +651,7 @@ export class VectorPaintUpdater {
       }
     }
     if (rebuild) {
-      const replacement = buildExtrusionCollection(record.buckets, record.tileID, tileId, record.generationId, zoom, lighting)
+      const replacement = buildExtrusionCollection(record.buckets, record.tileID, tileId, record.generationId, zoom, lighting, this._options.picking, record.featureIndex)
         ?? new PrimitiveCollection();
       this._options.replace(tileId, 'extrusions', extrusions, replacement, replacements);
     }

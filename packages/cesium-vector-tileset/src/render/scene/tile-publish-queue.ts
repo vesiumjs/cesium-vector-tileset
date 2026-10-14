@@ -655,6 +655,7 @@ export class TilePublishQueue {
     job.vectorBuild = this._options.vector.beginTileBuild({
       tileId: job.tileId,
       generationId: job.generation.reservedId,
+      featureIndex: job.generation.featureIndex,
       buckets: job.generation.data.buckets,
       tileID: job.generation.data.tileID,
       sourceId: job.sourceId,
@@ -803,6 +804,8 @@ export class TilePublishQueue {
     if (layers.length > 0) {
       job.symbolBuild ??= symbol.beginBuild({
         tileId: job.tileId,
+        featureIndex: job.generation.featureIndex,
+        generationId: job.generation.id,
         tileKey: job.generation.data.tileID.key,
         tileID: job.generation.data.tileID,
         buckets: job.generation.data.buckets,

@@ -7,9 +7,6 @@ import type { CesiumVectorTilesetOptions, TilesetStyleSpecification as StyleSpec
 import type { TilesetImage, TilesetImageOptions, TilesetStats } from '../../tileset-types';
 import type { SourceDataEvent, StyleDataEvent } from '../../util/events';
 import type { RequestTransformFunction } from '../../util/request';
-import type { PatternPrimitiveID } from '../pattern/pattern-renderer';
-import type { RasterPrimitivePickObject } from '../raster/raster-renderer';
-import type { TilePickObject } from '../vector/tile-conversion';
 import type { VectorPaintFrame } from '../vector/vector-paint-updater';
 import type { VectorCollection } from '../vector/vector-tile-renderer';
 import type { Budget } from './frame-budget';
@@ -33,9 +30,9 @@ import { isClampHeightReference, VectorTileRenderer } from '../vector/vector-til
 import { BackgroundRenderer } from './background-renderer';
 import { DrapedSurfacePass } from './draped-surface-pass';
 import { DrawCommands } from './draw-commands';
+import { FeaturePicking } from './feature-picking';
 import { MAX_TILE_COMMITS } from './frame-budget';
 import { FramePreparation, pixelRatioCompensation } from './frame-preparation';
-import { pickedFeature } from './picked-feature';
 import { cameraBearingForFrame } from './render-frame';
 import { RenderLayerIndex } from './render-layer-index';
 import { SceneCollections } from './scene-collections';
@@ -174,10 +171,11 @@ export class TilesetRenderer {
       // HiDPI tileset fetch and render 1x resources.
       pixelRatio: browser.devicePixelRatio,
     });
-    this.vector = new VectorTileRenderer(1, this.style.dashAtlas);
-    this.raster = new RasterTileRenderer();
-    this.pattern = new PatternTileRenderer();
-    this.symbol = new SymbolTileRenderer();
+    const picking = new FeaturePicking(options.allowPicking);
+    this.vector = new VectorTileRenderer(1, this.style.dashAtlas, picking);
+    this.raster = new RasterTileRenderer(picking);
+    this.pattern = new PatternTileRenderer(picking);
+    this.symbol = new SymbolTileRenderer(picking);
     this.publishQueue = new TilePublishQueue({
       vector: this.vector,
       raster: this.raster,
@@ -958,13 +956,5 @@ export class TilesetRenderer {
     this.vector.undrapeAll();
     this.vector.removeAll();
     this.vector.dashMaterial?.destroy();
-  }
-
-  pick(pickObject: TilePickObject | RasterPrimitivePickObject | PatternPrimitiveID): {
-    layerId: string;
-    properties: Record<string, unknown>;
-  } | undefined {
-    this._assertNotDestroyed();
-    return pickedFeature(pickObject, this.raster, this.pattern, this.residency);
   }
 }

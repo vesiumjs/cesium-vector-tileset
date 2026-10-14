@@ -78,7 +78,7 @@ export class ExtrusionPrimitive extends ExtrusionGeometryPrimitive {
 
   private readonly _mapLightRotation = new Cartesian2(1, 0);
 
-  constructor(instances: GeometryInstance[], lighting?: ExtrusionLighting) {
+  constructor(instances: GeometryInstance[], lighting?: ExtrusionLighting, allowPicking = false) {
     const appearance = new ExtrusionAppearance<ExtrusionUniforms>({
       flat: true,
       translucent: false,
@@ -97,7 +97,7 @@ export class ExtrusionPrimitive extends ExtrusionGeometryPrimitive {
       u_extrusionLightRotation: new Cartesian2(1, 0),
       u_extrusionLightViewport: false,
     };
-    super({ geometryInstances: instances, appearance });
+    super({ geometryInstances: instances, appearance, allowPicking });
     this._paintAppearance = appearance;
     this._ids = instances.map(instance => instance.id as TilePickObject);
     this._heights = new Float64Array(instances.length * 2);

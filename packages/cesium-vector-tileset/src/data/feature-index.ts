@@ -28,7 +28,7 @@ export class FeatureIndex {
     this.featureIndexArray.emplaceBack(featureIndex, sourceLayerIndex, bucketIndex);
   }
 
-  getId(feature: VectorTileFeature, sourceLayerId: string): string | number | undefined {
+  getId(feature: { id?: VectorTileFeature['id']; properties: VectorTileFeature['properties'] }, sourceLayerId: string): string | number | undefined {
     let id: string | number | undefined = feature.id;
     if (this.promoteId) {
       const propName = typeof this.promoteId === 'string' ? this.promoteId : this.promoteId[sourceLayerId];

@@ -6,6 +6,7 @@ import type {
 import type { RasterStyleLayer } from '../../style/style-layer/raster-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { RasterFade } from '../../tile/tile-pyramid';
+import type { TilesetPickObject } from '../scene/feature-picking';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { RetainedSurface } from '../scene/scene-collections';
 import type { RasterPrimitiveGeometry, RasterStyle, RasterTileCoordinate } from './raster-geometry';
@@ -27,6 +28,7 @@ import {
   TextureMinificationFilter,
 } from 'cesium';
 import { registerDrawBatch } from '../scene/draw-batch';
+import { FeaturePicking } from '../scene/feature-picking';
 import { LayerCollections } from '../scene/layer-collections';
 import { collectionGpuBytes } from '../scene/resource-memory';
 import { RasterCoverage, rasterParentTransform } from './raster-coverage';
@@ -43,11 +45,7 @@ export type RasterTextureData = HTMLImageElement | ImageBitmap | HTMLCanvasEleme
 type RasterMaterialImage = RasterTextureData | OffscreenCanvas;
 type TextureSource = HTMLImageElement | ImageBitmap | HTMLCanvasElement | HTMLVideoElement | OffscreenCanvas;
 
-export interface RasterPrimitiveID {
-  type: 'raster';
-  tileId: string;
-  layerId: string;
-}
+export type RasterPrimitiveID = TilesetPickObject & { type: 'raster' };
 
 export type RasterPrimitivePickObject = RasterPrimitiveID;
 
@@ -78,7 +76,7 @@ interface StaticRasterEntry extends RasterTileGeometry {
 interface DynamicRasterEntry extends RasterTileGeometry {
   type: 'dynamic';
   batch: DynamicRasterBatch;
-  instanceId: RasterPrimitiveID;
+  instanceId: object;
   show: ShowGeometryInstanceAttribute;
 }
 
@@ -431,6 +429,7 @@ function rasterAppearance(material: Material): EllipsoidSurfaceAppearance {
 
 function buildRasterPrimitive(
   textures: RasterTextures,
+  picking: FeaturePicking,
   tileID: TileID,
   image: RasterMaterialImage,
   layer: RasterStyleLayer,
@@ -449,10 +448,10 @@ function buildRasterPrimitive(
   const primitive = new Primitive({
     geometryInstances: new GeometryInstance({
       geometry: rasterGeometry(tileID, tileCoordinates, flippedWindingOrder, mode),
-      id: { type: 'raster', tileId, layerId: layer.id } satisfies RasterPrimitiveID,
+      id: picking.enabled('raster') ? picking.raster(layer) : undefined,
     }),
     appearance: rasterAppearance(material),
-    allowPicking: true,
+    allowPicking: picking.enabled('raster'),
     asynchronous: false,
     compressVertices: true,
   });
@@ -493,6 +492,8 @@ export interface RasterFrame {
 }
 
 export class RasterTileRenderer {
+  private readonly _picking: FeaturePicking;
+
   private readonly _textures = new RasterTextures();
 
   private readonly _layerCollections = new LayerCollections();
@@ -510,6 +511,10 @@ export class RasterTileRenderer {
   private _nextDynamicImageId = 0;
 
   private _lastStyleRevision?: number;
+
+  constructor(picking = new FeaturePicking()) {
+    this._picking = picking;
+  }
 
   get collections(): ReadonlyMap<string, PrimitiveCollection> {
     return this._layerCollections.collections;
@@ -767,6 +772,7 @@ export class RasterTileRenderer {
       }
       const built = buildRasterPrimitive(
         this._textures,
+        this._picking,
         tileID,
         normalizedImage,
         layer,
@@ -870,7 +876,8 @@ export class RasterTileRenderer {
         type: 'dynamic',
         source,
         batch,
-        instanceId: { type: 'raster', tileId, layerId: layer.id },
+        // Native instance attributes need a stable id even without picking.
+        instanceId: this._picking.enabled('raster') ? this._picking.raster(layer) : {},
         show: new ShowGeometryInstanceAttribute(true),
         layerId: layer.id,
         tileId,
@@ -963,7 +970,7 @@ export class RasterTileRenderer {
     const primitive = new Primitive({
       geometryInstances,
       appearance: rasterAppearance(material),
-      allowPicking: true,
+      allowPicking: this._picking.enabled('raster'),
       asynchronous: false,
       compressVertices: true,
       releaseGeometryInstances: true,
@@ -982,12 +989,6 @@ export class RasterTileRenderer {
     if (previous)
       update.replacedOwners = [{ previous, next: primitive, parent: batch.collection, tileIds: new Set(batch.entries.keys()) }];
     return update;
-  }
-
-  hasPickObject(pickObject: RasterPrimitiveID): boolean {
-    return this._tiles.get(pickObject.tileId)?.some(entry => entry.layerId === pickObject.layerId)
-      || [...this._retained].some(retained => retained.tileId === pickObject.tileId
-        && retained.entries.some(entry => entry.layerId === pickObject.layerId));
   }
 
   /**
@@ -1023,7 +1024,7 @@ export class RasterTileRenderer {
     // tile. Keep one Cesium primitive/material per raster layer and let its
     // geometry instances cover all tiles. This makes the expensive texture
     // upload proportional to dynamic source layers, rather than tiles ×
-    // layers, while retaining one pick id for every tile instance.
+    // layers, while retaining each tile's visibility attributes.
     for (const batches of this._dynamicBatches.values()) {
       for (const batch of batches) {
         const style = !batch.sealed && styleChanged && shouldUpdateLayer(batch.layer.id)

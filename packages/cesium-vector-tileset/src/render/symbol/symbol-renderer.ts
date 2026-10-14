@@ -6,6 +6,7 @@ import type { ImageAtlas, ImagePosition } from '../../assets/image-atlas';
 import type { StyleImages } from '../../assets/style-images';
 import type { CollisionBoxArray } from '../../data/array-types.g';
 import type { Bucket } from '../../data/bucket';
+import type { FeatureIndex } from '../../data/feature-index';
 import type { SymbolStyleLayer } from '../../style/style-layer/symbol-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
@@ -29,6 +30,7 @@ import {
 import { SymbolBucket } from '../../data/bucket-runtime';
 import { samePaintZoom } from '../../style/render-transition';
 import { geometryBytes } from '../geometry/geometry-bytes';
+import { FeaturePicking } from '../scene/feature-picking';
 import { RetiredPool } from '../scene/retired-pool';
 import { MinimumProgressBudget } from '../scene/scene-frame-budget';
 import { constantValue, straightAlphaColor } from '../vector/feature-attributes';
@@ -505,6 +507,8 @@ function updateSymbolAttributePaint(paint: NonNullable<SymbolHalf['paint']>): vo
 /** Main-thread inputs for one tile's symbol batches. */
 export interface SymbolTileInput {
   tileId: string;
+  generationId?: number;
+  featureIndex?: FeatureIndex;
   /** Cache key for the geometry extraction (stable per tile bucket instance). */
   tileKey: string;
   tileID: TileID;
@@ -702,6 +706,12 @@ const EMPTY_SYMBOL_COLLECTIONS: readonly PrimitiveCollection[] = [];
  * per tile and shared material. Collision changes update its opacity VBO.
  */
 export class SymbolTileRenderer {
+  private readonly _picking: FeaturePicking;
+
+  constructor(picking = new FeaturePicking()) {
+    this._picking = picking;
+  }
+
   private _tiles: Map<string, SymbolTileEntry> = new Map();
   /**
    * The currently drawn generation may precede the tile's latest prepared entry.
@@ -1096,6 +1106,7 @@ export class SymbolTileRenderer {
   private _buildLayer(
     input: SymbolTileInput,
     layer: SymbolStyleLayer,
+    bucket: SymbolBucket,
     batch: SymbolTileGeometry,
     glyphSource: AtlasSource | undefined,
     iconSource: AtlasSource | undefined,
@@ -1139,6 +1150,38 @@ export class SymbolTileRenderer {
       iconMaterial,
     });
     for (const half of halves) {
+      if (this._picking.enabled('symbol')) {
+        // Worker SymbolInstanceArray stores a Uint16 featureIndex. Original
+        // paint ranges retain the full source ordinal, including line labels
+        // whose runtime collision circles have no worker collision box.
+        const featureRanges = bucket[half.part].programConfigurations.getFeatureRanges();
+        half.pickInstances = batch[half.part]!.instances.map((instance, symbolIndex) => {
+          const vertex = instance.paintVertexStart!;
+          let start = 0;
+          let end = featureRanges.length;
+          while (start < end) {
+            const middle = (start + end) >>> 1;
+            if (featureRanges[middle].end <= vertex)
+              start = middle + 1;
+            else end = middle;
+          }
+          const range = featureRanges[start];
+          if (!range || vertex < range.start || vertex >= range.end)
+            throw new Error(`Picking symbol ${symbolIndex} in ${layer.id} requires its source feature paint range`);
+          return {
+            vertexStart: instance.vertexStart,
+            vertexCount: instance.vertexCount,
+            id: {
+              ...this._picking.feature(layer, input.featureIndex, range.index),
+              tileId: input.tileId,
+              generationId: input.generationId,
+              part: half.part,
+              symbolIndex,
+              featureIndex: range.index,
+            },
+          };
+        });
+      }
       half.translation = readSymbolTranslation(layer.paint, half.part);
       if (this._lineView && half.translation !== NO_SYMBOL_TRANSLATION)
         resolveSymbolTranslation(half.translation, this._lineView.cameraZoom, this._lineView.bearing, half.translationOffset);
@@ -1429,7 +1472,7 @@ export class SymbolTileRenderer {
       }
       state.batches.push(batch);
       state.layerIds.push(layer.id);
-      const halves = this._buildLayer(input, layer, batch, state.glyphSource, state.iconSource);
+      const halves = this._buildLayer(input, layer, bucket, batch, state.glyphSource, state.iconSource);
       this._retainBuildMaterials(state, halves.map(half => half.material));
       if (halves.length > 0) {
         state.key += `${layer.id}/${input.tileKey}/${input.pixelRatio};`;

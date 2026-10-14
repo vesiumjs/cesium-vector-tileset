@@ -37,10 +37,10 @@ export class FillGeometryPrimitive extends GeometryPrimitive {
   private readonly _bounds = new WeakMap<BoundingSphere, BoundingSphere>();
   private readonly _commands = new WeakMap<object, DrawCommandReplay>();
 
-  constructor(instances: GeometryInstance[], appearance: FillAppearance, layout: GeometryLayout, compressVertices = false) {
+  constructor(instances: GeometryInstance[], appearance: FillAppearance, layout: GeometryLayout, compressVertices = false, allowPicking = false) {
     const paint = new FillCameraPaint();
     const uniforms = appearance.uniforms = { ...appearance.uniforms, u_fillTranslate: paint.translation, u_fillMercator: true };
-    super({ geometryInstances: instances, appearance, compressVertices, vertexCacheOptimize: true }, layout);
+    super({ geometryInstances: instances, appearance, compressVertices, allowPicking, vertexCacheOptimize: true }, layout);
     this._uniforms = uniforms;
     this._paint = paint;
   }

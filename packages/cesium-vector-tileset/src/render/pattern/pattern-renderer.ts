@@ -8,6 +8,7 @@ import type { FillExtrusionStyleLayer } from '../../style/style-layer/fill-extru
 import type { FillStyleLayer } from '../../style/style-layer/fill-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { FrozenLineCameraPaint } from '../line/frozen-line-paint';
+import type { TilesetPickObject } from '../scene/feature-picking';
 
 import type { Budget } from '../scene/frame-budget';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
@@ -31,6 +32,7 @@ import {
   PrimitiveCollection,
   PrimitiveType,
   SceneMode,
+  ShowGeometryInstanceAttribute,
   TextureMagnificationFilter,
   TextureMinificationFilter,
 } from 'cesium';
@@ -50,6 +52,7 @@ import { lineGroundScale } from '../line/line-ground-scale';
 import { linePages, PatternLineAppearance } from '../line/line-renderer';
 import { LineTileClip, SURFACE_TILE_CLIP_FRAGMENT } from '../line/line-tile-clip';
 import { linePaintForOwner, registerDrawBatch, registerLinePaint, registerTileClip } from '../scene/draw-batch';
+import { FeaturePicking } from '../scene/feature-picking';
 import { LayerCollections } from '../scene/layer-collections';
 import { RetiredPool } from '../scene/retired-pool';
 import { fillBucketPrimitives, lineBucketPrimitives } from '../vector/bucket-geometry';
@@ -74,12 +77,14 @@ import {
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
-export interface PatternPrimitiveID {
-  type: 'pattern';
-  tileId: string;
-  layerId: string;
+export interface PatternPrimitiveID extends TilesetPickObject {
+  type: 'fill' | 'line' | 'fill-extrusion';
   featureIndex: number;
-  tileFeatureIndex: FeatureIndex | undefined;
+}
+
+/** Required by paint refresh and Native instance attributes without picking. */
+interface PatternFeatureID {
+  featureIndex: number;
 }
 
 export interface PatternTileUpdate {
@@ -107,7 +112,7 @@ interface PatternPrimitiveEntry {
   atlasVersion: string;
   tileId: string;
   collection: PrimitiveCollection;
-  id: PatternPrimitiveID;
+  id: PatternFeatureID;
   layer: PatternStyleLayer;
   styleZoom: number | undefined;
   styleRevision: number;
@@ -153,7 +158,7 @@ interface PendingPatternEntry {
   material: Material;
   materialKey: string;
   opacity: number;
-  id: PatternPrimitiveID;
+  id: PatternFeatureID;
   styleSignature: string;
 }
 
@@ -510,6 +515,7 @@ function patternPrimitive(
   instances: GeometryInstance[],
   material: Material,
   uniforms: PatternSurfaceCoordinates['uniforms'],
+  allowPicking: boolean,
 ): FillGeometryPrimitive {
   const appearance = new EllipsoidSurfaceAppearance({
     aboveGround: true,
@@ -559,7 +565,7 @@ void main()
 `,
   });
   Object.assign(appearance, { uniforms });
-  return new FillGeometryPrimitive(instances, appearance, 'native');
+  return new FillGeometryPrimitive(instances, appearance, 'native', false, allowPicking);
 }
 
 /**
@@ -570,6 +576,8 @@ void main()
  * global image atlas instead of one texture per material.
  */
 export class PatternTileRenderer {
+  private readonly _picking: FeaturePicking;
+
   private readonly _layerCollections = new LayerCollections();
 
   private _tiles = new Map<string, PatternPrimitiveEntry[]>();
@@ -605,6 +613,10 @@ export class PatternTileRenderer {
    * CesiumVectorTileset._pixelRatioCompensation).
    */
   pixelRatio = 1;
+
+  constructor(picking = new FeaturePicking()) {
+    this._picking = picking;
+  }
 
   get collections(): ReadonlyMap<string, PrimitiveCollection> {
     return this._layerCollections.collections;
@@ -728,8 +740,8 @@ export class PatternTileRenderer {
   }
 
   private _thawPaint(entries: readonly PatternPrimitiveEntry[], layers: readonly PatternStyleLayer[]): void {
-    for (const { primitive, id } of entries) {
-      const layer = layers.find(candidate => candidate.id === id.layerId)!;
+    for (const { primitive, layer: previousLayer } of entries) {
+      const layer = layers.find(candidate => candidate.id === previousLayer.id)!;
       if (primitive instanceof FillGeometryPrimitive) {
         const fill = this._fillPaint.get(primitive);
         if (fill) {
@@ -757,14 +769,14 @@ export class PatternTileRenderer {
     // their current primitives until the tile's new vector stage is ready.
     if (layerOrder) {
       for (const [tileId, entries] of this._tiles) {
-        const deleted = entries.filter(entry => !layerOrder.has(entry.id.layerId));
+        const deleted = entries.filter(entry => !layerOrder.has(entry.layer.id));
         if (deleted.length === 0) {
           continue;
         }
         const removed = this._retireEntries(deleted);
         update.removed.push(...removed.removed);
         update.removedMaterials.push(...removed.removedMaterials);
-        this._tiles.set(tileId, entries.filter(entry => layerOrder.has(entry.id.layerId)));
+        this._tiles.set(tileId, entries.filter(entry => layerOrder.has(entry.layer.id)));
         this._tileStates.delete(tileId);
       }
     }
@@ -801,7 +813,7 @@ export class PatternTileRenderer {
         if (!this._retainedSurfaces.has(retained))
           return;
         for (const entry of entries)
-          entry.primitive.show = visible && entry.paintVisible && !hiddenLayers?.has(entry.id.layerId);
+          entry.primitive.show = visible && entry.paintVisible && !hiddenLayers?.has(entry.layer.id);
       },
       release: () => {
         if (!this._retainedSurfaces.delete(retained))
@@ -820,8 +832,8 @@ export class PatternTileRenderer {
       return undefined;
     }
     const ids = new Set(layers.map(layer => layer.id));
-    const displaced = entries.filter(entry => !ids.has(entry.id.layerId));
-    this._tiles.set(tileId, entries.filter(entry => ids.has(entry.id.layerId)));
+    const displaced = entries.filter(entry => !ids.has(entry.layer.id));
+    this._tiles.set(tileId, entries.filter(entry => ids.has(entry.layer.id)));
     return this._retainEntries(displaced);
   }
 
@@ -1024,10 +1036,10 @@ export class PatternTileRenderer {
         if (entry.mode !== mode || entry.layerKey !== layerKey) {
           return false;
         }
-        const bucket = buckets[entry.id.layerId];
+        const bucket = buckets[entry.layer.id];
         const layer = entry.styleRevision === styleRevision
           ? entry.layer
-          : layers.find(candidate => candidate.id === entry.id.layerId);
+          : layers.find(candidate => candidate.id === entry.layer.id);
         if (!bucket || !layer || !atlas || !isPatternBucket(bucket)) {
           return false;
         }
@@ -1047,8 +1059,8 @@ export class PatternTileRenderer {
         entry.styleRevision = styleRevision;
         entry.styleMutationRevision = styleMutationRevision;
         entry.styleZoom = styleZoom;
-        entry.layer = layers.find(candidate => candidate.id === entry.id.layerId) ?? entry.layer;
-        const bucket = buckets[entry.id.layerId] as FillBucket | LineBucket | FillExtrusionBucket;
+        entry.layer = layers.find(candidate => candidate.id === entry.layer.id) ?? entry.layer;
+        const bucket = buckets[entry.layer.id] as FillBucket | LineBucket | FillExtrusionBucket;
         entry.paintRevision = bucket.programConfigurations.paintRevision;
       }
       this._tileStates.set(tileId, this._createTileState(tileFeatureIndex, buckets, layers, atlas, mode, layerKey, atlasVersion, styleRevision, styleMutationRevision, styleZoom, patternGeometry));
@@ -1141,7 +1153,6 @@ export class PatternTileRenderer {
       }
       const rendered = this._renderLayer(
         state.tileId,
-        state.sourceId,
         state.tileID,
         state.tileFeatureIndex,
         bucket,
@@ -1301,7 +1312,6 @@ export class PatternTileRenderer {
    */
   private _renderLayer(
     tileId: string,
-    sourceId: string | undefined,
     tileID: TileID,
     tileFeatureIndex: FeatureIndex | undefined,
     bucket: FillBucket | LineBucket | FillExtrusionBucket,
@@ -1362,14 +1372,10 @@ export class PatternTileRenderer {
       group.geometryInstances.push(entry.geometryInstance);
       group.entries.push(entry);
     };
-    const pickTileId = sourceId ? `${sourceId}/${tileID.key}` : tileID.key;
-    const makeId = (featureIndex: number): PatternPrimitiveID => ({
-      type: 'pattern',
-      tileId: pickTileId,
-      layerId: layer.id,
-      featureIndex,
-      tileFeatureIndex,
-    });
+    const allowPicking = this._picking.enabled(layer.type as PatternPrimitiveID['type']);
+    const makeId = (featureIndex: number): PatternFeatureID => allowPicking
+      ? { ...this._picking.feature(layer, tileFeatureIndex, featureIndex), featureIndex }
+      : { featureIndex };
 
     if (bucket instanceof FillBucket) {
       // The fill branch dominates pattern build time (pattern-space UV
@@ -1405,6 +1411,7 @@ export class PatternTileRenderer {
               rect,
             ),
             id,
+            attributes: allowPicking ? { show: new ShowGeometryInstanceAttribute(true) } : undefined,
           }),
           material: material.material,
           materialKey: material.key,
@@ -1448,6 +1455,7 @@ export class PatternTileRenderer {
             geometry: lineGeometry,
             id,
             attributes: {
+              ...(allowPicking ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
               color: ColorGeometryInstanceAttribute.fromColor(Color.WHITE),
               lineWidth: new GeometryInstanceAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 4, value: [style.widthPx, style.gapWidthPx, style.offsetPx, style.blurPx] }),
               lineMiterLimit: new GeometryInstanceAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 1, value: [layout.join === 'bevel' ? 1.05 : layout.miterLimit] }),
@@ -1479,6 +1487,7 @@ export class PatternTileRenderer {
             geometry: patternExtrusionGeometry(geometry, rect, tileID),
             id,
             attributes: {
+              ...(allowPicking ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
               extrusionShape: new GeometryInstanceAttribute({
                 componentDatatype: ComponentDatatype.FLOAT,
                 componentsPerAttribute: 3,
@@ -1521,10 +1530,10 @@ export class PatternTileRenderer {
           };
         }
         const primitive = bucket instanceof LineBucket
-          ? new GeometryPrimitive({ geometryInstances: instances, appearance: new PatternLineAppearance(group.material) }, 'line', lineAppearanceForMode)
+          ? new GeometryPrimitive({ geometryInstances: instances, appearance: new PatternLineAppearance(group.material), allowPicking }, 'line', lineAppearanceForMode)
           : bucket instanceof FillExtrusionBucket
-            ? new ExtrusionGeometryPrimitive({ geometryInstances: instances, appearance: new PatternExtrusionAppearance(group.material, surfaceCoordinates!.uniforms, this.lighting), compressVertices: false })
-            : patternPrimitive(instances, group.material, surfaceCoordinates!.uniforms);
+            ? new ExtrusionGeometryPrimitive({ geometryInstances: instances, appearance: new PatternExtrusionAppearance(group.material, surfaceCoordinates!.uniforms, this.lighting), compressVertices: false, allowPicking })
+            : patternPrimitive(instances, group.material, surfaceCoordinates!.uniforms, allowPicking);
         if (primitive instanceof FillGeometryPrimitive) {
           const fillLayer = layer as FillStyleLayer;
           primitive.updateCameraPaint(fillLayer, styleZoom ?? bucket.zoom, this._cameraBearing);
@@ -1545,7 +1554,7 @@ export class PatternTileRenderer {
         if (bucket instanceof LineBucket && shapeUsesZoom) {
           this._linePaint.set(primitive, {
             instances,
-            evaluate: freezeLineFeaturePaint(bucket, layer.id, instances.map(instance => (instance.id as PatternPrimitiveID).featureIndex)),
+            evaluate: freezeLineFeaturePaint(bucket, layer.id, instances.map(instance => (instance.id as PatternFeatureID).featureIndex)),
             zoom: styleZoom ?? bucket.zoom,
           });
         }
@@ -1797,12 +1806,6 @@ export class PatternTileRenderer {
     };
   }
 
-  hasPickObject(id: PatternPrimitiveID): boolean {
-    return this._tiles.get(id.tileId)?.some(entry => entry.id === id)
-      || [...this._retainedSurfaces].some(retained => retained.tileId === id.tileId
-        && retained.entries.some(entry => entry.id === id));
-  }
-
   /** Mandatory owner paint runs before cold submission and does not rebuild UVs. */
   updateCameraPaint(zoom: number, bearing?: number): void {
     this._cameraBearing = bearing;
@@ -1842,7 +1845,7 @@ export class PatternTileRenderer {
         const line = this._linePaint.get(primitive);
         if (line && line.zoom !== zoom) {
           for (const instance of line.instances) {
-            const style = line.evaluate.get((instance.id as PatternPrimitiveID).featureIndex)!(zoom);
+            const style = line.evaluate.get((instance.id as PatternFeatureID).featureIndex)!(zoom);
             const value = [Math.max(0, style.widthPx), style.gapWidthPx, style.offsetPx, style.blurPx];
             if (primitive.ready)
               primitive.getGeometryInstanceAttributes(instance.id).lineWidth = value;

@@ -3,6 +3,7 @@ import type {
   Primitive,
 } from 'cesium';
 import type { Bucket } from '../../data/bucket';
+import type { FeatureIndex } from '../../data/feature-index';
 import type { PreparedLineGeometry } from '../../data/projected-geometry';
 import type { DashRow } from '../../source/worker-source';
 import type { StyleLayer } from '../../style/style-layer';
@@ -30,6 +31,7 @@ import {
   PolylineMaterialAppearance,
   PrimitiveCollection,
   PrimitiveType,
+  ShowGeometryInstanceAttribute,
 } from 'cesium';
 import { FillBucket, LineBucket } from '../../data/bucket-runtime';
 import { fillCameraPaintOwners } from '../geometry/fill-camera-paint';
@@ -39,6 +41,7 @@ import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { lineInputs } from '../geometry/line-input';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
 import { registerDrawBatch, registerLinePaint } from '../scene/draw-batch';
+import { FeaturePicking } from '../scene/feature-picking';
 import { MAX_LINE_INSTANCES } from '../scene/frame-budget';
 import { constantValue, fillStyleForFeature, hasExplicitFillOutline, layerFor, lineStyleForFeature } from '../vector/feature-attributes';
 import { dashRowsForFeature } from './dash-material';
@@ -751,6 +754,8 @@ function lineLayout(bucket: Bucket | undefined, featureIndex: number): Pick<Line
  * antialiasing and leave hard, jagged edges on every line.
  */
 export interface LineBuildState {
+  picking: FeaturePicking;
+  featureIndex?: FeatureIndex;
   clip: LineTileClip;
   geometryCache?: LineGeometryCache;
   byLayer: Array<{
@@ -789,8 +794,12 @@ export function beginLineBuild(
   zoom: number,
   planar = false,
   dash?: LineDashResources,
+  picking = new FeaturePicking(),
+  featureIndex?: FeatureIndex,
 ): LineBuildState {
   const state: LineBuildState = {
+    picking,
+    featureIndex,
     clip: new LineTileClip(tileID),
     geometryCache: new LineGeometryCache(tileID),
     byLayer: [],
@@ -899,11 +908,11 @@ function* compileLineBuild(state: LineBuildState, sources: LinePrimitiveSourceLi
         const source = layer.sources[state.sourceIndex];
         if (bucket instanceof FillBucket) {
           layer.outlineInstances ??= [];
-          yield* appendFillOutlineInstances(layer.outlineInstances, source, bucket, state.tileId, state.generationId, layerId, state.zoom);
+          yield* appendFillOutlineInstances(layer.outlineInstances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.picking, state.featureIndex);
         }
         else {
           layer.instances ??= [];
-          const miterLimit = yield* appendLineLayerInstances(layer.instances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.planar, layer.paintMode, state.geometryCache!, state.dash, layer.dash, layer.instanceCameraPaint ??= new Map());
+          const miterLimit = yield* appendLineLayerInstances(layer.instances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.planar, layer.paintMode, state.geometryCache!, state.dash, layer.dash, layer.instanceCameraPaint ??= new Map(), state.picking, state.featureIndex);
           if (miterLimit !== undefined)
             layer.maximumMiterLimit = Math.max(layer.maximumMiterLimit ?? 0, miterLimit);
         }
@@ -1078,7 +1087,7 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
       continue;
     }
     for (const instances of lineChunks(layer.outlineInstances ?? [], state.planar)) {
-      const primitive = new FillGeometryPrimitive(instances, new FillOutlineAppearance(), 'native');
+      const primitive = new FillGeometryPrimitive(instances, new FillOutlineAppearance(), 'native', false, state.picking.enabled('fill'));
       fillOwners.push({ layerId: layer.layerId, paint: primitive });
       primitive.updateCameraPaint(layerFor(state.buckets[layer.layerId], layer.layerId) as FillStyleLayer, state.zoom);
       registerLinePaint(primitive, linePaintUniforms(state.clip));
@@ -1115,6 +1124,8 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
           translucentLineAppearance,
           state.clip,
           layer.maximumMiterLimit,
+          state.picking,
+          state.featureIndex,
         );
         lineFamilies.set(chunk, layers);
         collection.add(chunk as unknown as Primitive);
@@ -1122,6 +1133,7 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
         continue;
       }
       const primitive = new GeometryPrimitive({
+        allowPicking: state.picking.enabled(state.buckets[layer.layerId] instanceof FillBucket ? 'fill' : 'line'),
         geometryInstances: instances,
         appearance: layer.dash
           ? new DashLineAppearance({ material: state.dash!.material.material, translucent: true })
@@ -1177,6 +1189,8 @@ function* appendFillOutlineInstances(
   generationId: number,
   layerId: string,
   zoom: number,
+  picking: FeaturePicking,
+  featureIndex: FeatureIndex | undefined,
 ): Generator<void> {
   const style = fillStyleForFeature(bucket, source.featureIndex, layerId, zoom);
   // Existing outline sources survive hidden paint so opacity transitions can
@@ -1206,8 +1220,20 @@ function* appendFillOutlineInstances(
   });
   instances.push(new GeometryInstance({
     geometry,
-    id: { type: 'line', tileId, layerId, featureIndex: source.featureIndex, generationId },
-    attributes: { color: ColorGeometryInstanceAttribute.fromColor(style.outlineColor) },
+    id: {
+      type: 'line',
+      tileId,
+      layerId,
+      featureIndex: source.featureIndex,
+      generationId,
+      ...(picking.enabled('fill')
+        ? picking.feature(layerFor(bucket, layerId), featureIndex, source.featureIndex)
+        : {}),
+    },
+    attributes: {
+      color: ColorGeometryInstanceAttribute.fromColor(style.outlineColor),
+      ...(picking.enabled('fill') ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
+    },
   }));
 }
 
@@ -1229,6 +1255,8 @@ function* appendLineLayerInstances(
   dash: LineDashResources | undefined,
   dashed: boolean,
   cameraPaint: Map<number, FrozenLineCameraPaint>,
+  picking: FeaturePicking,
+  featureIndex: FeatureIndex | undefined,
 ): Generator<void, number | undefined> {
   if (!(bucket instanceof LineBucket) && !(bucket instanceof FillBucket)) {
     return;
@@ -1251,8 +1279,18 @@ function* appendLineLayerInstances(
     const miterLimit = Math.fround(options.join === 'bevel' ? 1.05 : options.miterLimit);
     instances.push(new GeometryInstance({
       geometry,
-      id: { type: 'line', tileId, layerId, featureIndex: source.featureIndex, generationId },
+      id: {
+        type: 'line',
+        tileId,
+        layerId,
+        featureIndex: source.featureIndex,
+        generationId,
+        ...(picking.enabled(bucket instanceof FillBucket ? 'fill' : 'line')
+          ? picking.feature(layerFor(bucket, layerId), featureIndex, source.featureIndex)
+          : {}),
+      },
       attributes: {
+        ...(picking.enabled(bucket instanceof FillBucket ? 'fill' : 'line') ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
         color: ColorGeometryInstanceAttribute.fromColor(style ? style.color : CesiumColor.WHITE),
         lineWidth: new GeometryInstanceAttribute({
           componentDatatype: ComponentDatatype.FLOAT,

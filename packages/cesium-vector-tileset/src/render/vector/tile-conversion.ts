@@ -1,5 +1,6 @@
 import type { SceneMode } from 'cesium';
 import type { Bucket } from '../../data/bucket';
+import type { FeatureIndex } from '../../data/feature-index';
 import type { CirclePrimitiveGeometry, FillPrimitiveGeometry, LinePrimitiveGeometry, ProjectedGeometryList } from '../../data/projected-geometry';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
@@ -8,6 +9,7 @@ import { BufferPolygonMaterial, Cartesian3, Color } from 'cesium';
 import { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
 import { projectCircleGeometry, projectFillGeometry, projectLineGeometry } from '../../data/projected-geometry-transfer';
 import { surfaceGranularity } from '../geometry/surface-subdivision';
+import { FeaturePicking } from '../scene/feature-picking';
 import { MORPHING, SCENE3D } from '../scene/scene-mode';
 import {
   circleBucketPrimitives,
@@ -18,6 +20,7 @@ import {
 import {
   circleStyleForFeature,
   fillStyleForFeature,
+  layerFor,
 } from './feature-attributes';
 
 type TileID = CanonicalTileID | OverscaledTileID;
@@ -96,6 +99,8 @@ interface ConvertFamily {
  */
 export interface TileConversionState {
   generationId: number;
+  picking: FeaturePicking;
+  featureIndex?: FeatureIndex;
   families: ConvertFamily[];
   familyIndex: number;
   layerIndex: number;
@@ -117,6 +122,8 @@ export function beginTileConversion(
   styleZoom?: number,
   mode?: SceneMode,
   draped = false,
+  picking = new FeaturePicking(),
+  featureIndex?: FeatureIndex,
 ): TileConversionState {
   const result: TileRenderResult = { polygons: [], points: [], linePrimitives: [], layerIds: [] };
   // A worker bucket can be shared by several style-layer ids. Build the
@@ -182,7 +189,7 @@ export function beginTileConversion(
     });
   }
   families.sort((a, b) => Number(b.branch === 'fill') - Number(a.branch === 'fill'));
-  return { families, familyIndex: 0, layerIndex: 0, primIndex: 0, tileID, styleZoom, mode, draped, generationId, result };
+  return { families, familyIndex: 0, layerIndex: 0, primIndex: 0, tileID, styleZoom, mode, draped, generationId, picking, featureIndex, result };
 }
 
 /**
@@ -291,7 +298,12 @@ function* convertOneFeature(
       material: new BufferPolygonMaterial({
         color: toColor(style.color.red, style.color.green, style.color.blue, style.color.alpha),
       }),
-      pickObject: pickObject(tileId, layerId, primitive.featureIndex, state.generationId),
+      pickObject: {
+        ...pickObject(tileId, layerId, primitive.featureIndex, state.generationId),
+        ...(state.picking.enabled('fill')
+          ? state.picking.feature(layerFor(bucket, layerId), state.featureIndex, primitive.featureIndex)
+          : {}),
+      },
     });
   }
   else if (family.branch === 'line' && bucket instanceof LineBucket) {
@@ -316,7 +328,12 @@ function* convertOneFeature(
         primitive.position[2],
       ),
       style,
-      pickObject: pickObject(tileId, layerId, primitive.featureIndex, state.generationId),
+      pickObject: {
+        ...pickObject(tileId, layerId, primitive.featureIndex, state.generationId),
+        ...(state.picking.enabled('circle')
+          ? state.picking.feature(layerFor(bucket, layerId), state.featureIndex, primitive.featureIndex)
+          : {}),
+      },
     });
   }
   return state.primIndex + 1;

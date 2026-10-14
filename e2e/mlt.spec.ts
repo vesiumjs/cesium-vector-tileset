@@ -41,6 +41,7 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
   const query = new URLSearchParams({
     style: `${renderUrl}/mlt-fixture/style.json`,
     published: '1',
+    picking: 'true',
     scale: '0.25',
     // Center the camera on this sparse fixture's point in tile 14/8186/5448.
     center: '-0.12737274169921875,51.49976691240594',
@@ -100,14 +101,13 @@ test('published MLT UINT64 ID survives decoding, picking and feature-state paint
     if (!picked)
       return;
     const object = picked.id ?? picked;
-    const feature = validation.tileset.pick(object);
     const index = validation.tileset._renderer.residency.featureIndex(object.tileId, object.generationId);
     if (!index)
       throw new Error('The picked MLT generation must retain its feature index');
     const pickedFeature = index.features?.getFeature('layer1', object.featureIndex);
     if (!pickedFeature)
       throw new Error('The picked MLT feature must remain decoded');
-    return { feature, hasRawData: 'rawTileData' in index, id: pickedFeature.id };
+    return { feature: { layerId: object.layerId, properties: object.properties }, hasRawData: 'rawTileData' in index, id: object.featureId };
   }, point);
   assert.deepEqual(picked, { feature: { layerId: 'points', properties: {} }, hasRawData: false, id: '9007199254740993' });
 

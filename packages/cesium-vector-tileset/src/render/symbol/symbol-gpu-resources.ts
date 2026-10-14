@@ -1,9 +1,10 @@
 import type { Camera, MapProjection, Material, SceneMode } from 'cesium';
 import type { ProgramConfiguration } from '../../data/program-configuration';
 import type { EvaluatedZoomSize, SizeData } from '../../symbol/symbol-size';
+import type { TilesetPickObject } from '../scene/feature-picking';
 import type { SymbolPrimitiveGeometry } from './symbol-geometry';
 import type { SymbolTranslation } from './symbol-translation';
-import { BoundingSphere, Cartesian2, ComponentDatatype, Geometry, GeometryAttribute, GeometryInstance, GeometryInstanceAttribute, MaterialAppearance, Primitive, PrimitiveCollection, PrimitiveType } from 'cesium';
+import { BoundingSphere, Cartesian2, ComponentDatatype, Geometry, GeometryAttribute, GeometryAttributes, GeometryInstance, GeometryInstanceAttribute, MaterialAppearance, Primitive, PrimitiveCollection, PrimitiveType, ShowGeometryInstanceAttribute } from 'cesium';
 import { evaluateSizeForZoom } from '../../symbol/symbol-size';
 import { MERCATOR_TRANSLATION_SHADER, mercatorTranslationPadding } from '../geometry/mercator-translation';
 import { registerDrawBatch } from '../scene/draw-batch';
@@ -511,8 +512,8 @@ export function symbolGeometry(geometry: SymbolPrimitiveGeometry, indices: Uint3
  * One drawable half of a symbol layer: baked geometry plus the shared
  * material sampling its atlas. Halves merge within a style layer at commit
  * (see mergeSymbolHalves), retaining a reorderable draw batch per layer.
- * Each layer part stays one Geometry; line glyphs move through a dynamic
- * vertex channel, so they do not create a Primitive per label.
+ * Line glyphs move through one dynamic vertex channel. Picking can split its
+ * GeometryInstances while retaining one Primitive and the same half ranges.
  */
 export interface SymbolHalf {
   layerId: string;
@@ -524,6 +525,12 @@ export interface SymbolHalf {
   boundsTranslation?: Cartesian2;
   geometry: Geometry;
   material: Material;
+  /** Allocated only for enabled picking; ranges remain in the half's vertex order. */
+  pickInstances?: Array<{
+    vertexStart: number;
+    vertexCount: number;
+    id: TilesetPickObject & { tileId: string; generationId?: number; part: 'text' | 'icon'; symbolIndex: number; featureIndex: number };
+  }>;
   opacity?: {
     geometry: SymbolPrimitiveGeometry;
     /** Vertex offset after Cesium combines all halves sharing a material. */
@@ -634,12 +641,12 @@ export class SymbolGpuResources extends RuntimePrimitive {
 
   private readonly _pixelDimensions = new Cartesian2();
 
-  constructor(instances: GeometryInstance[], halves: readonly { half: SymbolHalf; vertexStart: number }[], appearance: SymbolAppearance) {
+  constructor(instances: GeometryInstance[], halves: readonly { half: SymbolHalf; vertexStart: number }[], appearance: SymbolAppearance, allowPicking = false) {
     super({
       // Native adds batchId only when combining a list of instances.
       geometryInstances: instances,
       appearance,
-      allowPicking: false,
+      allowPicking,
       asynchronous: false,
       releaseGeometryInstances: true,
       // The generation's vertex ranges address non-interleaved float streams.
@@ -885,6 +892,58 @@ export class SymbolGpuResources extends RuntimePrimitive {
 }
 
 /**
+ * Preserve the half's complete vertex order when Native combines per-symbol
+ * instances. Mutable opacity, line and paint uploads keep addressing the same
+ * contiguous half, and every candidate of a variable anchor shares its id.
+ */
+function pickGeometries(half: SymbolHalf): Geometry[] {
+  const ranges = half.pickInstances!;
+  const indices = half.geometry.indices!;
+  const owners = new Uint32Array(Geometry.computeNumberOfVertices(half.geometry));
+  const perSymbol: number[][] = ranges.map(() => []);
+  let vertexCount = 0;
+  for (const [index, range] of ranges.entries()) {
+    if (range.vertexStart !== vertexCount)
+      throw new Error('Picking symbol ranges must preserve the complete half vertex layout');
+    owners.fill(index, range.vertexStart, range.vertexStart + range.vertexCount);
+    vertexCount += range.vertexCount;
+  }
+  if (vertexCount !== owners.length)
+    throw new Error('Picking symbol ranges must preserve the complete half vertex layout');
+  for (let offset = 0; offset < indices.length; offset += 3) {
+    const first = indices[offset];
+    const second = indices[offset + 1];
+    const third = indices[offset + 2];
+    const owner = owners[first];
+    if (owners[second] !== owner || owners[third] !== owner)
+      throw new Error('Picking symbol triangle crosses source feature ranges');
+    const start = ranges[owner].vertexStart;
+    perSymbol[owner].push(first - start, second - start, third - start);
+  }
+  return ranges.map((range, index) => {
+    const attributes = new GeometryAttributes();
+    for (const [name, attribute] of Object.entries(half.geometry.attributes) as Array<[string, GeometryAttribute]>) {
+      const { values, componentsPerAttribute } = attribute;
+      const start = range.vertexStart * componentsPerAttribute;
+      const end = start + range.vertexCount * componentsPerAttribute;
+      Object.assign(attributes, { [name]: new GeometryAttribute({
+        componentDatatype: attribute.componentDatatype,
+        componentsPerAttribute,
+        normalize: attribute.normalize,
+        values: Array.isArray(values) ? values.slice(start, end) : values.subarray(start, end),
+      }) });
+    }
+    return new Geometry({
+      attributes,
+      indices: new Uint32Array(perSymbol[index]),
+      primitiveType: half.geometry.primitiveType,
+      // The complete half includes the live line path and all anchor choices.
+      boundingSphere: half.geometry.boundingSphere,
+    });
+  });
+}
+
+/**
  * Merge halves by style layer, material, size semantics and composite paint interval. Material/appearance and atlas
  * textures are still shared, while every Primitive remains a reorderable
  * unit in painter order. Each instance keeps its per-layer pick identity.
@@ -897,6 +956,7 @@ export function mergeSymbolHalves(tileId: string, halves: readonly SymbolHalf[])
     paintConfig?: ProgramConfiguration;
     sizeData: SizeData;
     translation: SymbolTranslation;
+    allowPicking: boolean;
   }
   const byLayer = new Map<string, Map<Material, Group[]>>();
   for (const half of halves) {
@@ -916,25 +976,31 @@ export function mergeSymbolHalves(tileId: string, halves: readonly SymbolHalf[])
     const config = half.paint?.geometry.paint?.config;
     const paintConfig = config?.hasCompositeProperties() ? config : undefined;
     const sizeData = half.sizeData;
-    let group = groups.find(candidate => candidate.paintConfig === paintConfig && candidate.sizeData === sizeData
+    const allowPicking = half.pickInstances !== undefined;
+    let group = groups.find(candidate => candidate.paintConfig === paintConfig && candidate.sizeData === sizeData && candidate.allowPicking === allowPicking
       && candidate.translation.anchor === half.translation.anchor
       && Cartesian2.equals(candidate.translation.pixels, half.translation.pixels));
     if (!group) {
-      group = { instances: [], halves: [], vertexCount: 0, paintConfig, sizeData, translation: half.translation };
+      group = { instances: [], halves: [], vertexCount: 0, paintConfig, sizeData, translation: half.translation, allowPicking };
       groups.push(group);
     }
-    const instance = new GeometryInstance({
-      geometry: half.geometry,
-      id: { type: 'symbol', tileId, layerId: half.layerId, part: half.part },
-      attributes: {
-        [SYMBOL_FADE_ATTRIBUTE]: new GeometryInstanceAttribute({
-          componentDatatype: ComponentDatatype.FLOAT,
-          componentsPerAttribute: 1,
-          value: [1],
-        }),
-      },
-    });
-    group.instances.push(instance);
+    const geometries = allowPicking ? pickGeometries(half) : [half.geometry];
+    for (const [index, geometry] of geometries.entries()) {
+      const instance = new GeometryInstance({
+        geometry,
+        id: half.pickInstances?.[index].id ?? { type: 'symbol', tileId, layerId: half.layerId, part: half.part },
+        attributes: {
+          [SYMBOL_FADE_ATTRIBUTE]: new GeometryInstanceAttribute({
+            componentDatatype: ComponentDatatype.FLOAT,
+            componentsPerAttribute: 1,
+            value: [1],
+          }),
+          // Native drillPick hides and restores this individual instance.
+          ...(allowPicking ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
+        },
+      });
+      group.instances.push(instance);
+    }
     group.halves.push({ half, vertexStart: group.vertexCount });
     group.vertexCount += Geometry.computeNumberOfVertices(half.geometry);
   }
@@ -946,7 +1012,7 @@ export function mergeSymbolHalves(tileId: string, halves: readonly SymbolHalf[])
   for (const [layerId, byMaterial] of byLayer) {
     for (const [material, groups] of byMaterial) {
       for (const group of groups) {
-        const primitive = new SymbolGpuResources(group.instances, group.halves, appearanceFor(material));
+        const primitive = new SymbolGpuResources(group.instances, group.halves, appearanceFor(material), group.allowPicking);
         registerDrawBatch(primitive, { layerId, tileId, kind: 'symbol' });
         collection.add(primitive);
         primitives.push(primitive);

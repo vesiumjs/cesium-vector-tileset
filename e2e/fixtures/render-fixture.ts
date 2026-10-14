@@ -1,4 +1,5 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { TilesetPickingOptions } from '../../packages/cesium-vector-tileset/src/tileset-options';
 import type { RequestTransformFunction } from '../../packages/cesium-vector-tileset/src/util/request';
 import type { TestTileset, TestViewer } from './browser-types';
 import { Camera, Cartesian2, Cartesian3, Cartographic, HeadingPitchRange, HeightReference, Matrix4, PrimitiveCollection, Rectangle, SceneMode, SceneTransforms, Viewer, WebMercatorProjection } from 'cesium';
@@ -75,8 +76,10 @@ async function createValidation() {
   viewer.scene.renderError.addEventListener((_scene, error: Error) => renderErrors.push(error.stack ?? error.message));
 
   const styleUrl = query.get('style') ?? 'https://tiles.openfreemap.org/styles/liberty';
+  const allowPicking: TilesetPickingOptions = JSON.parse(query.get('picking') ?? 'false');
   const tileset = await CesiumVectorTileset.fromUrl(styleUrl, {
     heightReference: query.has('drape') ? HeightReference.CLAMP_TO_GROUND : HeightReference.NONE,
+    allowPicking,
   }) as unknown as TestTileset;
   viewer.scene.primitives.add(tileset);
   let reference: MapLibre | undefined;

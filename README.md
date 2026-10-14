@@ -4,7 +4,7 @@ English | [简体中文](https://github.com/vesiumjs/cesium-vector-tileset/blob/
 
 A vector map for Cesium. Display roads, water, labels, icons and buildings with a MapLibre-style JSON, alongside the other content in your scene.
 
-Use it in 3D, 2D or Columbus View, with any frontend framework. TypeScript declarations are included.
+Use it in 3D, 2D or Columbus View.
 
 [Try the demo](https://vesiumjs.github.io/cesium-vector-tileset/) · [Example styles](https://github.com/vesiumjs/cesium-vector-tileset/tree/main/src/styles) · [GitHub](https://github.com/vesiumjs/cesium-vector-tileset)
 
@@ -65,11 +65,57 @@ If your primitive collection has `destroyPrimitives: false`, call `map.destroy()
 
 Use `cesium-vector-tileset/min` instead of the default import for the minified build. When copying distributed files, keep the main module and its Worker files together. Use the same Cesium installation for the library and your scene.
 
-## Supported maps
+## Picking features
 
-MVT, MLT and GeoJSON vector data, raster tiles, images, video and canvas are supported. Styles can use fills, lines, circles, symbols and extruded buildings, including expressions, filters, icons, image patterns and bidirectional text.
+`allowPicking` defaults to `false`. Set it to `true` to enable all pickable layers, or configure individual style layer types; omitted types remain disabled. Set this option when creating the map.
 
-This is a subset of MapLibre's style features: `heatmap`, `hillshade`, `raster-dem` and `line-gradient` are unavailable. Glyph fonts must cover your text. Ordinary fills can be draped with `heightReference` on compatible Cesium scenes; other layers remain at their ellipsoid heights. Label and icon picking is unavailable.
+```ts
+const map = await CesiumVectorTileset.fromUrl(styleUrl, {
+  allowPicking: { fill: true, line: true, symbol: true },
+});
+viewer.scene.primitives.add(map);
+
+const hit = viewer.scene.pick(windowPosition);
+const feature = hit?.id;
+if (feature?.layerId) {
+  console.log(feature.layerId, feature.featureId, feature.properties);
+}
+```
+
+Use Cesium's `scene.pick` or `scene.drillPick`. Feature metadata is returned in `id` and includes `type`, `layerId`, `source` and `properties`, plus `featureId` and `sourceLayer` when available for vector features. Configurable types are `fill`, `line`, `circle`, `symbol`, `fill-extrusion` and `raster`; fill outlines and patterns follow their style layer's type.
+
+## Supported features
+
+The library implements a subset of MapLibre's version 8 style features.
+
+### Data sources
+
+| Source type                | Support         | Details                                                                       |
+| -------------------------- | --------------- | ----------------------------------------------------------------------------- |
+| `vector`                   | Supported       | MVT and MLT vector tiles.                                                     |
+| `geojson`                  | Supported       | Inline GeoJSON or a GeoJSON URL.                                              |
+| `raster`                   | Supported       | Raster image tiles.                                                           |
+| `image`, `video`, `canvas` | Supported       | Georeferenced images, video and canvas content.                               |
+| `raster-dem`               | **Unsupported** | Decode and load elevation data through Cesium's terrain providers; see below. |
+
+### Rendering and styles
+
+| Feature                                | Support     | Details                                                                                                                                                                         |
+| -------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scene modes                            | Supported   | 3D globe, 2D and Columbus View.                                                                                                                                                 |
+| Layer types                            | Supported   | `background`, `fill`, `line`, `circle`, `symbol`, `fill-extrusion` and `raster`.                                                                                                |
+| Style expressions and filters          | Supported   | Includes data-driven styling, icons and image patterns.                                                                                                                         |
+| Text                                   | Supported   | Includes bidirectional text; fonts must cover the displayed glyphs.                                                                                                             |
+| Draping                                | Partial     | Ordinary fills can drape onto terrain or 3D Tiles through `heightReference` on compatible Cesium scenes. Other layers, including fill patterns, retain their ellipsoid heights. |
+| Feature picking                        | Supported   | Enable through `allowPicking` and use Cesium's native `scene.pick` / `scene.drillPick`, including labels and icons.                                                             |
+| `heatmap`, `hillshade`, `color-relief` | Unsupported | These layer types are not implemented.                                                                                                                                          |
+| `line-gradient`                        | Unsupported | This line paint property is not implemented.                                                                                                                                    |
+
+### DEM and terrain
+
+**`raster-dem` is not supported.** Before passing a MapLibre style containing DEM data to this library, remove its `raster-dem` sources, layers that reference those sources, and `terrain` configuration. Configure terrain separately on the Cesium viewer.
+
+For raw DEM tiles such as Terrain-RGB or Terrarium, your application must decode the elevation values and provide them through `CustomHeightmapTerrainProvider` or a custom `TerrainProvider`, assigned to `viewer.terrainProvider`. Data already converted to a Cesium terrain format can be loaded with `CesiumTerrainProvider`.
 
 The Cesium peer range is `^1.146.0`; rendering integrations are verified with 1.146.0. Display the attribution required by your data provider.
 

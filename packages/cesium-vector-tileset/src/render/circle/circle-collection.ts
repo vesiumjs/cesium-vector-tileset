@@ -204,8 +204,8 @@ class CirclePrimitive extends GeometryPrimitive {
   private _stroke = 0;
   private _dimensionsDirty = false;
 
-  constructor(instances: GeometryInstance[], entries: CircleEntry[], appearance: MaterialAppearance) {
-    super({ geometryInstances: instances, appearance, compressVertices: false, vertexCacheOptimize: false }, 'native');
+  constructor(instances: GeometryInstance[], entries: CircleEntry[], appearance: MaterialAppearance, allowPicking: boolean) {
+    super({ geometryInstances: instances, appearance, allowPicking, compressVertices: false, vertexCacheOptimize: false }, 'native');
     this.cull = false;
     this._entries = entries;
     this._uniforms = appearance.material.uniforms;
@@ -311,17 +311,19 @@ export class CircleCollection extends RuntimeCircleCollection {
   private readonly _appearance: MaterialAppearance;
   private readonly _tileId: string;
   private readonly _mode: SceneMode;
+  private readonly _allowPicking: boolean;
   private _subdivided = false;
   private _instances: GeometryInstance[] = [];
   private _pending: CircleEntry[] = [];
   private readonly _translate = new Cartesian2();
   private _translateViewport = false;
 
-  constructor(layerId: string, tileId: string, pixelRatio: number, mode: SceneMode) {
+  constructor(layerId: string, tileId: string, pixelRatio: number, mode: SceneMode, allowPicking = false) {
     super();
     this.layerId = layerId;
     this._tileId = tileId;
     this._mode = mode;
+    this._allowPicking = allowPicking;
     registerDrawBatch(this, { layerId, tileId: this._tileId, kind: 'circle' });
     const material = new Material({ fabric: { type: 'CvtCircle', source: materialSource }, translucent: true });
     const uniforms = (material as Material & { _uniforms: Record<string, () => unknown> })._uniforms;
@@ -344,7 +346,7 @@ export class CircleCollection extends RuntimeCircleCollection {
       color: ColorGeometryInstanceAttribute.fromColor(style.color),
       strokeColor: ColorGeometryInstanceAttribute.fromColor(style.outlineColor),
       circleDimensions: new GeometryInstanceAttribute({ componentDatatype: ComponentDatatype.FLOAT, componentsPerAttribute: 3, value: [...dimensions] }),
-      show: new ShowGeometryInstanceAttribute(true),
+      ...(this._allowPicking ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
     };
     const entry = { position: point.position, style: point.style, pickObject: point.pickObject, attributes, index: this._pending.length };
     this.entries.push(entry);
@@ -357,7 +359,7 @@ export class CircleCollection extends RuntimeCircleCollection {
   finish(): void {
     if (this._instances.length === 0)
       return;
-    const primitive = new CirclePrimitive(this._instances, this._pending, this._appearance);
+    const primitive = new CirclePrimitive(this._instances, this._pending, this._appearance, this._allowPicking);
     registerDrawBatch(primitive, { layerId: this.layerId, tileId: this._tileId, kind: 'circle' });
     this.add(primitive);
     this._instances = [];

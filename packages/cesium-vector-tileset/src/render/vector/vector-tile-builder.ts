@@ -1,4 +1,5 @@
 import type { Bucket } from '../../data/bucket';
+import type { FeatureIndex } from '../../data/feature-index';
 import type { DashRow } from '../../source/worker-source';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { GeometryPrimitive } from '../geometry/geometry-primitive';
@@ -36,6 +37,7 @@ import { tileBoundingSphere } from '../geometry/tile-bounding-sphere';
 import { beginLineBuild, commitLineBuild, discardLineBuild, stepLineBuild } from '../line/line-renderer';
 import { LineTileClip, SURFACE_TILE_CLIP_FRAGMENT } from '../line/line-tile-clip';
 import { registerDrawBatch, registerTileClip } from '../scene/draw-batch';
+import { FeaturePicking } from '../scene/feature-picking';
 import { iterateExtrusionBucketPrimitives } from './extrusion-geometry';
 import { deferredExtrusionLayers, ExtrusionPrimitive } from './extrusion-primitive';
 import { constantValue, layerFor, paintRevision } from './feature-attributes';
@@ -63,6 +65,7 @@ export interface BucketMap { [layerId: string]: Bucket }
 export interface VectorTileBuildInput {
   /** Resume a generation previously reserved for these buckets and this tile. */
   generationId?: number;
+  featureIndex?: FeatureIndex;
   tileId: string;
   buckets: BucketMap;
   tileID: TileID;
@@ -92,6 +95,9 @@ export interface VectorTileBuildState extends VectorTileBuildInput {
   circleBuild?: Generator<void>;
 }
 
+/** Paint ordinals follow collection storage independently of Native picking objects. */
+export const bufferPolygonFeatureIndices = new WeakMap<BufferPolygonCollection, readonly number[]>();
+
 export interface StandardRenderEntries {
   polygons: StandardPolygonEntry[];
 }
@@ -114,12 +120,15 @@ export interface VectorBuildContext {
 export class VectorTileBuilder {
   private readonly _context: () => VectorBuildContext;
 
+  private readonly _picking: FeaturePicking;
+
   private _nextGenerationId = 1;
 
-  private readonly _generations = new WeakMap<BucketMap, Map<number, Pick<VectorTileBuildInput, 'tileId' | 'styleRevision' | 'mode'>>>();
+  private readonly _generations = new WeakMap<BucketMap, Map<number, Pick<VectorTileBuildInput, 'tileId' | 'styleRevision' | 'mode' | 'featureIndex'>>>();
 
-  constructor(context: () => VectorBuildContext) {
+  constructor(context: () => VectorBuildContext, picking = new FeaturePicking()) {
     this._context = context;
+    this._picking = picking;
   }
 
   /**
@@ -128,6 +137,7 @@ export class VectorTileBuilder {
    */
   begin(input: VectorTileBuildInput): VectorTileBuildState {
     let generationId = input.generationId;
+    let featureIndex = input.featureIndex;
     if (generationId === undefined) {
       generationId = this._nextGenerationId++;
       let generations = this._generations.get(input.buckets);
@@ -135,7 +145,7 @@ export class VectorTileBuilder {
         generations = new Map();
         this._generations.set(input.buckets, generations);
       }
-      generations.set(generationId, { tileId: input.tileId, styleRevision: input.styleRevision, mode: input.mode });
+      generations.set(generationId, { tileId: input.tileId, styleRevision: input.styleRevision, mode: input.mode, featureIndex });
     }
     else {
       const generation = this._generations.get(input.buckets)?.get(generationId);
@@ -143,11 +153,15 @@ export class VectorTileBuilder {
         || generation.styleRevision !== input.styleRevision || generation.mode !== input.mode) {
         throw new Error('Cannot resume a vector generation with different tile, buckets, style or scene mode');
       }
+      if (featureIndex && featureIndex !== generation.featureIndex)
+        throw new Error('Cannot resume a vector generation with a different feature index');
+      featureIndex = generation.featureIndex;
     }
     const paintBuckets = [...new Set(Object.values(input.buckets))];
     return {
       ...input,
       generationId,
+      featureIndex,
       paintBuckets,
       // Conversion and Native preparation can span feature-state updates.
       // Keep the revisions that preceded construction, not the commit's values.
@@ -187,6 +201,8 @@ export class VectorTileBuilder {
         state.mode === SceneMode.SCENE3D && (context.heightReference === HeightReference.CLAMP_TO_GROUND
           || context.heightReference === HeightReference.CLAMP_TO_TERRAIN
           || context.heightReference === HeightReference.CLAMP_TO_3D_TILE),
+        this._picking,
+        state.featureIndex,
       );
       if (!advanceTileConversion(state.convert, budget, 'surface')) {
         return false;
@@ -202,7 +218,7 @@ export class VectorTileBuilder {
       const result = state.result!;
       if (state.mode !== SceneMode.SCENE3D) {
         state.standard ??= { polygons: [] };
-        state.polygonBuild ??= beginStandardPolygonBuild(result.polygons, state.tileId, state.tileID, state.mode);
+        state.polygonBuild ??= beginStandardPolygonBuild(result.polygons, state.tileId, state.tileID, state.mode, this._picking.enabled('fill'));
         if (!stepStandardPolygonBuild(state.polygonBuild, budget)) {
           return false;
         }
@@ -214,7 +230,7 @@ export class VectorTileBuilder {
         state.polygonBuild = undefined;
       }
       else if (result.polygons.length > 0) {
-        state.bufferPolygonBuild ??= beginBufferPolygonBuild(result.polygons, state.tileID, state.tileId, context.heightReference, state.buckets, state.styleZoom);
+        state.bufferPolygonBuild ??= beginBufferPolygonBuild(result.polygons, state.tileID, state.tileId, context.heightReference, state.buckets, state.styleZoom, this._picking.enabled('fill'));
         if (!stepBufferPolygonBuild(state.bufferPolygonBuild, budget))
           return false;
         state.entries.push(...state.bufferPolygonBuild.entries);
@@ -247,6 +263,8 @@ export class VectorTileBuilder {
           state.styleZoom,
           planar,
           context.dashMaterial ? { material: context.dashMaterial, rows: state.dashRows } : undefined,
+          this._picking,
+          state.featureIndex,
         );
         if (!stepLineBuild(state.lineBuild, budget)) {
           return false;
@@ -275,6 +293,8 @@ export class VectorTileBuilder {
         state.styleZoom,
         context.lighting,
         state.skipLayerIds,
+        this._picking,
+        state.featureIndex,
       );
       if (!stepExtrusionBuild(state.extrusionBuild, budget)) {
         return false;
@@ -291,7 +311,7 @@ export class VectorTileBuilder {
         return false;
       }
       const result = state.result!;
-      state.circleBuild ??= appendCircleCollections(result.points, state.buckets, state.tileId, context.pixelRatio, state.mode, state.entries);
+      state.circleBuild ??= appendCircleCollections(result.points, state.buckets, state.tileId, context.pixelRatio, state.mode, state.entries, this._picking.enabled('circle'));
       do {
         if (state.circleBuild.next().done)
           break;
@@ -348,8 +368,10 @@ export function buildExtrusionCollection(
   generationId: number,
   zoom: number,
   lighting?: ExtrusionLighting,
+  picking = new FeaturePicking(),
+  featureIndex?: FeatureIndex,
 ): PrimitiveCollection | undefined {
-  const state = beginExtrusionBuild(buckets, tileID, tileId, generationId, zoom, lighting);
+  const state = beginExtrusionBuild(buckets, tileID, tileId, generationId, zoom, lighting, undefined, picking, featureIndex);
   stepExtrusionBuild(state, { exhausted: false });
   return finishExtrusionBuild(state);
 }
@@ -368,6 +390,8 @@ function beginExtrusionBuild(
   zoom: number,
   lighting?: ExtrusionLighting,
   skipLayerIds?: ReadonlySet<string>,
+  picking = new FeaturePicking(),
+  featureIndex?: FeatureIndex,
 ): ExtrusionBuildState {
   const collection = new PrimitiveCollection();
   return {
@@ -379,7 +403,7 @@ function beginExtrusionBuild(
       && bucket.geometryRanges.length > 0
       && bucket.layoutVertexArray.length > 0
       && bucket.indexArray.length > 0),
-    iterator: appendExtrusions(collection, buckets, tileID, tileId, generationId, zoom, lighting, skipLayerIds),
+    iterator: appendExtrusions(collection, buckets, tileID, tileId, generationId, zoom, lighting, skipLayerIds, picking, featureIndex),
   };
 }
 
@@ -409,6 +433,8 @@ function* appendExtrusions(
   zoom: number,
   lighting?: ExtrusionLighting,
   skipLayerIds?: ReadonlySet<string>,
+  picking = new FeaturePicking(),
+  featureIndex?: FeatureIndex,
 ): Generator<void> {
   for (const layerId in buckets) {
     if (skipLayerIds?.has(layerId)) {
@@ -472,8 +498,15 @@ function* appendExtrusions(
       });
       instances.push(new GeometryInstance({
         geometry,
-        id: { type: 'extrusion', tileId, layerId, featureIndex: primitive.featureIndex, generationId },
+        id: {
+          tileId,
+          layerId,
+          featureIndex: primitive.featureIndex,
+          generationId,
+          ...(picking.enabled('fill-extrusion') ? picking.feature(layerFor(bucket, layerId), featureIndex, primitive.featureIndex) : {}),
+        },
         attributes: {
+          ...(picking.enabled('fill-extrusion') ? { show: new ShowGeometryInstanceAttribute(true) } : {}),
           extrusionColor: new GeometryInstanceAttribute({
             componentDatatype: ComponentDatatype.FLOAT,
             componentsPerAttribute: 4,
@@ -489,7 +522,7 @@ function* appendExtrusions(
       yield;
     }
     if (instances.length > 0) {
-      const primitive = new ExtrusionPrimitive(instances, lighting);
+      const primitive = new ExtrusionPrimitive(instances, lighting, picking.enabled('fill-extrusion'));
       primitive.updateCameraPaint(bucket, layerId, zoom);
       registerDrawBatch(primitive, { layerId, tileId, kind: 'extrusion' });
       collection.add(primitive);
@@ -552,7 +585,7 @@ ${morph
 `;
 }
 
-function standardPolygonPrimitive(instances: GeometryInstance[], mode: SceneMode): FillGeometryPrimitive {
+function standardPolygonPrimitive(instances: GeometryInstance[], mode: SceneMode, allowPicking: boolean): FillGeometryPrimitive {
   const morph = mode === SceneMode.MORPHING;
   return new FillGeometryPrimitive(instances, new PerInstanceColorAppearance({
     // Alpha can change with a data/zoom expression after construction. Keep
@@ -572,7 +605,7 @@ void main()
     out_FragColor = czm_gammaCorrect(v_color);
 }
 `,
-  }), morph ? 'surface-morph' : 'surface-planar', true);
+  }), morph ? 'surface-morph' : 'surface-planar', true, allowPicking);
 }
 
 interface StandardPolygonBuildState {
@@ -586,10 +619,11 @@ function beginStandardPolygonBuild(
   tileId: string,
   tileID: TileID,
   mode: SceneMode,
+  allowPicking: boolean,
 ): StandardPolygonBuildState {
   const collection = new PrimitiveCollection();
   const entries: StandardPolygonEntry[] = [];
-  return { collection, entries, iterator: appendStandardPolygons(collection, entries, polygons, tileId, tileID, mode) };
+  return { collection, entries, iterator: appendStandardPolygons(collection, entries, polygons, tileId, tileID, mode, allowPicking) };
 }
 
 function stepStandardPolygonBuild(state: StandardPolygonBuildState, budget: Budget): boolean {
@@ -616,6 +650,7 @@ function* appendStandardPolygons(
   tileId: string,
   tileID: TileID,
   mode: SceneMode,
+  allowPicking: boolean,
 ): Generator<void> {
   const clip = new LineTileClip(tileID);
   const owners: Array<{ layerId: string; paint: FillGeometryPrimitive }> = [];
@@ -649,7 +684,7 @@ function* appendStandardPolygons(
         bytes = 16;
       }
       if (!primitive) {
-        primitive = standardPolygonPrimitive(instances, mode);
+        primitive = standardPolygonPrimitive(instances, mode, allowPicking);
         owners.push({ layerId, paint: primitive });
         registerTileClip(primitive, clip);
         // Own partial as well as sealed batches until the complete track is
@@ -683,9 +718,9 @@ interface BufferPolygonBuildState {
   iterator: Generator<void, void>;
 }
 
-function beginBufferPolygonBuild(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, buckets: BucketMap, zoom: number): BufferPolygonBuildState {
+function beginBufferPolygonBuild(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, buckets: BucketMap, zoom: number, allowPicking: boolean): BufferPolygonBuildState {
   const entries: BufferPolygonBuildState['entries'] = [];
-  return { entries, iterator: appendBufferPolygonCollections(polygons, tileID, tileId, heightReference, buckets, zoom, entries) };
+  return { entries, iterator: appendBufferPolygonCollections(polygons, tileID, tileId, heightReference, buckets, zoom, entries, allowPicking) };
 }
 
 function stepBufferPolygonBuild(state: BufferPolygonBuildState, budget: Budget): boolean {
@@ -696,7 +731,7 @@ function stepBufferPolygonBuild(state: BufferPolygonBuildState, budget: Budget):
   return false;
 }
 
-function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, buckets: BucketMap, zoom: number, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
+function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, buckets: BucketMap, zoom: number, entries: BufferPolygonBuildState['entries'], allowPicking: boolean): Generator<void, void> {
   const layers = new Map<string, TileRenderResult['polygons']>();
   for (let index = 0; index < polygons.length; index++) {
     const primitive = polygons[index];
@@ -712,11 +747,11 @@ function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'],
     const bucket = buckets[layerId];
     if (!(bucket instanceof FillBucket))
       throw new Error(`Missing fill bucket ${layerId}`);
-    yield* appendBufferPolygonCollection(layer, tileID, tileId, layerId, heightReference, bucket, zoom, entries);
+    yield* appendBufferPolygonCollection(layer, tileID, tileId, layerId, heightReference, bucket, zoom, entries, allowPicking);
   }
 }
 
-function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, layerId: string, heightReference: HeightReference, bucket: FillBucket, zoom: number, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
+function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, layerId: string, heightReference: HeightReference, bucket: FillBucket, zoom: number, entries: BufferPolygonBuildState['entries'], allowPicking: boolean): Generator<void, void> {
   let vertexCount = 0;
   let holeCount = 0;
   let triangleCount = 0;
@@ -735,7 +770,7 @@ function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], 
     || heightReference === HeightReference.CLAMP_TO_3D_TILE;
   const boundingVolume = clamped ? tileBoundingSphere(tileID) : yield* fillBoundingSphere(polygons);
   const collection = new BufferPolygonCollection({
-    allowPicking: true,
+    allowPicking,
     blendOption: opaque ? BlendOption.OPAQUE : BlendOption.TRANSLUCENT,
     // Non-draped 3D fills use their actual content. Both precomputed paths
     // disable Native's per-update scan over all vertices.
@@ -746,34 +781,36 @@ function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], 
     holeCountMax: holeCount,
     triangleCountMax: triangleCount,
   });
+  bufferPolygonFeatureIndices.set(collection, polygons.map(polygon => polygon.pickObject.featureIndex));
   const paint = new FillBufferPaint(collection, polygons.map(polygon => polygon.positions));
   fillCameraPaintOwners.set(collection, [{ layerId, paint }]);
   registerDrawBatch(collection, { layerId, tileId, kind: 'fill' });
   // This build owns the allocation until all layers finish and transfer it.
   entries.push([`polygons:${layerId}`, collection]);
-  // One flyweight per build: add() copies the payload into the collection
-  // buffers, so per-feature instances are pure garbage.
-  const scratch = new BufferPolygon();
+  // Native drillPick toggles each retained flyweight's show value. Without
+  // picking, one scratch view suffices because add() copies the payload.
+  const scratch = allowPicking ? undefined : new BufferPolygon();
   for (const primitive of polygons) {
+    const polygon = scratch ?? new BufferPolygon();
     collection.add({
       positions: primitive.positions,
       holes: new Uint32Array(primitive.holes),
       triangles: primitive.triangles,
       material: primitive.material,
-      pickObject: primitive.pickObject,
-    }, scratch);
+      ...(allowPicking ? { pickObject: { primitive: polygon, id: primitive.pickObject } } : {}),
+    }, polygon);
     yield;
   }
   paint.updateCameraPaint(layerFor(bucket, layerId), zoom);
 }
 
-function* appendCircleCollections(points: TileRenderResult['points'], buckets: BucketMap, tileId: string, pixelRatio: number, mode: SceneMode, entries: VectorTileBuildState['entries']): Generator<void> {
+function* appendCircleCollections(points: TileRenderResult['points'], buckets: BucketMap, tileId: string, pixelRatio: number, mode: SceneMode, entries: VectorTileBuildState['entries'], allowPicking: boolean): Generator<void> {
   const layers = new Map<string, CircleCollection>();
   for (const point of points) {
     const layerId = point.pickObject.layerId;
     let collection = layers.get(layerId);
     if (!collection) {
-      collection = new CircleCollection(layerId, tileId, pixelRatio, mode);
+      collection = new CircleCollection(layerId, tileId, pixelRatio, mode, allowPicking);
       const bucket = buckets[layerId];
       if (!(bucket instanceof CircleBucket))
         throw new Error(`Missing circle bucket ${layerId}`);

@@ -4,7 +4,7 @@
 
 为 Cesium 场景添加矢量地图。使用 MapLibre 风格的 JSON 样式显示道路、水域、文字、图标和建筑，与场景中的其他内容一起使用。
 
-支持三维地球、二维地图与 Columbus View，不依赖前端框架，提供 TypeScript 类型声明。
+支持三维地球、二维地图与 Columbus View。
 
 [在线演示](https://vesiumjs.github.io/cesium-vector-tileset/) · [样式示例](https://github.com/vesiumjs/cesium-vector-tileset/tree/main/src/styles) · [GitHub](https://github.com/vesiumjs/cesium-vector-tileset)
 
@@ -65,11 +65,57 @@ viewer.scene.primitives.remove(map); // Cesium 通常会销毁移除的对象。
 
 需要压缩版本时，从 `cesium-vector-tileset/min` 导入。复制发布文件时，保留主模块及 Worker 文件的相对位置；地图和场景使用同一份 Cesium 安装。
 
+## 拾取要素
+
+`allowPicking` 默认关闭。传入 `true` 开启全部可拾取图层，或按样式图层类型配置；对象中未指定的类型保持关闭。该选项在创建地图时设置。
+
+```ts
+const map = await CesiumVectorTileset.fromUrl(styleUrl, {
+  allowPicking: { fill: true, line: true, symbol: true },
+});
+viewer.scene.primitives.add(map);
+
+const hit = viewer.scene.pick(windowPosition);
+const feature = hit?.id;
+if (feature?.layerId) {
+  console.log(feature.layerId, feature.featureId, feature.properties);
+}
+```
+
+拾取统一使用 Cesium 的 `scene.pick` 或 `scene.drillPick`。要素信息位于返回值的 `id`，其中包含 `type`、`layerId`、`source`、`properties`，矢量要素还包含可用的 `featureId` 和 `sourceLayer`。支持配置的类型为 `fill`、`line`、`circle`、`symbol`、`fill-extrusion`、`raster`；面轮廓和图案按所属样式图层类型控制。
+
 ## 支持范围
 
-支持 MVT、MLT、GeoJSON 矢量数据以及栅格瓦片、图片、视频、canvas。样式可使用面、线、圆点、文字图标和挤出建筑，包括表达式、过滤器、图片图案和双向文字。
+本库实现 MapLibre 版本 8 样式的部分能力。
 
-当前实现覆盖 MapLibre 的部分能力，不支持 `heatmap`、`hillshade`、`raster-dem` 和 `line-gradient`。字体需要包含所显示的字形。在兼容 Cesium 场景中，可通过 `heightReference` 将普通面贴地；其他图层保持椭球高度。暂不支持文字、图标拾取。
+### 数据源
+
+| 数据源类型                 | 支持情况   | 说明                                                       |
+| -------------------------- | ---------- | ---------------------------------------------------------- |
+| `vector`                   | 支持       | MVT、MLT 矢量瓦片。                                        |
+| `geojson`                  | 支持       | 内联 GeoJSON 或 GeoJSON URL。                              |
+| `raster`                   | 支持       | 栅格影像瓦片。                                             |
+| `image`、`video`、`canvas` | 支持       | 带地理坐标的图片、视频和 canvas 内容。                     |
+| `raster-dem`               | **不支持** | 高程数据需自行解析，并通过 Cesium 地形提供器加载，见下文。 |
+
+### 渲染与样式
+
+| 能力                                   | 支持情况 | 说明                                                                                          |
+| -------------------------------------- | -------- | --------------------------------------------------------------------------------------------- |
+| 场景模式                               | 支持     | 三维地球、二维地图、Columbus View。                                                           |
+| 图层类型                               | 支持     | `background`、`fill`、`line`、`circle`、`symbol`、`fill-extrusion`、`raster`。                |
+| 样式表达式与过滤器                     | 支持     | 包括数据驱动样式、图标和图片图案。                                                            |
+| 文字                                   | 支持     | 包括双向文字；字体需包含所显示的字形。                                                        |
+| 贴合地形或 3D Tiles                    | 部分支持 | 在兼容 Cesium 场景中，通过 `heightReference` 贴合普通面；其他图层（包括面图案）保持椭球高度。 |
+| 要素拾取                               | 支持     | 通过 `allowPicking` 开启，使用 Cesium 原生 `scene.pick` / `scene.drillPick`，包括文字和图标。 |
+| `heatmap`、`hillshade`、`color-relief` | 不支持   | 尚未实现这些图层类型。                                                                        |
+| `line-gradient`                        | 不支持   | 尚未实现该线图层绘制属性。                                                                    |
+
+### DEM 与地形
+
+**不支持 `raster-dem`。** 使用包含 DEM 的 MapLibre 样式前，请移除 `raster-dem` 数据源、引用这些数据源的图层以及 `terrain` 配置，再将样式传入本库。地形应单独配置在 Cesium Viewer 上。
+
+原始 DEM 瓦片（如 Terrain-RGB、Terrarium）需要由应用自行解码为高程数据，通过 `CustomHeightmapTerrainProvider` 或自定义 `TerrainProvider` 接入 `viewer.terrainProvider`。已转换成 Cesium 地形格式的数据，可使用 `CesiumTerrainProvider` 加载。
 
 Cesium peer 范围为 `^1.146.0`，渲染接入使用 1.146.0 验证。请按数据提供方要求展示版权署名。
 

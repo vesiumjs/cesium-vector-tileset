@@ -61,7 +61,7 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
   await page.route('**/buffer-paint/**', route => route.request().url().endsWith('.pbf')
     ? route.fulfill({ body: tile, contentType: 'application/x-protobuf' })
     : route.fulfill({ json: style }));
-  const query = new URLSearchParams({ mode: '3d', antialias: '0', style: `${renderUrl}/buffer-paint/style.json`, synthetic: '4096' });
+  const query = new URLSearchParams({ mode: '3d', antialias: '0', style: `${renderUrl}/buffer-paint/style.json`, synthetic: '4096', picking: 'true' });
   await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
   await expect.poll(() => page.evaluate(() => !!window.renderValidation)).toBe(true);
   await expect.poll(() => page.evaluate(() => {

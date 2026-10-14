@@ -203,7 +203,7 @@ export class GeometryPrimitive extends RuntimePrimitive {
 
   private readonly _appearanceForMode?: GeometryAppearanceForMode;
 
-  constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices'>, layout: GeometryLayout, appearanceForMode?: GeometryAppearanceForMode) {
+  constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices' | 'allowPicking'>, layout: GeometryLayout, appearanceForMode?: GeometryAppearanceForMode) {
     if (layout !== 'native' && layout !== 'extrusion' && Array.isArray(options.geometryInstances) && options.geometryInstances.length > 65536) {
       throw new RangeError('geometry instance IDs exceed unsigned 16-bit range');
     }
@@ -211,7 +211,7 @@ export class GeometryPrimitive extends RuntimePrimitive {
     // MVT covering owns tile visibility; Native retains depth testing, frustum
     // depth partitioning and shader near clipping, but must not reject the
     // expanded strip against that sphere (especially in the narrow pick view).
-    super({ ...options, allowPicking: true, asynchronous: true, releaseGeometryInstances: true, cull: layout === 'native' || layout === 'extrusion' || layout === 'surface-planar' || layout === 'surface-morph' });
+    super({ ...options, allowPicking: options.allowPicking ?? false, asynchronous: true, releaseGeometryInstances: true, cull: layout === 'native' || layout === 'extrusion' || layout === 'surface-planar' || layout === 'surface-morph' });
     this._layout = layout;
     this._sourceAppearance = options.appearance;
     this._appearanceForMode = appearanceForMode;
@@ -852,7 +852,7 @@ export class ExtrusionGeometryPrimitive extends GeometryPrimitive {
   private readonly _bounds = new WeakMap<BoundingSphere, BoundingSphere>();
   private readonly _commands = new WeakMap<object, DrawCommandReplay>();
 
-  constructor(options: { geometryInstances: GeometryInstance[]; appearance: ExtrusionAppearance; compressVertices?: boolean }) {
+  constructor(options: { geometryInstances: GeometryInstance[]; appearance: ExtrusionAppearance; compressVertices?: boolean; allowPicking?: boolean }) {
     super(options, 'extrusion');
     this._translationAppearance = options.appearance;
     this._maxHeight = options.geometryInstances.reduce((height, instance) => {

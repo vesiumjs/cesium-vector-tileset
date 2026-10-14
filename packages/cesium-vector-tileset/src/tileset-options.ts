@@ -8,10 +8,16 @@ export type TilesetStyleSpecification = Omit<NativeStyleSpecification, 'sources'
   sources: Record<string, AnySourceSpecification>;
 };
 
+export type PickableLayerType = 'fill' | 'line' | 'circle' | 'symbol' | 'fill-extrusion' | 'raster';
+
+export type TilesetPickingOptions = boolean | Partial<Record<PickableLayerType, boolean>>;
+
 export interface CesiumVectorTilesetOptions {
   style: TilesetStyleSpecification;
   /** Whether the tileset is shown. Defaults to true. */
   show?: boolean;
+  /** Native Cesium picking by style layer type. Defaults to false; omitted types are disabled. */
+  allowPicking?: TilesetPickingOptions;
   /** Estimated GPU cache budget in bytes. Defaults to 256 MiB; active tiles are retained. */
   gpuMemoryBudgetBytes?: number;
   /** Transforms style, tile, sprite, glyph and source requests before loading. */

@@ -4,6 +4,7 @@ import type {
   SceneMode,
 } from 'cesium';
 import type { DashAtlas } from '../../assets/dash-atlas';
+import type { FeatureIndex } from '../../data/feature-index';
 import type { DashRow } from '../../source/worker-source';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { TileGeneration } from '../scene/tile-generation';
@@ -20,6 +21,7 @@ import {
 import { DashMaterial } from '../line/dash-material';
 import { discardLineBuild } from '../line/line-renderer';
 import { drawBatchForOwner, drawLayersForOwner, registerDrawLayers, retainedStyleForBatch } from '../scene/draw-batch';
+import { FeaturePicking } from '../scene/feature-picking';
 import { collectionGpuBytes } from '../scene/resource-memory';
 import { RetiredPool } from '../scene/retired-pool';
 import { createVectorPaintState, VectorPaintUpdater } from './vector-paint-updater';
@@ -54,6 +56,7 @@ export type VectorCollection = BufferPolygonCollection | PrimitiveCollection;
 export interface VectorTileRecord {
   generation?: TileGeneration;
   generationId: number;
+  featureIndex?: FeatureIndex;
   complete: boolean;
   buckets: BucketMap;
   layerIds: readonly string[];
@@ -124,7 +127,7 @@ export class VectorTileRenderer {
     this._pixelRatio = pixelRatio;
   }
 
-  constructor(pixelRatio = 1, dashAtlas?: DashAtlas) {
+  constructor(pixelRatio = 1, dashAtlas?: DashAtlas, picking = new FeaturePicking()) {
     this._pixelRatio = pixelRatio;
     this.dashMaterial = dashAtlas ? new DashMaterial(dashAtlas) : undefined;
     this._builder = new VectorTileBuilder(() => ({
@@ -132,8 +135,9 @@ export class VectorTileRenderer {
       heightReference: this._heightReference,
       lighting: this.lighting,
       dashMaterial: this.dashMaterial,
-    }));
+    }), picking);
     this._paint = new VectorPaintUpdater({
+      picking,
       records: () => this._records,
       pixelRatio: () => this._pixelRatio,
       lighting: () => this.lighting,
@@ -420,6 +424,7 @@ export class VectorTileRenderer {
     this._records.set(tileId, {
       generation,
       generationId,
+      featureIndex: state.featureIndex,
       complete: state.phase === 'done',
       buckets,
       layerIds: result!.layerIds,

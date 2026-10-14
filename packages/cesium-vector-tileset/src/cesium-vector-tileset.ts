@@ -1,7 +1,4 @@
-import type { PatternPrimitiveID } from './render/pattern/pattern-renderer';
-import type { RasterPrimitivePickObject } from './render/raster/raster-renderer';
 import type { RenderFrameState } from './render/scene/render-frame';
-import type { TilePickObject } from './render/vector/tile-conversion';
 import type { CesiumVectorTilesetFromUrlOptions, CesiumVectorTilesetOptions, TilesetStyleSpecification as StyleSpecification } from './tileset-options';
 import type { TilesetImage, TilesetImageOptions, TilesetStats } from './tileset-types';
 import { Event, PrimitiveCollection } from 'cesium';
@@ -107,14 +104,6 @@ export class CesiumVectorTileset extends PrimitiveCollection {
   /** Advances admitted preparation work after the draw pass. */
   postPassesUpdate(frameState: RenderFrameState): void {
     this._renderer.postPassesUpdate(frameState);
-  }
-
-  /** Resolves a picked primitive to its style layer and feature properties. */
-  pick(pickObject: TilePickObject | RasterPrimitivePickObject | PatternPrimitiveID): {
-    layerId: string;
-    properties: Record<string, unknown>;
-  } | undefined {
-    return this._renderer.pick(pickObject);
   }
 
   /** Releases owned rendering resources and removes the primitive's children. */

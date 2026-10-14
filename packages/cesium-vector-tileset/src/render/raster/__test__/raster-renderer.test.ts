@@ -560,7 +560,6 @@ describe('raster resource ownership', () => {
       destroyRasterResources(renderer.removeTile('first'));
       const surviving = renderer.collections.get(layer.id)!.get(0);
       expect(bytes() - collectionGpuBytes(surviving)).toBe(image.width * image.height * 4);
-      expect(renderer.hasPickObject({ type: 'raster', tileId: 'second', layerId: layer.id })).toBe(true);
       destroyRasterResources(renderer.removeTile('second'));
       expect(bytes()).toBe(0);
     }

@@ -78,7 +78,7 @@ test('roads, fill outlines and buildings retain paint and picking through 2D, CV
     }
     return route.fulfill({ json: style });
   });
-  const query = new URLSearchParams({ mode: '2d', style: `${renderUrl}/line-family/style.json`, synthetic: '4096', atlas: '1' });
+  const query = new URLSearchParams({ mode: '2d', style: `${renderUrl}/line-family/style.json`, synthetic: '4096', atlas: '1', picking: 'true' });
   await page.goto(`${renderUrl}/e2e/fixtures/render-fixture.html?${query}`);
   await expect.poll(() => page.evaluate(() => {
     const validation = window.renderValidation;
@@ -191,12 +191,18 @@ test('roads, fill outlines and buildings retain paint and picking through 2D, CV
       shared: families.length > 0 && families.every(entry => entry._layers?.length === 2),
       arrays: window.lineFamilyArrays.length,
       white: window.lineFamilyPixels([255, 255, 255]),
+      drill: (() => {
+        const position = window.lineFamilyPixels([255, 255, 255]).position!;
+        const { viewer, atlas } = window.renderValidation;
+        return viewer.scene.drillPick(new atlas!.cesium.Cartesian2(position.x, position.y), 10, 1, 1).map(hit => hit.id?.layerId);
+      })(),
       green: window.lineFamilyPixels([0, 204, 0]),
       outlines: window.lineFamilyPixels('outline'),
     };
   });
   assert.ok(initial.resources > 0 && initial.arrays >= initial.resources, 'family did not upload real shared Primitive buffers');
   assert.ok(initial.white.count > 8 && initial.green.count > 8, 'both family layers must produce visible pixels');
+  assert.ok(initial.drill.includes('roads') && initial.drill.includes('casing'), 'Native drillPick must hide each replay independently and restore its features');
   assert.equal(initial.white.picked?.layerId, 'roads', 'top layer pick did not use its replay batch table');
   assert.equal(initial.green.picked?.layerId, 'casing', 'casing pick lost the base Native instance ID');
   assert.ok(initial.outlines.count > 8, 'Native fill outlines did not produce visible pixels');
