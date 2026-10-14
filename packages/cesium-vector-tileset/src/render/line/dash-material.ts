@@ -29,6 +29,8 @@ in vec4 v_color;
 in vec2 v_lineDistance;
 in float v_gamma_scale;
 in float v_width;
+in vec2 v_width2;
+in float v_blur;
 flat in vec3 v_capTangent;
 flat in vec3 v_capDenominator;
 flat in vec2 v_capExtent;
@@ -55,8 +57,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
     float periodTo = v_dashTo.z * floorWidth * u_toScale;
     // Atlas coordinates use the AA envelope, independent of the extra
     // transparent geometry margin needed by a multisampled framebuffer.
-    float halfWidth = v_width * 0.5;
-    float normal = v_lineDistance.x / (halfWidth + 0.5 / czm_pixelRatio);
+    float normal = v_lineDistance.x / v_width2.x;
 
     vec2 texFrom = vec2(
         v_linesofar * u_worldPixels / max(periodFrom, 0.0001),

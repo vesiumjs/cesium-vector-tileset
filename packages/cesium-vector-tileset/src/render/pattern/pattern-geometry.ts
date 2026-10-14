@@ -3,6 +3,7 @@ import type { PatternLayoutArray } from '../../data/array-types.g';
 import type { FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
 import type { FeaturePaintRange } from '../../data/program-configuration';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
+import type { ExtrusionPrimitiveGeometry } from '../vector/extrusion-geometry';
 import { constantValue } from '../vector/feature-attributes';
 
 /**
@@ -22,6 +23,29 @@ const EXTENT = 8192;
 
 type PatternBucket = FillBucket | LineBucket | FillExtrusionBucket;
 type TileID = CanonicalTileID | OverscaledTileID;
+
+export interface PatternTileCoordinates {
+  scale: number;
+  offset: [number, number];
+}
+
+/** Map zoom controls texture repeats independently of the source's tile LOD. */
+export function patternTileCoordinates(tileID: TileID, rect: PatternAtlasRect, zoom: number): PatternTileCoordinates {
+  const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
+  const wrap = 'wrap' in tileID ? tileID.wrap : 0;
+  const scale = 2 ** (Math.max(0, Math.floor(zoom)) - canonical.z);
+  const patternSizeX = (rect.tlbr[2] - rect.tlbr[0]) / rect.pixelRatio;
+  const patternSizeY = (rect.tlbr[3] - rect.tlbr[1]) / rect.pixelRatio;
+  const worldOffsetX = (canonical.x + wrap * 2 ** canonical.z) * TILE_SIZE_PX * scale;
+  const worldOffsetY = canonical.y * TILE_SIZE_PX * scale;
+  return {
+    scale,
+    offset: [
+      (((worldOffsetX % patternSizeX) + patternSizeX) % patternSizeX) / patternSizeX,
+      (((worldOffsetY % patternSizeY) + patternSizeY) % patternSizeY) / patternSizeY,
+    ],
+  };
+}
 
 /**
  * Extracts the pattern atlas rect from a feature's paint slot.
@@ -74,24 +98,20 @@ export function patternAtlasRectForFeature(bucket: PatternBucket, range: Feature
  * callers that only need to inspect the linear mapping.
  * @returns 2 floats per vertex
  */
-export function patternUVs(positions: Float64Array, rect: PatternAtlasRect, tileID?: TileID): Float32Array {
+export function patternUVs(positions: Float64Array, rect: PatternAtlasRect, tileID?: TileID, zoom?: number): Float32Array {
   const patternSizeX = (rect.tlbr[2] - rect.tlbr[0]) / rect.pixelRatio;
   const patternSizeY = (rect.tlbr[3] - rect.tlbr[1]) / rect.pixelRatio;
-  const tileUnitsToPixels = TILE_SIZE_PX / EXTENT;
-  const canonical = tileID
-    ? ('canonical' in tileID ? tileID.canonical : tileID)
-    : undefined;
-  const wrap = tileID && 'wrap' in tileID ? tileID.wrap : 0;
-  const worldTiles = canonical ? 2 ** canonical.z : 1;
-  const overscale = tileID && 'overscaledZ' in tileID
-    ? 2 ** (tileID.overscaledZ - tileID.canonical.z)
-    : 1;
-  const worldOffsetX = canonical ? (canonical.x + wrap * worldTiles) * EXTENT : 0;
-  const worldOffsetY = canonical ? canonical.y * EXTENT : 0;
+  const coordinates = tileID
+    ? patternTileCoordinates(tileID, rect, zoom ?? ('overscaledZ' in tileID ? tileID.overscaledZ : tileID.z))
+    : { scale: 1, offset: [0, 0] };
+  const tileUnitsToPixels = TILE_SIZE_PX / EXTENT * coordinates.scale;
+  // Reduce the shared tile origin in double precision before uploading UVs.
+  // Keep each vertex's local repeats continuous so triangle interpolation
+  // crosses sprite boundaries; wrapping individual vertices would collapse it.
   const out = new Float32Array(positions.length / 2 * 2);
   for (let i = 0; i < positions.length / 2; i++) {
-    out[i * 2] = (worldOffsetX + positions[i * 2]) * tileUnitsToPixels * overscale / patternSizeX;
-    out[i * 2 + 1] = (worldOffsetY + positions[i * 2 + 1]) * tileUnitsToPixels * overscale / patternSizeY;
+    out[i * 2] = coordinates.offset[0] + positions[i * 2] * tileUnitsToPixels / patternSizeX;
+    out[i * 2 + 1] = coordinates.offset[1] + positions[i * 2 + 1] * tileUnitsToPixels / patternSizeY;
   }
   return out;
 }
@@ -112,4 +132,23 @@ export function constantPatternName(layer: PatternBucket['layers'][number]): str
 /** Resolves an ImagePosition for a pattern from an image positions map. */
 export function patternPosition(imagePositions: { [name: string]: ImagePosition }, name: string | null): ImagePosition | null {
   return name ? imagePositions[name] ?? null : null;
+}
+
+/** Roof planar repeats and wall edge/height repeats share the same tile phase. */
+export function extrusionPatternUVs(geometry: ExtrusionPrimitiveGeometry, rect: PatternAtlasRect, tileID: TileID): Float32Array {
+  const out = patternUVs(geometry.tilePositions, rect);
+  const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
+  const patternSizeX = (rect.tlbr[2] - rect.tlbr[0]) / rect.pixelRatio;
+  const patternSizeY = (rect.tlbr[3] - rect.tlbr[1]) / rect.pixelRatio;
+  // Upstream tileRatio * u_height_factor = -2^floorStyleZoom / (8192 * 8).
+  // Encode the canonical scale here; the owner applies its live zoom scale.
+  const heightScale = -(2 ** canonical.z) / (EXTENT * 8);
+  for (let index = 0; index < geometry.vertexCount; index++) {
+    if (geometry.normals[index * 3 + 2] !== 0)
+      continue;
+    const elevation = geometry.style.base + (geometry.style.height - geometry.style.base) * geometry.topWeights[index];
+    out[index * 2] = geometry.edgeDistances[index] * TILE_SIZE_PX / EXTENT / patternSizeX;
+    out[index * 2 + 1] = elevation * heightScale / patternSizeY;
+  }
+  return out;
 }

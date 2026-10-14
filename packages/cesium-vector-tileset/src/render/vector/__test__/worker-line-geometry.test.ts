@@ -1,4 +1,4 @@
-import type { LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { LayerSpecification, LineLayerSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { FeatureCollection } from 'geojson';
 import type { WorkerTileParameters, WorkerTileWithData } from '../../../source/worker-source';
 import type { Style } from '../../../style/style';
@@ -15,7 +15,7 @@ import { createTileTransferRegistry } from '../../../worker/tile-transfer';
 import { lineInputs } from '../../geometry/line-input';
 import { DashMaterial, dashRowsForFeature } from '../../line/dash-material';
 import { createLineGeometry, LineGeometryCache } from '../../line/line-geometry';
-import { beginLineBuild, commitLineBuild, discardLineBuild, stepLineBuild } from '../../line/line-renderer';
+import { beginLineBuild, captureUniformLinePaint, commitLineBuild, discardLineBuild, stepLineBuild } from '../../line/line-renderer';
 import * as preparedGeometry from '../../line/prepared-line-geometry';
 import { UNBOUNDED_BUDGET } from '../../scene/frame-budget';
 import { projectWorkerBuckets } from '../bucket-geometry';
@@ -31,14 +31,14 @@ function sourceRecords(geometry: NonNullable<ReturnType<typeof createLineGeometr
   };
 }
 
-async function workerLines(dashed = false, longPath = false) {
+async function workerLines(dashed = false, longPath = false, paint: LineLayerSpecification['paint'] = {}) {
   const layers: LayerSpecification[] = ['round', 'miter'].map(join => ({
     id: join,
     type: 'line',
     source: 'roads',
     filter: ['==', ['get', 'join'], join],
     layout: { 'line-join': join as 'round' | 'miter', 'line-cap': join === 'round' ? 'round' : 'square' },
-    ...(dashed ? { paint: { 'line-dasharray': [2, 1] } } : {}),
+    paint: { ...paint, ...(dashed ? { 'line-dasharray': [2, 1] } : {}) },
   }));
   const index = new StyleLayerIndex(layers);
   const worker = new GeoJSONWorkerSource({ sendAsync: vi.fn().mockResolvedValue({}) } as unknown as WorkerMessageSender, index, []);
@@ -49,7 +49,7 @@ async function workerLines(dashed = false, longPath = false) {
   ];
   const data: FeatureCollection = {
     type: 'FeatureCollection',
-    features: ['round', 'miter'].flatMap(join => paths.map(coordinates => ({ type: 'Feature' as const, properties: { join }, geometry: { type: 'LineString' as const, coordinates } }))),
+    features: ['round', 'miter'].flatMap(join => paths.map(coordinates => ({ type: 'Feature' as const, properties: { join, gap: 4, offset: -12, blur: 0 }, geometry: { type: 'LineString' as const, coordinates } }))),
   };
   await worker.loadData({ type: 'geojson', source: 'roads', data, geojsonVtOptions: { extent: 8192, tolerance: 0 } });
   const tileID = new OverscaledTileID(0, 0, 0, 0, 0);
@@ -88,6 +88,40 @@ afterEach(() => {
 });
 
 describe('worker solid line compilation', () => {
+  it('uploads data shape and keeps its committed interpolation before the held first draw', async () => {
+    const { tile, tileID } = await workerLines(false, false, {
+      'line-width': 2,
+      'line-gap-width': ['interpolate', ['linear'], ['zoom'], 0, ['get', 'gap'], 1, 12],
+      'line-offset': ['get', 'offset'],
+      'line-blur': ['interpolate', ['linear'], ['zoom'], 0, ['get', 'blur'], 1, 4],
+    });
+    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, 0.25, SceneMode.SCENE3D);
+    advanceTileConversion(conversion, UNBOUNDED_BUDGET);
+    const build = beginLineBuild(conversion.result.linePrimitives, tile.buckets, 'roads/0', tileID, 7, 0.25);
+    stepLineBuild(build, UNBOUNDED_BUDGET);
+    const collection = commitLineBuild(build)!;
+    try {
+      for (const layer of build.byLayer) {
+        expect(layer.paintMode).toBe('instance');
+        for (const instance of layer.instances!)
+          expect(Array.from(instance.attributes.lineWidth.value)).toEqual([2, 6, -12, 1]);
+      }
+      const held = captureUniformLinePaint(collection, tile.buckets);
+      for (const bucket of Object.values(tile.buckets)) {
+        const configuration = bucket.programConfigurations.get(bucket.layers[0].id);
+        for (const property of ['line-gap-width', 'line-offset', 'line-blur'])
+          new Float32Array(configuration.getAttributeArray(property)!.arrayBuffer).fill(100);
+        bucket.programConfigurations.paintRevision++;
+      }
+      held(0.75);
+      for (const layer of build.byLayer) {
+        for (const instance of layer.instances!)
+          expect(Array.from(instance.attributes.lineWidth.value)).toEqual([2, 10, -12, 3]);
+      }
+    }
+    finally { collection.destroy(); }
+  });
+
   it('transfers complete strips and reuses them across publications without main-thread compilation', async () => {
     const { tile, tileID, expected } = await workerLines();
     const inputs = Array.from(expected.values()).flat().map(reference => reference.input);
@@ -96,7 +130,7 @@ describe('worker solid line compilation', () => {
     const compiler = vi.spyOn(LineGeometryCache.prototype, 'compile');
     const firstGeometries: object[] = [];
     for (let publication = 0; publication < 2; publication++) {
-      const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, undefined, publication * 2, SceneMode.SCENE3D);
+      const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, publication * 2, SceneMode.SCENE3D);
       expect(advanceTileConversion(conversion, UNBOUNDED_BUDGET)).toBe(true);
       const build = beginLineBuild(conversion.result.linePrimitives, tile.buckets, 'roads/0', tileID, 7, publication * 2);
       expect(stepLineBuild(build, UNBOUNDED_BUDGET)).toBe(true);
@@ -135,7 +169,7 @@ describe('worker solid line compilation', () => {
   it('preserves wide strip indices through the same packed Worker transport', async () => {
     const { tile, tileID, expected } = await workerLines(false, true);
     const compiler = vi.spyOn(LineGeometryCache.prototype, 'compile');
-    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, undefined, 0, SceneMode.SCENE3D);
+    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, 0, SceneMode.SCENE3D);
     advanceTileConversion(conversion, UNBOUNDED_BUDGET);
     const build = beginLineBuild(conversion.result.linePrimitives, tile.buckets, 'roads/0', tileID, 7, 0);
     expect(stepLineBuild(build, UNBOUNDED_BUDGET)).toBe(true);
@@ -152,7 +186,7 @@ describe('worker solid line compilation', () => {
   it.each([SceneMode.SCENE2D, SceneMode.COLUMBUS_VIEW])('retains the scene-specific planar compiler (mode %s)', async (mode) => {
     const { tile, tileID } = await workerLines();
     const compiler = vi.spyOn(LineGeometryCache.prototype, 'compile');
-    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, undefined, 0, mode);
+    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, 0, mode);
     advanceTileConversion(conversion, UNBOUNDED_BUDGET);
     const build = beginLineBuild(conversion.result.linePrimitives, tile.buckets, 'roads/0', tileID, 7, 0, true);
     expect(stepLineBuild(build, UNBOUNDED_BUDGET)).toBe(true);
@@ -171,7 +205,7 @@ describe('worker solid line compilation', () => {
 
   it('recompiles only a changed layout or replaced source owner', async () => {
     const { tile, tileID } = await workerLines();
-    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, undefined, 0, SceneMode.SCENE3D);
+    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, 0, SceneMode.SCENE3D);
     advanceTileConversion(conversion, UNBOUNDED_BUDGET);
     const source = conversion.result.linePrimitives[0];
     const bucket = tile.buckets[source.layerId] as LineBucket;
@@ -199,7 +233,7 @@ describe('worker solid line compilation', () => {
     expect(preparation).not.toHaveBeenCalled();
     const dash = { material: new DashMaterial(new DashAtlas(256, 64)) };
     const compiler = vi.spyOn(LineGeometryCache.prototype, 'compile');
-    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, undefined, 0, SceneMode.SCENE3D);
+    const conversion = beginTileConversion(tile.buckets, tileID, 7, 'roads', undefined, 0, SceneMode.SCENE3D);
     advanceTileConversion(conversion, UNBOUNDED_BUDGET);
     expect(conversion.result.linePrimitives.every(source => source.prepared === undefined)).toBe(true);
     const build = beginLineBuild(conversion.result.linePrimitives, tile.buckets, 'roads/0', tileID, 7, 0, false, dash);

@@ -8,13 +8,13 @@ import type { LineFeatureStyle } from '../vector/feature-attributes';
 import type { FrozenLineCameraPaint } from './frozen-line-paint';
 import type { LineTileClip } from './line-tile-clip';
 import * as Cesium from 'cesium';
-import { Cartesian4, Color as CesiumColor, ColorGeometryInstanceAttribute } from 'cesium';
+import { Cartesian3, Cartesian4, Color as CesiumColor, ColorGeometryInstanceAttribute } from 'cesium';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { registerDrawBatch, registerLinePaint, registerUniformLineExtent } from '../scene/draw-batch';
 import { DrawCommandReplay } from '../scene/draw-command-replay';
 import { sharePrimitiveBytes } from '../scene/resource-memory';
 import { layerFor, lineStyleForFeature } from '../vector/feature-attributes';
-import { freezeLineCameraPaint } from './frozen-line-paint';
+import { freezeLineCameraPaint, freezeLineFeaturePaint } from './frozen-line-paint';
 import { lineAppearanceForMode } from './line-appearance-mode';
 import { lineGroundScale } from './line-ground-scale';
 
@@ -57,6 +57,9 @@ export function updateLineUniforms(uniforms: LinePaintUniforms, bucket: LineBuck
   if (appliedUniformStyles.get(uniforms) === cached.style)
     return;
   uniforms.width = Math.max(0, cached.style.widthPx);
+  uniforms.shape.x = cached.style.gapWidthPx;
+  uniforms.shape.y = cached.style.offsetPx;
+  uniforms.shape.z = cached.style.blurPx;
   CesiumColor.clone(cached.style.color, uniforms.color);
   appliedUniformStyles.set(uniforms, cached.style);
 }
@@ -64,10 +67,10 @@ export function updateLineUniforms(uniforms: LinePaintUniforms, bucket: LineBuck
 export interface LineFamilyLayer {
   layerId: string;
   bucket: LineBucket;
-  offsetMeters: number;
   paintMode: 'uniform' | 'instance';
   zoomDependent: boolean;
   instancePaint?: ReadonlyMap<number, LineFeatureStyle>;
+  instanceCameraPaint?: ReadonlyMap<number, FrozenLineCameraPaint>;
 }
 
 interface LayerPaint {
@@ -78,7 +81,9 @@ interface LayerPaint {
   pickIds: Array<{ destroy: () => void }>;
   held?: { evaluate: FrozenLineCameraPaint; zoom?: number };
   committedInstances?: ReadonlyMap<number, LineFeatureStyle>;
-  heldInstances?: ReadonlyMap<number, LineFeatureStyle>;
+  committedPaint?: ReadonlyMap<number, FrozenLineCameraPaint>;
+  heldInstances?: ReadonlyMap<number, FrozenLineCameraPaint>;
+  heldZoom?: number;
 }
 
 interface CommandClone {
@@ -91,16 +96,16 @@ interface InstanceId {
   featureIndex: number;
 }
 
-function paintUniforms(clip: LineTileClip, offset: number, zoom: number): LinePaintUniforms {
+export function linePaintUniforms(clip: LineTileClip, width = 1, color: Color = CesiumColor.WHITE, zoom = 0): LinePaintUniforms {
   const uniforms = {
     clip,
-    width: 1,
-    color: CesiumColor.WHITE.clone(),
-    offset,
+    width,
+    color: CesiumColor.clone(color),
+    shape: new Cartesian3(),
+    shapeUniform: () => uniforms.shape,
     metersPerPixel: lineGroundScale(zoom),
     widthUniform: () => uniforms.width,
     colorUniform: () => uniforms.color,
-    offsetUniform: () => uniforms.offset,
     metersPerPixelUniform: () => uniforms.metersPerPixel,
   };
   return uniforms;
@@ -156,15 +161,15 @@ export class LineFamilyChunk {
     this.primitive = new GeometryPrimitive({
       geometryInstances: instances,
       appearance,
-    }, 'line', Math.max(...layers.map(layer => Math.abs(layer.offsetMeters))), lineAppearanceForMode);
+    }, 'line', lineAppearanceForMode);
     registerDrawBatch(this.primitive, { layerId: layers[0].layerId, tileId, kind: 'line' });
     sharePrimitiveBytes(this, this.primitive);
     this._layers = layers.map((layer, index): LayerPaint => {
       const owner = index === 0 ? this.primitive : {};
-      const uniforms = paintUniforms(clip, layer.offsetMeters, zoom);
+      const uniforms = linePaintUniforms(clip, 1, CesiumColor.WHITE, zoom);
       registerDrawBatch(owner, { layerId: layer.layerId, tileId, kind: 'line' });
       registerLinePaint(owner, uniforms);
-      return { layer, uniforms, owner, pickIds: [], committedInstances: layer.instancePaint };
+      return { layer, uniforms, owner, pickIds: [], committedInstances: layer.instancePaint, committedPaint: layer.instanceCameraPaint };
     });
     for (const paint of this._layers) {
       this._writeUniform(paint);
@@ -215,8 +220,8 @@ export class LineFamilyChunk {
             ...paint.table!.getUniformMapCallback()({}),
             ...paint.uniforms.clip.uniforms,
             u_line_width: paint.uniforms.widthUniform,
+            u_line_shape: paint.uniforms.shapeUniform,
             u_line_color: paint.uniforms.colorUniform,
-            u_line_layer_offset: paint.uniforms.offsetUniform,
             u_line_meters_per_pixel: paint.uniforms.metersPerPixelUniform,
           };
         }
@@ -233,12 +238,16 @@ export class LineFamilyChunk {
     this._zoom = zoom;
     for (const paint of this._layers) {
       if (paint.layer.zoomDependent || (force && (!transitionLayerIds || transitionLayerIds.has(paint.layer.layerId)))) {
-        if (paint.layer.paintMode === 'uniform')
+        if (paint.layer.paintMode === 'uniform') {
           this._writeUniform(paint);
-        else if (this._initialized)
+        }
+        else if (this._initialized) {
           this._writePaint(paint);
-        else
+        }
+        else {
           paint.committedInstances = this._instancePaint(paint);
+          paint.committedPaint = freezeLineFeaturePaint(paint.layer.bucket, paint.layer.layerId, this._ids.map(id => id.featureIndex));
+        }
       }
     }
   }
@@ -259,13 +268,19 @@ export class LineFamilyChunk {
     }));
     const instances = this._layers.filter(paint => paint.layer.paintMode === 'instance').map(paint => ({
       paint,
-      styles: paint.committedInstances!,
+      styles: paint.committedPaint!,
     }));
     return (zoom) => {
       this._zoom = zoom;
       for (const { paint, styles } of instances) {
         paint.heldInstances ??= styles;
         paint.uniforms.metersPerPixel = lineGroundScale(zoom);
+        if (paint.heldZoom !== zoom) {
+          if (this._initialized)
+            this._writePaint(paint);
+          else paint.committedInstances = this._instancePaint(paint);
+          paint.heldZoom = zoom;
+        }
       }
       for (const { paint, evaluate } of paints) {
         paint.held ??= { evaluate };
@@ -343,7 +358,7 @@ export class LineFamilyChunk {
    */
   private _instancePaint(paint: LayerPaint): ReadonlyMap<number, LineFeatureStyle> {
     if (paint.heldInstances)
-      return paint.heldInstances;
+      return new Map([...paint.heldInstances].map(([index, evaluate]) => [index, evaluate(this._zoom)]));
     const styles = new Map<number, LineFeatureStyle>();
     for (const { featureIndex } of this._ids) {
       if (!styles.has(featureIndex))
@@ -365,12 +380,13 @@ export class LineFamilyChunk {
     }
     const bytes = new Uint8Array(4);
     const color = new Cartesian4();
+    const shape = new Cartesian4(1, 0, 0, 0);
     if (layer.paintMode === 'uniform') {
       this._writeUniform(paint);
       // A copied table may contain instance paint from the family's first layer.
       // Normalize its factors once; later uniform changes never touch the table.
       for (let index = 0; index < this._ids.length; index++) {
-        table.setBatchedAttribute(index, widthAttribute, 1);
+        table.setBatchedAttribute(index, widthAttribute, shape);
         setColor(table, index, colorAttribute, CesiumColor.WHITE, bytes, color);
       }
       if (this._maximumMiterLimit !== undefined)
@@ -378,15 +394,22 @@ export class LineFamilyChunk {
       return;
     }
     paint.uniforms.width = 1;
+    Cartesian3.clone(Cartesian3.ZERO, paint.uniforms.shape);
     CesiumColor.clone(CesiumColor.WHITE, paint.uniforms.color);
-    const styles = paint.heldInstances ?? committed ?? this._instancePaint(paint);
+    const styles = paint.heldInstances ? this._instancePaint(paint) : committed ?? this._instancePaint(paint);
     for (let index = 0; index < this._ids.length; index++) {
       const featureIndex = this._ids[index].featureIndex;
       const style = styles.get(featureIndex)!;
-      table.setBatchedAttribute(index, widthAttribute, Math.max(0, style.widthPx));
+      shape.x = Math.max(0, style.widthPx);
+      shape.y = style.gapWidthPx;
+      shape.z = style.offsetPx;
+      shape.w = style.blurPx;
+      table.setBatchedAttribute(index, widthAttribute, shape);
       setColor(table, index, colorAttribute, style.color, bytes, color);
     }
     paint.committedInstances = styles;
+    if (!paint.heldInstances && !committed)
+      paint.committedPaint = freezeLineFeaturePaint(layer.bucket, layer.layerId, this._ids.map(id => id.featureIndex));
   }
 
   /**
@@ -400,6 +423,9 @@ export class LineFamilyChunk {
       if (paint.held.zoom !== this._zoom) {
         const style = paint.held.evaluate(this._zoom);
         paint.uniforms.width = Math.max(0, style.widthPx);
+        paint.uniforms.shape.x = style.gapWidthPx;
+        paint.uniforms.shape.y = style.offsetPx;
+        paint.uniforms.shape.z = style.blurPx;
         CesiumColor.clone(style.color, paint.uniforms.color);
         paint.held.zoom = this._zoom;
       }

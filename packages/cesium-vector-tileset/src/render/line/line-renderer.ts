@@ -1,5 +1,4 @@
 import type {
-  Color,
   Material,
   Primitive,
 } from 'cesium';
@@ -7,11 +6,14 @@ import type { Bucket } from '../../data/bucket';
 import type { PreparedLineGeometry } from '../../data/projected-geometry';
 import type { DashRow } from '../../source/worker-source';
 import type { StyleLayer } from '../../style/style-layer';
+import type { FillStyleLayer } from '../../style/style-layer/fill-style-layer';
 import type { LineStyleLayer } from '../../style/style-layer/line-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
-import type { LinePaintUniforms } from '../scene/draw-batch';
+import type { DrawBatch, LinePaintUniforms } from '../scene/draw-batch';
 import type { Budget } from '../scene/frame-budget';
+import type { LineFeatureStyle } from '../vector/feature-attributes';
 import type { DashMaterial } from './dash-material';
+import type { FrozenLineCameraPaint } from './frozen-line-paint';
 import type { LineFamilyLayer } from './line-family';
 import type { LineGeometryOptions } from './line-geometry';
 import * as Cesium from 'cesium';
@@ -30,20 +32,22 @@ import {
   PrimitiveType,
 } from 'cesium';
 import { FillBucket, LineBucket } from '../../data/bucket-runtime';
+import { fillCameraPaintOwners } from '../geometry/fill-camera-paint';
+import { FILL_TRANSLATION_SHADER, FillGeometryPrimitive } from '../geometry/fill-geometry-primitive';
 import { geometryBoundingSphere } from '../geometry/geometry-bounds';
 import { GeometryPrimitive } from '../geometry/geometry-primitive';
 import { lineInputs } from '../geometry/line-input';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
 import { registerDrawBatch, registerLinePaint } from '../scene/draw-batch';
 import { MAX_LINE_INSTANCES } from '../scene/frame-budget';
-import { constantValue, fillStyleForFeature, layerFor, lineStyleForFeature } from '../vector/feature-attributes';
+import { constantValue, fillStyleForFeature, hasExplicitFillOutline, layerFor, lineStyleForFeature } from '../vector/feature-attributes';
 import { dashRowsForFeature } from './dash-material';
-import { freezeLineCameraPaint } from './frozen-line-paint';
+import { freezeLineCameraPaint, freezeLineFeaturePaint } from './frozen-line-paint';
 import { lineAppearanceForMode } from './line-appearance-mode';
-import { LineFamilyChunk, updateLineUniforms } from './line-family';
+import { LineFamilyChunk, linePaintUniforms, updateLineUniforms } from './line-family';
 import { LineGeometryCache, lineLayoutKey } from './line-geometry';
 import { lineGroundScale } from './line-ground-scale';
-import { LINE_TILE_CLIP_FRAGMENT, LineTileClip } from './line-tile-clip';
+import { LINE_TILE_CLIP_FRAGMENT, LineTileClip, SURFACE_TILE_CLIP_FRAGMENT } from './line-tile-clip';
 import { LINE_FAN_PARAMETER_SHADER } from './line-vertex-format';
 import { restorePreparedLineGeometry } from './prepared-line-geometry';
 
@@ -68,8 +72,6 @@ export interface LinePrimitiveSource {
   /** Canonical tile coordinates, paired with each ECEF source point. */
   tilePositions: Float64Array;
   prepared?: PreparedLineGeometry;
-  /** Geodetic height applied by each layer's draw commands. */
-  offsetMeters?: number;
 }
 
 export type LinePrimitiveSourceList = LinePrimitiveSource[];
@@ -172,27 +174,11 @@ void clipLineSegmentToNearPlane(
  * validateShaderMatching checks the compiled shader's active attributes
  * against the combined geometry's).
  */
-function lineHeightShader(): string {
-  const inverseRadiiSquared = Ellipsoid.WGS84.oneOverRadiiSquared;
-  return `
-uniform float u_line_layer_offset;
-
-vec3 lineHeightEC(vec3 positionMC)
-{
-    vec3 positionWC = (czm_model * vec4(positionMC, 1.0)).xyz;
-    vec3 normalWC = czm_geodeticSurfaceNormal(positionWC, vec3(0.0),
-        vec3(${inverseRadiiSquared.x}, ${inverseRadiiSquared.y}, ${inverseRadiiSquared.z}));
-    return czm_viewRotation * normalWC * u_line_layer_offset;
-}
-`;
-}
-
 function lineStripShader(kind: 'solid' | 'dash' | 'pattern'): string {
   const dash = kind === 'dash';
   const textured = kind !== 'solid';
   return `
 ${LINE_COMMON_SHADER}
-${lineHeightShader()}
 
 in vec3 position3DHigh;
 in vec3 position3DLow;
@@ -204,6 +190,7 @@ in vec3 prevOffset2D;
 in vec3 nextOffset2D;
 in float a_lineFlags;
 uniform float u_line_width;
+uniform vec3 u_line_shape;
 uniform vec4 u_line_color;
 uniform float u_line_meters_per_pixel;
 uniform float u_line_mercator_projection;
@@ -217,6 +204,8 @@ out vec4 v_color;
 out vec2 v_lineDistance;
 out float v_gamma_scale;
 out float v_width;
+out vec2 v_width2;
+out float v_blur;
 flat out vec3 v_capTangent;
 flat out vec3 v_capDenominator;
 flat out vec2 v_capExtent;
@@ -236,10 +225,17 @@ void main()
     bool usePrev = (flags & 4u) != 0u;
     float a_cornerParam = role >= 7u && role < 30u ? lineFanParameters[int(role) - 7]
         : (a_corner == 0.0 || role >= 30u ? czm_batchTable_lineMiterLimit(batchId) : (usePrev ? 1.0 : -1.0));
-    float width = czm_batchTable_lineWidth(batchId) * u_line_width;
+    vec4 instancePaint = czm_batchTable_lineWidth(batchId);
+    float width = instancePaint.x * u_line_width;
+    vec3 shape = instancePaint.yzw * u_line_width + u_line_shape;
+    float gap = shape.x * 0.5;
+    float paintRadius = gap + width * (gap > 0.0 ? 1.0 : 0.5);
+    v_width2 = vec2(paintRadius + (width > 0.0 ? 0.5 / czm_pixelRatio : 0.0),
+        gap + (gap > 0.0 ? 0.5 / czm_pixelRatio : 0.0));
+    v_blur = shape.z;
     // MapLibre extrudes in the ground plane before projection. The extra
     // transparent device pixel retains Native's multisample geometry margin.
-    float outset = width * 0.5 + 1.5 / czm_pixelRatio;
+    float outset = paintRadius + 1.5 / czm_pixelRatio;
 
     v_color = color * u_line_color;
     v_color.a *= step(0.001, width);
@@ -261,9 +257,6 @@ ${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
         prev3DEC = czm_modelViewRelativeToEye * (p3D + vec4(prevOffset3D, 0.0));
         next3DEC = czm_modelViewRelativeToEye * (p3D + vec4(nextOffset3D, 0.0));
         vec3 centerMC = position3DHigh * 65536.0 + position3DLow;
-        position3DEC.xyz += lineHeightEC(centerMC);
-        prev3DEC.xyz += lineHeightEC(centerMC + prevOffset3D);
-        next3DEC.xyz += lineHeightEC(centerMC + nextOffset3D);
         // Differential of WGS84 ECEF with respect to Web Mercator x/y.
         // Keeping the two axes separate preserves pitch and bearing shear;
         // a camera-distance scalar cannot represent this transformation.
@@ -279,7 +272,7 @@ ${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
         float meridional = primeVertical * (1.0 - eccentricitySquared) / denominator;
         vec3 radiiSquared = vec3(${Ellipsoid.WGS84.radiiSquared.x.toFixed(1)}, ${Ellipsoid.WGS84.radiiSquared.y.toFixed(1)}, ${Ellipsoid.WGS84.radiiSquared.z.toFixed(1)});
         vec3 surface = radiiSquared * normal / sqrt(dot(radiiSquared * normal, normal));
-        float height = dot(world - surface, normal) + u_line_layer_offset;
+        float height = dot(world - surface, normal);
         vec2 scale = vec2(primeVertical + height, meridional + height) * cosine / ${Ellipsoid.WGS84.maximumRadius.toFixed(1)};
         east3DEC = czm_viewRotation * east * scale.x;
         north3DEC = czm_viewRotation * north * scale.y;
@@ -298,7 +291,6 @@ ${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
     if (czm_morphTime < 1.0)
     {
         vec4 p2D = czm_translateRelativeToEye(position2DHigh.zxy * 65536.0, position2DLow.zxy);
-        p2D.x += u_line_layer_offset;
         position2DEC = czm_modelViewRelativeToEye * p2D;
         prev2DEC = czm_modelViewRelativeToEye * (p2D + vec4(prevOffset2D.zxy, 0.0));
         next2DEC = czm_modelViewRelativeToEye * (p2D + vec4(nextOffset2D.zxy, 0.0));
@@ -318,6 +310,35 @@ ${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
     vec3 northEC = mix(north2DEC, north3DEC, czm_morphTime);
     vec2 previousGround = mix(previousGround2D, previousGround3D, czm_morphTime);
     vec2 nextGround = mix(nextGround2D, nextGround3D, czm_morphTime);
+
+    // Offset translates the entire join/cap, rather than each fan radius.
+    // Apply it before near-plane clipping, in both Native position tracks.
+    if (shape.y != 0.0)
+    {
+        vec2 before = length(previousGround) > czm_epsilon7 ? normalize(previousGround) : -normalize(nextGround);
+        vec2 after = length(nextGround) > czm_epsilon7 ? normalize(nextGround) : -before;
+        vec2 beforeNormal = vec2(-before.y, before.x);
+        vec2 afterNormal = vec2(after.y, -after.x);
+        vec2 normalSum = beforeNormal + afterNormal;
+        vec2 joinNormal = length(normalSum) > czm_epsilon6 ? normalize(normalSum) : afterNormal;
+        float miter = 1.0 / max(abs(dot(joinNormal, afterNormal)), czm_epsilon6);
+        vec2 offsetNormal = joinNormal * min(miter, 2.0);
+        float fallback = clamp((miter - 3.0) / 5.0, 0.0, 1.0);
+        offsetNormal = mix(offsetNormal, usePrev ? beforeNormal : afterNormal, fallback);
+        vec2 offset = offsetNormal * shape.y * u_line_meters_per_pixel;
+        vec3 offset3DEC = east3DEC * offset.x + north3DEC * offset.y;
+        vec3 offset2DEC = east2DEC * offset.x + north2DEC * offset.y;
+        position3DEC.xyz += offset3DEC;
+        prev3DEC.xyz += offset3DEC;
+        next3DEC.xyz += offset3DEC;
+        position2DEC.xyz += offset2DEC;
+        prev2DEC.xyz += offset2DEC;
+        next2DEC.xyz += offset2DEC;
+        vec3 offsetEC = mix(offset2DEC, offset3DEC, czm_morphTime);
+        positionEC.xyz += offsetEC;
+        prevEC.xyz += offsetEC;
+        nextEC.xyz += offsetEC;
+    }
 
     vec4 clippedPrevWC, clippedPrevEC;
     bool prevSegmentClipped, prevSegmentCulled;
@@ -430,7 +451,7 @@ ${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
     // pixels, so DPR enters only the AA distance and the device viewport.
     vec2 direction = offsetDir * expandWidth / outset + squareTangent / (outset * czm_pixelRatio);
     vec2 gammaDirection = length(direction) > 0.0 ? direction : nNext;
-    vec2 paintExtrusion = gammaDirection * (width * 0.5 + 0.5 / czm_pixelRatio);
+    vec2 paintExtrusion = gammaDirection * (paintRadius + 0.5 / czm_pixelRatio);
     vec3 paintExpansionEC = (eastEC * paintExtrusion.x + northEC * paintExtrusion.y) * u_line_meters_per_pixel;
     vec4 projectedCenter = czm_projection * clippedPositionEC;
     v_capTangent = vec3(0.0);
@@ -462,7 +483,7 @@ ${dash ? '    v_dashFrom = a_dashFrom;\n    v_dashTo = a_dashTo;\n' : ''}
     v_gamma_scale = length(paintExtrusion) / max(length(screenExtrusion), czm_epsilon7);
     // One transparent device pixel must remain one projected device pixel,
     // even when perspective makes a ground pixel substantially narrower.
-    float geometryOutset = width * 0.5 + (0.5 + v_gamma_scale) / czm_pixelRatio;
+    float geometryOutset = paintRadius + (0.5 + v_gamma_scale) / czm_pixelRatio;
     vec2 extrusion = direction * geometryOutset - squareTangent * v_gamma_scale / czm_pixelRatio;
     vec3 expansionEC = (eastEC * extrusion.x + northEC * extrusion.y) * u_line_meters_per_pixel;
     vec4 expandedPositionEC = clippedPositionEC + vec4(expansionEC, 0.0);
@@ -495,7 +516,6 @@ float lineCoverage()
 #ifdef LINE_TILE_CLIP
     clipLineTile();
 #endif
-    float halfWidth = v_width * 0.5;
     float tangent = max(v_lineDistance.y, 0.0);
     if (v_capExtent.x > 0.0)
     {
@@ -506,8 +526,8 @@ float lineCoverage()
             tangent = max(tangent, -along - v_capExtent.y);
     }
     float distance = length(vec2(v_lineDistance.x, tangent));
-    float blur = v_gamma_scale / czm_pixelRatio;
-    return clamp((halfWidth + 0.5 / czm_pixelRatio - distance) / blur, 0.0, 1.0);
+    float blur = (v_blur + 1.0 / czm_pixelRatio) * v_gamma_scale;
+    return clamp(min(distance - (v_width2.y - blur), v_width2.x - distance) / blur, 0.0, 1.0);
 }
 `;
 
@@ -516,6 +536,8 @@ in vec4 v_color;
 in vec2 v_lineDistance;
 in float v_gamma_scale;
 in float v_width;
+in vec2 v_width2;
+in float v_blur;
 flat in vec3 v_capTangent;
 flat in vec3 v_capDenominator;
 flat in vec2 v_capExtent;
@@ -577,30 +599,37 @@ class FillOutlineAppearance extends PolylineColorAppearance {
     super({
       translucent: true,
       vertexShaderSource: `
-${lineHeightShader()}
 in vec3 position3DHigh;
 in vec3 position3DLow;
 in vec4 color;
 in float batchId;
 out vec4 v_color;
 out vec2 v_position;
+out vec3 v_centerEye;
+${FILL_TRANSLATION_SHADER}
 void main()
 {
     vec4 position = czm_computePosition();
+    if (any(notEqual(u_fillTranslate, vec2(0.0)))) {
+        vec3 normal = vec3(1.0, 0.0, 0.0);
+        if (czm_morphTime > 0.0 || !u_fillMercator)
+            normal = normalize((position3DHigh + position3DLow) / (czm_ellipsoidRadii * czm_ellipsoidRadii));
+        position = cvt_translateFillPosition(position, normal);
+    }
     vec4 positionEC = czm_modelViewRelativeToEye * position;
-    vec3 height3DEC = lineHeightEC(position3DHigh + position3DLow);
-    vec3 height2DEC = czm_modelViewRelativeToEye[0].xyz * u_line_layer_offset;
-    positionEC.xyz += mix(height2DEC, height3DEC, czm_morphTime);
     gl_Position = czm_projection * positionEC;
     v_position = (gl_Position.xy / gl_Position.w * 0.5 + 0.5) * czm_viewport.zw + czm_viewport.xy;
+    v_centerEye = positionEC.xyz;
     v_color = color;
 }
 `,
       fragmentShaderSource: `
 in vec4 v_color;
 in vec2 v_position;
+${SURFACE_TILE_CLIP_FRAGMENT}
 void main()
 {
+    clipSurfaceTile();
     float coverage = 1.0 - smoothstep(0.0, 1.0, length(v_position - gl_FragCoord.xy));
     out_FragColor = vec4(v_color.rgb, v_color.a * coverage);
 }
@@ -641,6 +670,8 @@ in vec4 v_color;
 in vec2 v_lineDistance;
 in float v_gamma_scale;
 in float v_width;
+in vec2 v_width2;
+in float v_blur;
 in float v_linesofar;
 flat in vec3 v_capTangent;
 flat in vec3 v_capDenominator;
@@ -652,7 +683,7 @@ void main()
     czm_materialInput materialInput;
     materialInput.positionToEyeEC = vec3(0.0);
     materialInput.normalEC = vec3(0.0, 0.0, 1.0);
-    materialInput.st = vec2(v_linesofar, v_lineDistance.x / max(v_width, czm_epsilon7) + 0.5);
+    materialInput.st = vec2(v_linesofar, v_lineDistance.x / max(v_width2.y > 0.0 ? 2.0 * v_width2.x - 1.0 / czm_pixelRatio : v_width, czm_epsilon7) + 0.5);
     czm_material material = czm_getMaterial(materialInput);
     out_FragColor = vec4(material.diffuse + material.emission, material.alpha * v_color.a * coverage);
 }
@@ -666,19 +697,15 @@ function lineTileShader(source: string): string {
   return `#define LINE_TILE_CLIP\n${source}`;
 }
 
-export interface LineFeatureStyle {
-  color: Color;
-  widthPx: number;
-}
+export type { LineFeatureStyle } from '../vector/feature-attributes';
 
 function lineFeatureStyle(bucket: Bucket, featureIndex: number, layerId: string, zoom: number): LineFeatureStyle {
   if (bucket instanceof LineBucket) {
-    const style = lineStyleForFeature(bucket, featureIndex, layerId, zoom);
-    return { color: style.color, widthPx: style.widthPx };
+    return lineStyleForFeature(bucket, featureIndex, layerId, zoom);
   }
   if (bucket instanceof FillBucket) {
     const style = fillStyleForFeature(bucket, featureIndex, layerId, zoom);
-    return { color: style.outlineColor, widthPx: style.outlineWidthPx };
+    return { color: style.outlineColor, widthPx: style.outlineWidthPx, gapWidthPx: 0, offsetPx: 0, blurPx: 0 };
   }
   throw new TypeError(`linePrimitives reference a non-line bucket for layer ${layerId}`);
 }
@@ -729,11 +756,11 @@ export interface LineBuildState {
   byLayer: Array<{
     layerId: string;
     sources: LinePrimitiveSource[];
-    offsetMeters: number;
     paintMode: 'uniform' | 'instance';
     zoomDependent: boolean;
     familyRoot?: string;
     instancePaint?: Map<number, LineFeatureStyle>;
+    instanceCameraPaint?: Map<number, FrozenLineCameraPaint>;
     dash: boolean;
     geometryInputs: Array<{ positions: Float64Array; tilePositions: Float64Array; key: string; featureIndex: number; layout?: Pick<LineGeometryOptions, 'join' | 'cap' | 'miterLimit' | 'roundLimit'> }>;
     instances?: GeometryInstance[];
@@ -828,7 +855,6 @@ function* compileLineBuild(state: LineBuildState, sources: LinePrimitiveSourceLi
       sources: layerSources,
       dash: dashed,
       geometryInputs: [],
-      offsetMeters: layerSources[0].offsetMeters ?? 0,
       paintMode: linePaintMode(bucket, layerId),
       zoomDependent: linePaintUsesZoom(bucket, layerId),
       familyRoot: family && family.length > 1 ? family[0] : undefined,
@@ -840,8 +866,11 @@ function* compileLineBuild(state: LineBuildState, sources: LinePrimitiveSourceLi
       // frozen family can upload before any live style evaluation is allowed.
       if (layer.familyRoot && layer.paintMode === 'instance') {
         layer.instancePaint ??= new Map();
-        if (!layer.instancePaint.has(source.featureIndex))
+        if (!layer.instancePaint.has(source.featureIndex)) {
           layer.instancePaint.set(source.featureIndex, lineFeatureStyle(bucket, source.featureIndex, layerId, state.zoom));
+          layer.instanceCameraPaint ??= new Map();
+          layer.instanceCameraPaint.set(source.featureIndex, freezeLineFeaturePaint(bucket as LineBucket, layerId, [source.featureIndex]).get(source.featureIndex)!);
+        }
       }
       const layout = lineLayout(bucket, source.featureIndex);
       layer.geometryInputs.push({
@@ -868,13 +897,13 @@ function* compileLineBuild(state: LineBuildState, sources: LinePrimitiveSourceLi
       const bucket = state.buckets[layerId];
       for (; state.sourceIndex < layer.sources.length; state.sourceIndex++) {
         const source = layer.sources[state.sourceIndex];
-        if (bucket instanceof FillBucket && !state.planar) {
+        if (bucket instanceof FillBucket) {
           layer.outlineInstances ??= [];
           yield* appendFillOutlineInstances(layer.outlineInstances, source, bucket, state.tileId, state.generationId, layerId, state.zoom);
         }
         else {
           layer.instances ??= [];
-          const miterLimit = yield* appendLineLayerInstances(layer.instances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.planar, layer.paintMode, state.geometryCache!, state.dash, layer.dash);
+          const miterLimit = yield* appendLineLayerInstances(layer.instances, source, bucket, state.tileId, state.generationId, layerId, state.zoom, state.planar, layer.paintMode, state.geometryCache!, state.dash, layer.dash, layer.instanceCameraPaint ??= new Map());
           if (miterLimit !== undefined)
             layer.maximumMiterLimit = Math.max(layer.maximumMiterLimit ?? 0, miterLimit);
         }
@@ -916,7 +945,6 @@ export function discardLineBuild(state: LineBuildState): void {
 
 /** Shared appearance: stateless across primitives, so one for all tiles. */
 const translucentLineAppearance = new LineAAAppearance();
-const fillOutlineAppearance = new FillOutlineAppearance();
 // Dense outlines need a vertex bound as well as an instance bound. Planar
 // chunks project repeated neighbours once and can amortize larger uploads.
 const MAX_LINE_BATCH_VERTICES = 6000;
@@ -979,11 +1007,13 @@ type LineGroup = {
   instanceIds: LineInstanceId[];
   zoomDependent: boolean;
   layerId: string;
-} & ({ kind: 'outline' } | {
+} & ({ kind: 'outline'; batch: Extract<DrawBatch, { kind: 'fill-outline' }> } | {
   kind: 'line';
   firstFeatureIndex: number;
   paintMode: 'uniform' | 'instance';
   uniforms: LinePaintUniforms;
+  committedPaint?: ReadonlyMap<number, FrozenLineCameraPaint>;
+  instances: GeometryInstance[];
 });
 const lineGroups = new WeakMap<Primitive, LineGroup>();
 const lineFamilies = new WeakMap<LineFamilyChunk, LineFamilyLayer[]>();
@@ -998,7 +1028,7 @@ function linePaintKinds(bucket: Bucket | undefined, layerId: string): Array<stri
     _transitionablePaint?: { _values?: Record<string, { value?: { expression?: { kind?: string } } }> };
   } | undefined)?._transitionablePaint?._values;
   const properties = bucket instanceof LineBucket
-    ? ['line-width', 'line-color', 'line-opacity', 'line-layer-opacity']
+    ? ['line-width', 'line-gap-width', 'line-offset', 'line-blur', 'line-color', 'line-opacity', 'line-layer-opacity']
     : ['fill-outline-color', 'fill-color', 'fill-opacity', 'fill-layer-opacity', 'fill-antialias'];
   return properties.map(property => values?.[property]?.value?.expression?.kind);
 }
@@ -1012,25 +1042,10 @@ function linePaintMode(bucket: Bucket | undefined, layerId: string): 'uniform' |
     return 'uniform';
   }
   const properties = bucket instanceof LineBucket
-    ? ['line-width', 'line-color', 'line-opacity']
+    ? ['line-width', 'line-gap-width', 'line-offset', 'line-blur', 'line-color', 'line-opacity']
     : ['fill-outline-color', 'fill-color', 'fill-opacity'];
   const configuration = bucket.programConfigurations.get(layerId);
   return properties.some(property => !!configuration.getAttributeArray(property)) ? 'instance' : 'uniform';
-}
-
-export function linePaintUniforms(clip: LineTileClip, width = 1, color: Color = CesiumColor.WHITE, offset = 0, zoom = 0): LinePaintUniforms {
-  const uniforms = {
-    clip,
-    width,
-    color: CesiumColor.clone(color),
-    offset,
-    metersPerPixel: lineGroundScale(zoom),
-    widthUniform: () => uniforms.width,
-    colorUniform: () => uniforms.color,
-    offsetUniform: () => uniforms.offset,
-    metersPerPixelUniform: () => uniforms.metersPerPixel,
-  };
-  return uniforms;
 }
 
 function lineWidth(width: number): number {
@@ -1055,24 +1070,27 @@ export function commitLineBuild(state: LineBuildState): PrimitiveCollection | un
 
 function* assembleLineCollection(state: LineBuildState): Generator<void> {
   const collection = new PrimitiveCollection();
+  const fillOwners: Array<{ layerId: string; paint: FillGeometryPrimitive }> = [];
+  fillCameraPaintOwners.set(collection, fillOwners);
   state.collection = collection;
   for (const layer of state.byLayer) {
     if (layer.familyRoot && layer.familyRoot !== layer.layerId) {
       continue;
     }
     for (const instances of lineChunks(layer.outlineInstances ?? [], state.planar)) {
-      const primitive = new GeometryPrimitive({
-        geometryInstances: instances,
-        appearance: fillOutlineAppearance,
-      }, 'native', layer.offsetMeters);
-      registerLinePaint(primitive, linePaintUniforms(state.clip, 1, CesiumColor.WHITE, layer.offsetMeters));
+      const primitive = new FillGeometryPrimitive(instances, new FillOutlineAppearance(), 'native');
+      fillOwners.push({ layerId: layer.layerId, paint: primitive });
+      primitive.updateCameraPaint(layerFor(state.buckets[layer.layerId], layer.layerId) as FillStyleLayer, state.zoom);
+      registerLinePaint(primitive, linePaintUniforms(state.clip));
+      const batch: Extract<DrawBatch, { kind: 'fill-outline' }> = { layerId: layer.layerId, tileId: state.tileId, kind: 'fill-outline', explicit: hasExplicitFillOutline(layerFor(state.buckets[layer.layerId], layer.layerId)) };
       lineGroups.set(primitive, {
         kind: 'outline',
+        batch,
         instanceIds: instances.map(instance => instance.id as LineInstanceId),
         zoomDependent: layer.zoomDependent,
         layerId: layer.layerId,
       });
-      registerDrawBatch(primitive, { layerId: layer.layerId, tileId: state.tileId, kind: 'fill-outline' });
+      registerDrawBatch(primitive, batch);
       collection.add(primitive);
       yield;
     }
@@ -1083,10 +1101,10 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
           .map(candidate => ({
             layerId: candidate.layerId,
             bucket: state.buckets[candidate.layerId] as LineBucket,
-            offsetMeters: candidate.offsetMeters,
             paintMode: candidate.paintMode,
             zoomDependent: candidate.zoomDependent,
             instancePaint: candidate.instancePaint,
+            instanceCameraPaint: candidate.instanceCameraPaint,
           }));
         const chunk = new LineFamilyChunk(
           instances,
@@ -1108,7 +1126,7 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
         appearance: layer.dash
           ? new DashLineAppearance({ material: state.dash!.material.material, translucent: true })
           : translucentLineAppearance,
-      }, 'line', layer.offsetMeters, lineAppearanceForMode);
+      }, 'line', lineAppearanceForMode);
       registerDrawBatch(primitive, { layerId: layer.layerId, tileId: state.tileId, kind: layer.dash ? 'dash' : 'line' });
       const first = instances[0].id as LineInstanceId;
       const bucket = state.buckets[layer.layerId];
@@ -1119,9 +1137,13 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
         state.clip,
         style ? lineWidth(style.widthPx) : 1,
         style?.color,
-        layer.offsetMeters,
         state.zoom,
       );
+      if (style) {
+        uniforms.shape.x = style.gapWidthPx;
+        uniforms.shape.y = style.offsetPx;
+        uniforms.shape.z = style.blurPx;
+      }
       registerLinePaint(primitive, uniforms, layer.paintMode === 'uniform' && layer.maximumMiterLimit !== undefined
         ? { widthFactor: 1, miterLimit: layer.maximumMiterLimit }
         : undefined);
@@ -1135,6 +1157,8 @@ function* assembleLineCollection(state: LineBuildState): Generator<void> {
         zoomDependent: layer.zoomDependent,
         layerId: layer.layerId,
         uniforms,
+        committedPaint: layer.instanceCameraPaint,
+        instances,
       });
       collection.add(primitive);
       yield;
@@ -1204,11 +1228,14 @@ function* appendLineLayerInstances(
   geometryCache: LineGeometryCache,
   dash: LineDashResources | undefined,
   dashed: boolean,
+  cameraPaint: Map<number, FrozenLineCameraPaint>,
 ): Generator<void, number | undefined> {
   if (!(bucket instanceof LineBucket) && !(bucket instanceof FillBucket)) {
     return;
   }
   const style = paintMode === 'instance' ? lineFeatureStyle(bucket, source.featureIndex, layerId, zoom) : undefined;
+  if (style && bucket instanceof LineBucket)
+    cameraPaint.set(source.featureIndex, freezeLineFeaturePaint(bucket, layerId, [source.featureIndex]).get(source.featureIndex)!);
   // Keep zero paint: camera zoom and transitions can reveal the same strip.
   if (source.positions.length < 6) {
     return;
@@ -1229,8 +1256,8 @@ function* appendLineLayerInstances(
         color: ColorGeometryInstanceAttribute.fromColor(style ? style.color : CesiumColor.WHITE),
         lineWidth: new GeometryInstanceAttribute({
           componentDatatype: ComponentDatatype.FLOAT,
-          componentsPerAttribute: 1,
-          value: [style ? lineWidth(style.widthPx) : 1],
+          componentsPerAttribute: 4,
+          value: style ? [lineWidth(style.widthPx), style.gapWidthPx, style.offsetPx, style.blurPx] : [1, 0, 0, 0],
         }),
         lineMiterLimit: new GeometryInstanceAttribute({
           componentDatatype: ComponentDatatype.FLOAT,
@@ -1384,12 +1411,38 @@ export function captureUniformLinePaint(collection: PrimitiveCollection, buckets
     if (group?.kind !== 'line')
       continue;
     updates.push(zoom => group.uniforms.metersPerPixel = lineGroundScale(zoom));
-    if (group.paintMode !== 'uniform' || !(bucket instanceof LineBucket))
+    if (group.paintMode === 'instance') {
+      const committed = group.committedPaint;
+      let appliedZoom: number;
+      updates.push((zoom) => {
+        if (appliedZoom === zoom)
+          return;
+        appliedZoom = zoom;
+        for (const [index, id] of group.instanceIds.entries()) {
+          const style = committed!.get(id.featureIndex)!(zoom);
+          const value = [lineWidth(style.widthPx), style.gapWidthPx, style.offsetPx, style.blurPx];
+          if (child.ready) {
+            const attributes = child.getGeometryInstanceAttributes(id);
+            attributes.lineWidth = value;
+            attributes.color = ColorGeometryInstanceAttribute.toValue(style.color);
+          }
+          else {
+            group.instances[index].attributes.lineWidth.value = value;
+            group.instances[index].attributes.color.value = ColorGeometryInstanceAttribute.toValue(style.color);
+          }
+        }
+      });
+      continue;
+    }
+    if (!(bucket instanceof LineBucket))
       continue;
     const evaluate = freezeLineCameraPaint(bucket.layers.find(layer => layer.id === group.layerId)!);
     updates.push((zoom) => {
       const style = evaluate(zoom);
       group.uniforms.width = lineWidth(style.widthPx);
+      group.uniforms.shape.x = style.gapWidthPx;
+      group.uniforms.shape.y = style.offsetPx;
+      group.uniforms.shape.z = style.blurPx;
       CesiumColor.clone(style.color, group.uniforms.color);
     });
   }
@@ -1419,6 +1472,9 @@ export function updateUniformLinePaint(collection: PrimitiveCollection, buckets:
     else if (bucket) {
       const style = lineFeatureStyle(bucket, group.firstFeatureIndex, group.layerId, zoom);
       group.uniforms.width = lineWidth(style.widthPx);
+      group.uniforms.shape.x = style.gapWidthPx;
+      group.uniforms.shape.y = style.offsetPx;
+      group.uniforms.shape.z = style.blurPx;
       CesiumColor.clone(style.color, group.uniforms.color);
     }
   }
@@ -1450,6 +1506,8 @@ export function updateLinePaint(
       group.uniforms.metersPerPixel = lineGroundScale(zoom);
     if (group && force) {
       group.zoomDependent = linePaintUsesZoom(buckets[group.layerId], group.layerId);
+      if (group.kind === 'outline')
+        group.batch.explicit = hasExplicitFillOutline(layerFor(buckets[group.layerId], group.layerId));
     }
     if (!group || (!group.zoomDependent && !(force && (!transitionLayerIds || transitionLayerIds.has(group.layerId))))) {
       continue;
@@ -1466,6 +1524,8 @@ export function updateLinePaint(
       }
       continue;
     }
+    if (group.kind === 'line' && buckets[group.layerId] instanceof LineBucket)
+      group.committedPaint = freezeLineFeaturePaint(buckets[group.layerId] as LineBucket, group.layerId, group.instanceIds.map(id => id.featureIndex));
     const styles = new Map<number, LineFeatureStyle>();
     for (const id of group.instanceIds) {
       const bucket = buckets[id.layerId];
@@ -1479,9 +1539,9 @@ export function updateLinePaint(
       }
       const attributes = primitive.getGeometryInstanceAttributes(id);
       if (group.kind === 'line') {
-        const width = Math.fround(lineWidth(style.widthPx));
-        if (attributes.lineWidth[0] !== width) {
-          attributes.lineWidth = [width];
+        const next = [lineWidth(style.widthPx), style.gapWidthPx, style.offsetPx, style.blurPx].map(Math.fround);
+        if (next.some((value, index) => attributes.lineWidth[index] !== value)) {
+          attributes.lineWidth = next;
         }
       }
       ColorGeometryInstanceAttribute.toValue(style.color, color);

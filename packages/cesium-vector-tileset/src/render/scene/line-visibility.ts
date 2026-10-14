@@ -88,7 +88,7 @@ export class LineVisibility {
     const { center, radius } = bounds;
     const { widthFactor, miterLimit } = extent;
     const metersPerPixel = paint.metersPerPixel;
-    if (![center.x, center.y, center.z, radius, paint.width, metersPerPixel, widthFactor, miterLimit].every(Number.isFinite)
+    if (![center.x, center.y, center.z, radius, paint.width, paint.shape.x, paint.shape.y, paint.shape.z, metersPerPixel, widthFactor, miterLimit].every(Number.isFinite)
       || radius < 0 || paint.width < 0 || !metersPerPixel || metersPerPixel < 0 || widthFactor < 0 || miterLimit < 0) {
       return false;
     }
@@ -103,8 +103,9 @@ export class LineVisibility {
     // WGS84 Jacobian can be bounded from the source sphere's outer radius,
     // including elevated geometry, without depending on camera distance.
     const groundScale = Math.max(1, (Cartesian3.magnitude(center) + radius) / Ellipsoid.WGS84.minimumRadius);
-    const groundExpansion = (widthFactor * paint.width * 0.5 + 0.5 / this._pixelRatio)
-      * metersPerPixel * groundScale * cornerFactor;
+    const groundExpansion = (paint.shape.x * 0.5 + widthFactor * paint.width * (paint.shape.x > 0 ? 1 : 0.5)
+      + Math.abs(paint.shape.y) * 2 + 0.5 / this._pixelRatio)
+    * metersPerPixel * groundScale * cornerFactor;
     // Keep device-pixel sample padding separate from the ground stroke. The
     // farthest point supplies its conservative perspective pixel footprint.
     const pixelPadding = 1.5 * cornerFactor * Math.max(this._pixelSize.x, this._pixelSize.y)

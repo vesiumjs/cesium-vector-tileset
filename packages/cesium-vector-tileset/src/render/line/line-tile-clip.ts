@@ -64,6 +64,48 @@ void clipLineTile()
 #endif
 `;
 
+/** Fixed tile pixel mask shared by translated fill meshes and outlines. */
+export const SURFACE_TILE_CLIP_FRAGMENT = `
+in vec3 v_centerEye;
+uniform mat4 u_line_clip_planar;
+void clipSurfaceTile()
+{
+    if (czm_morphTime == 0.0)
+    {
+        // Native LINES interpolate the centreline, while the tile mask must
+        // clip the actual pixel, including its half-pixel coverage margin.
+        vec4 clip = czm_projection * vec4(v_centerEye, 1.0);
+        float windowZ = czm_viewportTransformation[2][2] * clip.z / clip.w
+            + czm_viewportTransformation[3][2];
+        // The vec4 overload accepts linear window depth even with LOG_DEPTH.
+        vec3 pixelEye = czm_windowToEyeCoordinates(
+            vec4(gl_FragCoord.xy, windowZ, 1.0 / clip.w)).xyz;
+        vec3 normal = czm_viewRotation * vec3(1.0, 0.0, 0.0);
+        float planeDistance = dot(normal, v_centerEye);
+        if (czm_sceneMode == czm_sceneMode2D)
+        {
+            pixelEye.z += (planeDistance - dot(normal, pixelEye)) / normal.z;
+        }
+        else
+        {
+            float denominator = dot(normal, pixelEye);
+            if (denominator == 0.0)
+                discard;
+            float distance = planeDistance / denominator;
+            if (distance <= 0.0)
+                discard;
+            pixelEye *= distance;
+        }
+        vec4 positionEye = vec4(pixelEye, 1.0);
+        if (dot(u_line_clip_planar[0], positionEye) < 0.0
+            || dot(u_line_clip_planar[1], positionEye) >= 0.0
+            || dot(u_line_clip_planar[2], positionEye) < 0.0
+            || dot(u_line_clip_planar[3], positionEye) >= 0.0)
+            discard;
+    }
+}
+`;
+
 interface ClipUniformState {
   readonly view: Matrix4;
 }
