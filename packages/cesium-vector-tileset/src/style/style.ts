@@ -32,7 +32,7 @@ import { getReferrer } from '../util/ajax';
 import { browser } from '../util/browser';
 import { ErrorEvent, Evented } from '../util/evented';
 import { SourceDataEvent, StyleDataEvent, StyleLoadEvent } from '../util/events';
-import { clone, deepEqual, filterObject, mapObject } from '../util/objects';
+import { clone, deepEqual, filterObject } from '../util/objects';
 import { WorkerDispatcher } from '../worker/dispatcher';
 import { MessageType } from '../worker/messages';
 import { getSharedWorkerPool } from '../worker/worker-pool';
@@ -170,20 +170,20 @@ export class Style extends Evented<StyleEventType> {
 
   _frameRequest?: AbortController;
   _spriteRequest?: AbortController;
-  _layers: { [_: string]: StyleLayer } = {};
+  _layers: { [_: string]: StyleLayer } = Object.create(null);
   _serializedLayers: { [_: string]: LayerSpecification } | null = null;
   _order: string[] = [];
-  tilePyramids: { [_: string]: TilePyramid } = {};
+  tilePyramids: { [_: string]: TilePyramid } = Object.create(null);
   zoomHistory: ZoomHistory = new ZoomHistory();
   _loaded = false;
   _changed = false;
-  _updatedSources: { [_: string]: 'clear' | 'reload' } = {};
-  _updatedLayers: { [_: string]: true } = {};
-  _removedLayers: { [_: string]: StyleLayer } = {};
+  _updatedSources: { [_: string]: 'clear' | 'reload' } = Object.create(null);
+  _updatedLayers: { [_: string]: true } = Object.create(null);
+  _removedLayers: { [_: string]: StyleLayer } = Object.create(null);
   _changedImages: { [_: string]: true } = {};
   _imagesListDirty = false;
   _glyphsDidChange = false;
-  _updatedPaintProps: { [layer: string]: true } = {};
+  _updatedPaintProps: { [layer: string]: true } = Object.create(null);
   _layerOrderChanged = false;
   // image ids of images loaded from style's sprite
   _spritesImagesIds: { [spriteId: string]: string[] } = {};
@@ -326,9 +326,9 @@ export class Style extends Evented<StyleEventType> {
   private _getInitialValues() {
     return {
       _spritesImagesIds: {},
-      _layers: {},
+      _layers: Object.create(null),
       _order: [] as string[],
-      tilePyramids: {},
+      tilePyramids: Object.create(null),
       zoomHistory: new ZoomHistory(),
       _availableImages: [] as string[],
       _imagesListDirty: false,
@@ -338,11 +338,11 @@ export class Style extends Evented<StyleEventType> {
       light: undefined as Light | undefined,
       _loaded: false,
       _changed: false,
-      _updatedLayers: {},
-      _updatedSources: {},
+      _updatedLayers: Object.create(null),
+      _updatedSources: Object.create(null),
       _changedImages: {},
       _glyphsDidChange: false,
-      _updatedPaintProps: {},
+      _updatedPaintProps: Object.create(null),
       _layerOrderChanged: false,
       z: 0,
       renderRevision: 0,
@@ -445,8 +445,8 @@ export class Style extends Evented<StyleEventType> {
     this._changed = true;
     this.stylesheet = nextState;
 
-    for (const id in nextState.sources) {
-      this.addSource(id, nextState.sources[id], { validate: false });
+    for (const [id, source] of Object.entries(nextState.sources)) {
+      this.addSource(id, source, { validate: false });
     }
 
     if (nextState.sprite) {
@@ -478,7 +478,7 @@ export class Style extends Evented<StyleEventType> {
     void this.dispatcher.broadcast(MessageType.setLayers, dereferencedLayers).catch(() => {});
 
     this._order = dereferencedLayers.map(layer => layer.id);
-    this._layers = {};
+    this._layers = Object.create(null);
 
     // reset serialization field, to be populated only when needed
     this._serializedLayers = null;
@@ -676,7 +676,7 @@ export class Style extends Evented<StyleEventType> {
       return serializedLayers;
     }
 
-    serializedLayers = this._serializedLayers = {};
+    serializedLayers = this._serializedLayers = Object.create(null) as Record<string, LayerSpecification>;
     const allLayerIds: string [] = Object.keys(this._layers);
     for (const layerId of allLayerIds) {
       serializedLayers[layerId] = this._layers[layerId].serialize();
@@ -778,7 +778,7 @@ export class Style extends Evented<StyleEventType> {
       this._resetUpdates();
     }
 
-    const previousSourceUsage: Record<string, boolean | undefined> = {};
+    const previousSourceUsage: Record<string, boolean | undefined> = Object.create(null);
 
     // save 'used' status to previousSourceUsage object and reset all tilePyramids 'used' field to false
     for (const id in this.tilePyramids) {
@@ -908,11 +908,11 @@ export class Style extends Evented<StyleEventType> {
   private _resetUpdates(): void {
     this._changed = false;
 
-    this._updatedLayers = {};
-    this._removedLayers = {};
+    this._updatedLayers = Object.create(null);
+    this._removedLayers = Object.create(null);
 
-    this._updatedSources = {};
-    this._updatedPaintProps = {};
+    this._updatedSources = Object.create(null);
+    this._updatedPaintProps = Object.create(null);
 
     this._changedImages = {};
     this._glyphsDidChange = false;
@@ -945,9 +945,9 @@ export class Style extends Evented<StyleEventType> {
     const canvasIdentities = new Map<HTMLCanvasElement, string>();
     const projectForDiff = (style: StyleSpecification): StyleSpecification => ({
       ...style,
-      sources: mapObject(style.sources, (source) => {
+      sources: Object.fromEntries(Object.entries(style.sources).map(([id, source]) => {
         if (source.type !== 'canvas' || source.canvas === undefined)
-          return source;
+          return [id, source];
         let canvas: string;
         if (typeof source.canvas === 'string') {
           canvas = `id:${source.canvas}`;
@@ -958,8 +958,8 @@ export class Style extends Evented<StyleEventType> {
           if (identity === undefined)
             canvasIdentities.set(source.canvas, canvas);
         }
-        return { ...source, canvas };
-      }),
+        return [id, { ...source, canvas }];
+      })),
     });
     const changes = diffStyles(projectForDiff(serializedStyle), projectForDiff(nextState));
     for (const change of changes) {
@@ -1366,8 +1366,8 @@ export class Style extends Evented<StyleEventType> {
       return;
     }
 
-    minzoom ??= 0;
-    maxzoom ??= 24;
+    minzoom ??= undefined;
+    maxzoom ??= undefined;
     if (layer.minzoom === minzoom && layer.maxzoom === maxzoom)
       return;
 
@@ -1544,7 +1544,7 @@ export class Style extends Evented<StyleEventType> {
     if (!this._loaded)
       return;
 
-    const sources = mapObject(this.tilePyramids, source => source.serialize());
+    const sources = Object.fromEntries(Object.entries(this.tilePyramids).map(([id, source]) => [id, source.serialize()]));
     const layers = this._serializeByIds(this._order, true);
     return filterObject({
       ...this.stylesheet,
@@ -1716,7 +1716,7 @@ export class Style extends Evented<StyleEventType> {
       tilePyramid.setEventedParent(null);
       tilePyramid.onRemove();
     }
-    this.tilePyramids = {};
+    this.tilePyramids = Object.create(null);
 
     // Destroy images and clear images
     if (this.images) {

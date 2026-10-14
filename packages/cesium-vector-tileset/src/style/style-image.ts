@@ -184,7 +184,7 @@ export function renderStyleImage(image: MaterializedStyleImage): boolean {
   if (userImage?.render) {
     const updated = userImage.render();
     if (updated) {
-      image.data.replace(new Uint8Array(userImage.data.buffer));
+      image.data.replace(userImage.data);
       return true;
     }
   }

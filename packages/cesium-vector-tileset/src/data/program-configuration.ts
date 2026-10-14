@@ -20,6 +20,7 @@ import { Math as CesiumMath } from 'cesium';
 import { EvaluationParameters } from '../style/evaluation-parameters';
 import { PossiblyEvaluatedPropertyValue } from '../style/properties';
 import { DashLayoutArray, PatternLayoutArray, StructArrayLayout1f4, StructArrayLayout2f8, StructArrayLayout4f16 } from './array-types.g';
+import { numericEvaluationFeature } from './evaluation-feature';
 
 function packColor(color: Color): [number, number] {
   return [
@@ -393,8 +394,10 @@ export class ProgramConfiguration {
   }
 
   populatePaintArrays(newLength: number, feature: Feature, options: PaintOptions): void {
+    let evaluated: Feature | undefined;
     for (const property in this.binders) {
-      this.binders[property].populatePaintArray(newLength, feature, options);
+      evaluated ??= numericEvaluationFeature(feature);
+      this.binders[property].populatePaintArray(newLength, evaluated, options);
     }
   }
 
@@ -411,6 +414,7 @@ export class ProgramConfiguration {
 
       for (const pos of positions) {
         const feature = lookup(pos.index);
+        let evaluated: Feature | undefined;
 
         for (const property in this.binders) {
           const binder = this.binders[property];
@@ -419,7 +423,8 @@ export class ProgramConfiguration {
             const value = getPaintProperty(layer, property);
             if (value instanceof PossiblyEvaluatedPropertyValue && value.value.kind !== 'constant') {
               binder.expression = value.value;
-              binder.updatePaintArray(pos.start, pos.end, feature, fs.state, { ...options, formattedSection: pos.formattedSection });
+              evaluated ??= numericEvaluationFeature(feature);
+              binder.updatePaintArray(pos.start, pos.end, evaluated, fs.state, { ...options, formattedSection: pos.formattedSection });
               dirty = true;
             }
           }
@@ -441,7 +446,7 @@ export class ProgramConfigurationSet<Layer extends TypedStyleLayer> {
   _featureRangesById?: Map<string, FeaturePaintRange[]>;
 
   constructor(layers: readonly Layer[], zoom: number, filterProperties: (_: string) => boolean = () => true) {
-    this.programConfigurations = {};
+    this.programConfigurations = Object.create(null);
     for (const layer of layers) {
       this.programConfigurations[layer.id] = new ProgramConfiguration(layer, zoom, filterProperties);
     }

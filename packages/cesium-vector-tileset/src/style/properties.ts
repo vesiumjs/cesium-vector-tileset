@@ -2,6 +2,7 @@ import type { CompositeExpression, Feature, FeatureState, FormattedSection, ICan
 import type { TransferRegistry } from '../worker/transfer-registry';
 import { interpolates, normalizePropertyExpression } from '@maplibre/maplibre-gl-style-spec';
 import { Math as CesiumMath, EasingFunction } from 'cesium';
+import { numericEvaluationFeature } from '../data/evaluation-feature';
 import { warnOnce } from '../util/errors';
 import { clone } from '../util/objects';
 
@@ -204,19 +205,19 @@ export class Transitionable<Props> {
   }
 
   transitioned(parameters: TransitionParameters, prior: Transitioning<Props>): Transitioning<Props> {
-    const result = new Transitioning(this._properties);
+    const values = Object.create(this._properties.defaultTransitioningPropertyValues) as Transitioning<Props>['_values'];
     for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
-      result._values[property] = this._values[property].transitioned(parameters, prior._values[property]);
+      values[property] = this._values[property].transitioned(parameters, prior._values[property]);
     }
-    return result;
+    return new Transitioning(this._properties, values);
   }
 
   untransitioned(): Transitioning<Props> {
-    const result = new Transitioning(this._properties);
+    const values = Object.create(this._properties.defaultTransitioningPropertyValues) as Transitioning<Props>['_values'];
     for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
-      result._values[property] = this._values[property].untransitioned();
+      values[property] = this._values[property].untransitioned();
     }
-    return result;
+    return new Transitioning(this._properties, values);
   }
 }
 
@@ -245,6 +246,13 @@ class TransitioningPropertyValue<T, R> {
     }
   }
 
+  snapshot(): TransitioningPropertyValue<T, R> {
+    return Object.assign(Object.create(Object.getPrototypeOf(this)), this, {
+      value: new PropertyValue(this.property, clone(this.value.value), 'held-paint', clone(this.value.expression._globalState)),
+      prior: this.prior?.snapshot(),
+    });
+  }
+
   possiblyEvaluate(
     parameters: EvaluationParameters,
     canonical?: ICanonicalTileID,
@@ -257,7 +265,7 @@ class TransitioningPropertyValue<T, R> {
       // No prior value.
       return finalValue;
     }
-    else if (now > this.end) {
+    else if (now >= this.end) {
       // Transition from prior value is now complete.
       this.prior = undefined;
       return finalValue;
@@ -291,9 +299,29 @@ export class Transitioning<Props> {
   _properties: Properties<Props>;
   _values: { [K in keyof Props]: TransitioningPropertyValue<unknown, unknown> };
 
-  constructor(properties: Properties<Props>) {
+  private readonly _propertyNames: Array<keyof Props>;
+
+  private readonly _transitions: Array<TransitioningPropertyValue<unknown, unknown>>;
+
+  constructor(properties: Properties<Props>, values: Transitioning<Props>['_values']) {
     this._properties = properties;
-    this._values = (Object.create(properties.defaultTransitioningPropertyValues));
+    this._values = values;
+    // A generation's own paint keys are fixed; defaults stay on the prototype.
+    this._propertyNames = Object.keys(values) as Array<keyof Props>;
+    this._transitions = [];
+    for (const property of this._propertyNames) {
+      const value = values[property];
+      if (value.prior)
+        this._transitions.push(value);
+    }
+  }
+
+  /** Own selected expression trees and globals while reusing transition evaluation. */
+  snapshot(propertyNames: readonly (keyof Props)[]): Transitioning<Props> {
+    const values = Object.create(this._properties.defaultTransitioningPropertyValues) as Transitioning<Props>['_values'];
+    for (const property of propertyNames)
+      values[property] = this._values[property].snapshot();
+    return new Transitioning(this._properties, values);
   }
 
   possiblyEvaluate(
@@ -302,18 +330,22 @@ export class Transitioning<Props> {
     availableImages?: string[],
   ): PossiblyEvaluated<Props, any> {
     const result = new PossiblyEvaluated<Props, Record<keyof Props, unknown>>(this._properties);
-    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
+    for (const property of this._propertyNames) {
       result._values[property] = this._values[property].possiblyEvaluate(parameters, canonical, availableImages);
     }
     return result;
   }
 
   hasTransition(): boolean {
-    for (const property of (Object.keys(this._values) as Array<keyof Props>)) {
-      if (this._values[property].prior) {
+    if (this._transitions.length === 0)
+      return false;
+    for (const value of this._transitions) {
+      if (value.prior) {
         return true;
       }
     }
+    // Evaluation can expire or snap a prior, but never creates one in-place.
+    this._transitions.length = 0;
     return false;
   }
 }
@@ -455,7 +487,7 @@ export class PossiblyEvaluatedPropertyValue<T> {
     canonical?: ICanonicalTileID,
     availableImages?: string[],
   ): T {
-    return this.property.evaluate(this.value, this.parameters, feature, featureState, canonical, availableImages);
+    return this.property.evaluate(this.value, this.parameters, this.value.kind === 'constant' ? feature : numericEvaluationFeature(feature), featureState, canonical, availableImages);
   }
 }
 

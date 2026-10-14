@@ -43,8 +43,8 @@ export abstract class StyleLayer<
   type: LayerSpecification['type'];
   source?: string;
   sourceLayer?: string;
-  minzoom: number;
-  maxzoom: number;
+  minzoom?: number;
+  maxzoom?: number;
   filter?: FilterSpecification;
   visibility: VisibilitySpecification;
 
@@ -85,8 +85,8 @@ export abstract class StyleLayer<
     this._evaluatedVisibility = this._visibilityExpression.evaluate();
 
     this.metadata = layer.metadata;
-    this.minzoom = layer.minzoom ?? 0;
-    this.maxzoom = layer.maxzoom ?? 24;
+    this.minzoom = layer.minzoom;
+    this.maxzoom = layer.maxzoom;
 
     if (layer.type !== 'background') {
       this.source = layer.source;
@@ -278,7 +278,7 @@ export abstract class StyleLayer<
     return false;
   }
 
-  isHidden(zoom: number = this.minzoom, roundMinZoom: boolean = false): boolean {
+  isHidden(zoom: number = this.minzoom ?? 0, roundMinZoom: boolean = false): boolean {
     if (this.minzoom && zoom < (roundMinZoom ? Math.floor(this.minzoom) : this.minzoom))
       return true;
     if (this.maxzoom && zoom >= this.maxzoom)
@@ -320,8 +320,8 @@ export abstract class StyleLayer<
       'source': this.source,
       'source-layer': this.sourceLayer,
       'metadata': this.metadata,
-      'minzoom': this.minzoom === 0 ? undefined : this.minzoom,
-      'maxzoom': this.maxzoom === 24 ? undefined : this.maxzoom,
+      'minzoom': this.minzoom,
+      'maxzoom': this.maxzoom,
       'filter': this.filter,
       'layout': this._unevaluatedLayout?.serialize(),
       'paint': this._transitionablePaint.serialize(),

@@ -11,23 +11,24 @@ export class StyleLayerIndex {
     [source: string]: {
       [sourceLayer: string]: StyleLayer[][];
     };
-  } = {};
+  } = Object.create(null);
 
   keyCache: { [source: string]: string };
 
-  _layerConfigs: LayerConfigs = {};
-  _layers: { [_: string]: StyleLayer } = {};
+  _layerConfigs: LayerConfigs = Object.create(null);
+  _layers: { [_: string]: StyleLayer } = Object.create(null);
 
   constructor(layerConfigs?: LayerSpecification[] | null, globalState?: Record<string, any>) {
-    this.keyCache = {};
+    this.keyCache = Object.create(null);
     if (layerConfigs) {
       this.replace(layerConfigs, globalState);
     }
   }
 
   replace(layerConfigs: LayerSpecification[], globalState?: Record<string, any>): void {
-    this._layerConfigs = {};
-    this._layers = {};
+    this.keyCache = Object.create(null);
+    this._layerConfigs = Object.create(null);
+    this._layers = Object.create(null);
     this.update(layerConfigs, [], globalState);
   }
 
@@ -46,7 +47,7 @@ export class StyleLayerIndex {
       delete this._layers[id];
     }
 
-    this.familiesBySource = {};
+    this.familiesBySource = Object.create(null);
 
     const groups = groupByLayout(Object.values(this._layerConfigs), this.keyCache);
 
@@ -60,7 +61,7 @@ export class StyleLayerIndex {
 
       const sourceId = layer.source || '';
       let sourceGroup = this.familiesBySource[sourceId];
-      sourceGroup ||= this.familiesBySource[sourceId] = {};
+      sourceGroup ||= this.familiesBySource[sourceId] = Object.create(null);
 
       const sourceLayerId = layer.sourceLayer || GEOJSON_TILE_LAYER_NAME;
       let sourceLayerFamilies = sourceGroup[sourceLayerId];
