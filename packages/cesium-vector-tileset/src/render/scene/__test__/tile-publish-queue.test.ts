@@ -106,7 +106,7 @@ function fixture(publish?: (result: TilePublishResult) => void) {
     symbolLayers: () => [...layers.values()].filter(layer => layer.type === 'symbol' && !layer.isHidden(style.z)),
     patternLayers: () => [...layers.values()].filter(layer => isPatternStyleLayer(layer) && !layer.isHidden(style.z)),
     rasterLayers: () => [],
-    rasterSource: () => ({ dynamic: false }),
+    rasterSource: () => ({ identity: {}, dynamic: false }),
     isRenderable: () => true,
     publish: (result) => {
       published.push(result);
@@ -153,7 +153,7 @@ function nativeSymbols(state: ReturnType<typeof fixture>) {
     tex: new Float32Array(8),
     sizes: new Float32Array(4).fill(512),
     sizesMax: new Float32Array(4).fill(128),
-    sizeZooms: new Float32Array(8),
+    sizeData: { kind: 'source' },
     colors: new Float32Array(16),
     halos: new Float32Array(16),
     dynamics: new Float32Array(12),
@@ -177,7 +177,7 @@ function nativeSymbols(state: ReturnType<typeof fixture>) {
       tileId: build.input.tileId,
       layerId: 'labels',
       geometry: batch,
-      iconAtlas: { canvas: document.createElement('canvas'), width: 1, height: 1, shareKey: 'prepared-icons' },
+      iconAtlas: { image: document.createElement('canvas'), width: 1, height: 1, shareKey: 'prepared-icons' },
       textColor: Color.WHITE,
       iconColor: Color.WHITE,
       pixelRatio: 1,

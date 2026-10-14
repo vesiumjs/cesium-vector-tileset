@@ -1,4 +1,5 @@
 import type { Bucket } from '../../data/bucket';
+import type { StyleLayer } from '../../style/style-layer';
 import type { DashMaterial } from '../line/dash-material';
 import type { LineBuildState } from '../line/line-renderer';
 import type { Budget } from '../scene/frame-budget';
@@ -8,9 +9,6 @@ import type { TilePickObject } from './tile-conversion';
 import type { VectorCollection, VectorTileRecord } from './vector-tile-renderer';
 import {
   BlendOption,
-  BufferPoint,
-  BufferPointCollection,
-  BufferPointMaterial,
   BufferPolygon,
   BufferPolygonCollection,
   BufferPolygonMaterial,
@@ -22,17 +20,19 @@ import {
 } from 'cesium';
 import { CircleBucket, FillBucket, FillExtrusionBucket } from '../../data/bucket-runtime';
 import { samePaintZoom } from '../../style/render-transition';
+import { CircleCollection } from '../circle/circle-collection';
+import { fillCameraPaintOwners } from '../geometry/fill-camera-paint';
 import { beginLineBuild, canResumeLineBuild, canUpdateLinePaint, captureUniformLinePaint, commitLineBuild, discardLineBuild, stepLineBuild, updateLinePaint, updateUniformLinePaint } from '../line/line-renderer';
 import { drawBatchForOwner } from '../scene/draw-batch';
 import { UNBOUNDED_BUDGET } from '../scene/frame-budget';
 import { deferredExtrusionLayers } from './extrusion-primitive';
-import { circlePaintVisible, circleStyleForFeature, constantValue, fillStyleForFeature, layerFor, paintRevision } from './feature-attributes';
+import { constantValue, fillStyleForFeature, layerFor, paintRevision } from './feature-attributes';
 import { buildExtrusionCollection } from './vector-tile-builder';
 
 const colorValue = new Uint8Array(4);
 const showValue = new Uint8Array(1);
 
-/** Fill and circle paint use a zoom-step cache; line uniforms follow continuous zoom. */
+/** Fill paint uses a zoom-step cache; line and circle paint follow continuous zoom. */
 export const PAINT_ZOOM_STEP = 1 / 8;
 
 /**
@@ -59,6 +59,7 @@ export interface VectorPaintPreparation {
 
 export interface VectorPaintFrame {
   zoom: number;
+  bearing?: number;
   /** Identifies one StyleEvaluation.evaluate shared by update and upload preparation. */
   evaluationId?: number;
   force?: boolean;
@@ -153,7 +154,7 @@ interface VectorPaintOptions {
   ) => void;
 }
 
-export type VectorCameraPaintSnapshot = ReadonlyMap<PrimitiveCollection, (zoom: number) => void>;
+export type VectorCameraPaintSnapshot = ReadonlyMap<VectorCollection, (zoom: number, bearing?: number) => void>;
 
 /** Evaluates paint and rebuilds affected geometry; the store applies ownership changes. */
 export class VectorPaintUpdater {
@@ -171,9 +172,7 @@ export class VectorPaintUpdater {
 
   private _polygonMaterial?: BufferPolygonMaterial;
 
-  private _pointMaterial?: BufferPointMaterial;
-
-  private readonly _heldCameraPaint = new Map<PrimitiveCollection, { update: (zoom: number) => void; zoom?: number }>();
+  private readonly _heldCameraPaint = new Map<VectorCollection, { update: (zoom: number, bearing?: number) => void; zoom?: number; bearing?: number }>();
   needsContinuation = false;
 
   constructor(options: VectorPaintOptions) {
@@ -187,13 +186,53 @@ export class VectorPaintUpdater {
 
   /** Capture before mutation; buckets are bindings to mutable live StyleLayers. */
   captureLivePaint(): VectorCameraPaintSnapshot {
-    const snapshot = new Map<PrimitiveCollection, (zoom: number) => void>();
+    const snapshot = new Map<VectorCollection, (zoom: number, bearing?: number) => void>();
     for (const [, record] of this._options.records()) {
       if (record.paint.frozen)
         continue;
       const lines = record.collections.get('lines');
       if (lines instanceof PrimitiveCollection)
         snapshot.set(lines, captureUniformLinePaint(lines, record.buckets));
+      const extrusions = record.collections.get('extrusions');
+      if (extrusions instanceof PrimitiveCollection) {
+        const updates: Array<(zoom: number, bearing?: number) => void> = [];
+        for (let index = 0; index < extrusions.length; index++) {
+          const primitive = extrusions.get(index) as ExtrusionPrimitive;
+          const layerId = drawBatchForOwner(primitive)!.layerId;
+          const bucket = record.buckets[layerId] as FillExtrusionBucket;
+          updates.push(primitive.captureCameraPaint(bucket, layerId));
+        }
+        snapshot.set(extrusions, (zoom, bearing) => {
+          for (const update of updates) update(zoom, bearing);
+        });
+      }
+      for (const collection of record.collections.values()) {
+        const fillOwners = fillCameraPaintOwners.get(collection);
+        if (fillOwners?.length) {
+          const updates: Array<(zoom: number, bearing?: number) => void> = [];
+          const previous = snapshot.get(collection);
+          if (previous)
+            updates.push(previous);
+          for (const { layerId, paint } of fillOwners) {
+            const bucket = record.buckets[layerId];
+            if (bucket instanceof FillBucket)
+              updates.push(paint.captureCameraPaint(layerFor(bucket, layerId)));
+          }
+          if (updates.length) {
+            snapshot.set(collection, (zoom, bearing) => {
+              for (const update of updates) update(zoom, bearing);
+            });
+          }
+        }
+        if (!(collection instanceof CircleCollection))
+          continue;
+        const bucket = record.buckets[collection.layerId];
+        if (!(bucket instanceof CircleBucket))
+          continue;
+        const paint = collection.captureCameraPaint(bucket);
+        if (paint)
+          snapshot.set(collection, paint);
+      }
     }
     return snapshot;
   }
@@ -219,23 +258,35 @@ export class VectorPaintUpdater {
   /** Mandatory camera paint does not consume or complete deferred feature work. */
   updateLivePaint(frame: VectorPaintFrame): void {
     // Surface publication can delete the renderer record while SceneCollections
-    // still draws its old line owner. Ownership ends with collection destruction.
+    // still draws its old owner. Ownership ends with collection destruction.
     for (const [collection, paint] of this._heldCameraPaint) {
       if (collection.isDestroyed()) {
         this._heldCameraPaint.delete(collection);
       }
-      else if (paint.zoom !== frame.zoom) {
-        paint.update(frame.zoom);
+      else if (paint.zoom !== frame.zoom || paint.bearing !== frame.bearing) {
+        paint.update(frame.zoom, frame.bearing);
         paint.zoom = frame.zoom;
+        paint.bearing = frame.bearing;
       }
     }
     for (const [, record] of this._options.records()) {
       if (record.paint.frozen) {
         continue;
       }
+      this._updateExtrusionCameraPaint(record, frame);
+      this._updateFillCameraPaint(record, frame);
       const lines = record.collections.get('lines');
       if (lines instanceof PrimitiveCollection) {
         updateUniformLinePaint(lines, record.buckets, frame.zoom);
+      }
+      for (const collection of record.collections.values()) {
+        if (!(collection instanceof CircleCollection))
+          continue;
+        const bucket = record.buckets[collection.layerId];
+        if (bucket instanceof CircleBucket) {
+          collection.updatePolicy(bucket, frame.pixelRatio ?? this._options.pixelRatio());
+          collection.updateCamera(frame.zoom, frame.bearing);
+        }
       }
     }
   }
@@ -303,6 +354,19 @@ export class VectorPaintUpdater {
   /**
    * @internal
    */
+  private _updateFillCameraPaint(record: VectorTileRecord, frame: VectorPaintFrame): void {
+    for (const collection of record.collections.values()) {
+      const owners = fillCameraPaintOwners.get(collection);
+      if (!owners)
+        continue;
+      for (const { layerId, paint } of owners) {
+        const bucket = record.buckets[layerId];
+        if (bucket instanceof FillBucket)
+          paint.updateCameraPaint(layerFor(bucket, layerId), frame.zoom, frame.bearing);
+      }
+    }
+  }
+
   private _updateRecord(tileId: string, record: VectorTileRecord, frame: VectorPaintFrame, replacements: VectorCollectionReplacement[], budget?: Budget): boolean {
     const {
       zoom,
@@ -314,6 +378,17 @@ export class VectorPaintUpdater {
     } = frame;
     if (record.paint.frozen) {
       return true;
+    }
+    this._updateExtrusionCameraPaint(record, frame);
+    this._updateFillCameraPaint(record, frame);
+    for (const collection of record.collections.values()) {
+      if (!(collection instanceof CircleCollection))
+        continue;
+      const bucket = record.buckets[collection.layerId];
+      if (bucket instanceof CircleBucket) {
+        collection.updatePolicy(bucket, pixelRatio);
+        collection.updateCamera(zoom, frame.bearing);
+      }
     }
     const styleChanged = record.paint.lastStyleRevision !== styleRevision;
     const zoomChanged = record.paint.lastZoom !== zoom;
@@ -447,11 +522,9 @@ export class VectorPaintUpdater {
     else {
       if (!useStyleCache) {
         const polygonMaterial = this._polygonMaterial ??= new BufferPolygonMaterial();
-        const pointMaterial = this._pointMaterial ??= new BufferPointMaterial();
         // Native wrappers retain their collection and its CPU buffers after get().
         // Reuse them within this walk without keeping an evicted owner alive.
         const polygon = new BufferPolygon();
-        const point = new BufferPoint();
         for (const collection of record.collections.values()) {
           if (!(collection instanceof BufferPolygonCollection)) {
             continue;
@@ -478,38 +551,15 @@ export class VectorPaintUpdater {
           }
           collection.blendOption = opaque ? BlendOption.OPAQUE : BlendOption.TRANSLUCENT;
         }
-
-        for (const collection of record.collections.values()) {
-          if (!(collection instanceof BufferPointCollection)) {
-            continue;
-          }
-          for (let index = 0; index < collection.primitiveCount; index++) {
-            collection.get(index, point);
-            const { layerId, featureIndex } = point.pickObject as TilePickObject;
-            const bucket = record.buckets[layerId];
-            if (!(bucket instanceof CircleBucket)) {
-              continue;
-            }
-            const style = circleStyleForFeature(bucket, featureIndex, layerId, zoom);
-            const currentMaterial = point.getMaterial(pointMaterial) as BufferPointMaterial;
-            const outlineWidth = packedByte(style.outlineWidthPx);
-            const size = packedByte(style.sizePx, 1);
-            if (!samePackedColor(currentMaterial.color, style.color)
-              || !samePackedColor(currentMaterial.outlineColor, style.outlineColor)
-              || currentMaterial.outlineWidth !== outlineWidth
-              || currentMaterial.size !== size) {
-              Color.clone(style.color, currentMaterial.color);
-              Color.clone(style.outlineColor, currentMaterial.outlineColor);
-              currentMaterial.outlineWidth = outlineWidth;
-              currentMaterial.size = size;
-              point.setMaterial(currentMaterial);
-            }
-            const show = style.sizePx > 0 && circlePaintVisible(style.color, style.outlineColor, outlineWidth);
-            if (point.show !== show) {
-              point.show = show;
-            }
-          }
-        }
+      }
+    }
+    for (const collection of record.collections.values()) {
+      if (!(collection instanceof CircleCollection))
+        continue;
+      const bucket = record.buckets[collection.layerId];
+      if (bucket instanceof CircleBucket && (forceRecord || styleChanged || paintChanged || pixelRatioChanged
+        || (zoomChanged && collection.needsZoomPaint(bucket)))) {
+        collection.updatePaint(bucket, zoom);
       }
     }
     this._refreshExtrusions(
@@ -529,6 +579,17 @@ export class VectorPaintUpdater {
     record.paint.lastLightRevision = lightRevision;
 
     return true;
+  }
+
+  private _updateExtrusionCameraPaint(record: VectorTileRecord, frame: VectorPaintFrame): void {
+    const extrusions = record.collections.get('extrusions');
+    if (!(extrusions instanceof PrimitiveCollection))
+      return;
+    for (let index = 0; index < extrusions.length; index++) {
+      const primitive = extrusions.get(index) as ExtrusionPrimitive;
+      const layerId = drawBatchForOwner(primitive)!.layerId;
+      primitive.updateCameraPaint(record.buckets[layerId] as FillExtrusionBucket, layerId, frame.zoom, frame.bearing);
+    }
   }
 
   /**
@@ -599,14 +660,6 @@ export class VectorPaintUpdater {
   }
 }
 
-function sameColor(a: Color | undefined, b: Color): boolean {
-  return !!a
-    && a.red === b.red
-    && a.green === b.green
-    && a.blue === b.blue
-    && a.alpha === b.alpha;
-}
-
 function packedColorByte(value: number): number {
   const clamped = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
   return clamped === 1 ? 255 : Math.floor(clamped * 256);
@@ -620,15 +673,6 @@ function samePackedColor(a: Color | undefined, b: Color): boolean {
     && packedColorByte(a.alpha) === packedColorByte(b.alpha);
 }
 
-function packedByte(value: number, minimum = 0): number {
-  const clamped = Math.max(minimum, Math.min(255, Number.isFinite(value) ? value : minimum));
-  return Math.floor(clamped);
-}
-
-interface LayerTransitionablePaintInternals {
-  value?: { expression?: { kind?: string } };
-}
-
 /**
  * A constant paint fed by a zoom (camera) expression changes value on every
  * zoom frame because Style.recalculate re-evaluates the expression at the
@@ -636,17 +680,11 @@ interface LayerTransitionablePaintInternals {
  * ProgramConfiguration.hasCompositeProperties() (they produce uniform, not
  * vertex, binders), so the zoom walk must be kept alive for their layers too.
  */
-function layerHasZoomDependentConstantPaint(layer: unknown): boolean {
-  const transitionable = (layer as {
-    _transitionablePaint?: { _values?: Record<string, LayerTransitionablePaintInternals> };
-  })._transitionablePaint;
-  if (!transitionable?._values) {
-    return false;
-  }
-  for (const property in transitionable._values) {
-    if (transitionable._values[property].value?.expression?.kind === 'camera') {
+function layerHasZoomDependentConstantPaint(layer: StyleLayer): boolean {
+  const values = layer._transitionablePaint._values;
+  for (const property in values) {
+    if (values[property].value.expression.kind === 'camera')
       return true;
-    }
   }
   return false;
 }
@@ -656,7 +694,7 @@ export function hasZoomDependentPaint(buckets: readonly Bucket[]): boolean {
 }
 
 function hasZoomDependentSurfacePaint(buckets: readonly Bucket[]): boolean {
-  return buckets.some(bucket => (bucket instanceof FillBucket || bucket instanceof CircleBucket) && bucketHasZoomDependentPaint(bucket));
+  return buckets.some(bucket => bucket instanceof FillBucket && bucketHasZoomDependentPaint(bucket));
 }
 
 function bucketHasZoomDependentPaint(bucket: Bucket): boolean {
@@ -733,32 +771,6 @@ function updateStandardRenderEntries(record: VectorTileRecord, zoom: number): vo
         attributes.show = ShowGeometryInstanceAttribute.toValue(show, showValue);
         entry.show = show;
       }
-    }
-  }
-  for (const point of standard.points) {
-    const { layerId, featureIndex } = point.id as TilePickObject;
-    const bucket = record.buckets[layerId];
-    if (!(bucket instanceof CircleBucket)) {
-      continue;
-    }
-    const style = circleStyleForFeature(bucket, featureIndex, layerId, zoom);
-    if (!sameColor(point.color, style.color)) {
-      point.color = style.color;
-    }
-    if (!sameColor(point.outlineColor, style.outlineColor)) {
-      point.outlineColor = style.outlineColor;
-    }
-    const outlineWidth = Math.max(0, Math.min(255, style.outlineWidthPx));
-    if (point.outlineWidth !== outlineWidth) {
-      point.outlineWidth = outlineWidth;
-    }
-    const pixelSize = Math.max(1, Math.min(255, style.sizePx));
-    if (point.pixelSize !== pixelSize) {
-      point.pixelSize = pixelSize;
-    }
-    const show = style.sizePx > 0 && circlePaintVisible(style.color, style.outlineColor, outlineWidth);
-    if (point.show !== show) {
-      point.show = show;
     }
   }
 }

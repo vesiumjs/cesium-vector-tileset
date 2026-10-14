@@ -35,11 +35,16 @@ interface SceneTile {
   previousGeneration?: TileGeneration;
 }
 
-interface SourceReplacement {
+export interface RetainedSourceStyle {
+  readonly retained: ReadonlySet<string>;
+  readonly layerOrder: ReadonlyMap<string, number>;
+  readonly firstExtrusionLayerId?: string;
+}
+
+interface SourceReplacement extends RetainedSourceStyle {
   retained: Set<string>;
   staged: Set<string>;
   hiddenTiles: Set<string>;
-  layerOrder: ReadonlyMap<string, number>;
 }
 
 const EMPTY_TILES: ReadonlySet<string> = new Set();
@@ -158,13 +163,13 @@ export class TileResidency {
   }
 
   /** Keep the visible style while newly named sources load their replacements. */
-  reconcileSources(sourceIds: ReadonlySet<string>, addedSourceIds: ReadonlySet<string> = EMPTY_TILES, layerOrder: ReadonlyMap<string, number> = new Map()): void {
+  reconcileSources(sourceIds: ReadonlySet<string>, addedSourceIds: ReadonlySet<string> = EMPTY_TILES, layerOrder: ReadonlyMap<string, number> = new Map(), firstExtrusionLayerId?: string): void {
     let replacement = this._sourceReplacement;
     if (sourceIds.size === 0) {
       replacement = undefined;
     }
     else if (!replacement && addedSourceIds.size > 0) {
-      replacement = { retained: new Set(), staged: new Set(), hiddenTiles: new Set(), layerOrder };
+      replacement = { retained: new Set(), staged: new Set(), hiddenTiles: new Set(), layerOrder, firstExtrusionLayerId };
     }
     const revived = new Set<string>();
     if (replacement) {
@@ -208,8 +213,8 @@ export class TileResidency {
     return this._sourceReplacement?.hiddenTiles ?? EMPTY_TILES;
   }
 
-  get retainedLayerOrder(): ReadonlyMap<string, number> | undefined {
-    return this._sourceReplacement?.layerOrder;
+  get retainedStyle(): RetainedSourceStyle | undefined {
+    return this._sourceReplacement;
   }
 
   /** Called after rendering the last old-style frame once all current uploads settle. */
@@ -802,7 +807,7 @@ export class TileResidency {
    * frames later through the publish queue (MapLibre uploads synchronously
    * in the same frame, so it never sees this gap). A leaving tile is held
    * while a renderable tile covering it in either direction (child on
-   * zoom-in, parent on zoom-out) carries vector buckets, has no vector
+   * zoom-in, parent on zoom-out) carries buckets or raster texture data, has no surface
    * collections ready for the scene yet: either its publish job is in flight
    * or its new vector or symbol collections still need their first GPU update.
    * A settled collection-less replacement blocks nothing.
@@ -821,7 +826,7 @@ export class TileResidency {
     const unready: Array<Tile['tileID']> = [];
     for (const replacementKey of renderableIds) {
       const replacement = tilePyramid.getTileByID(replacementKey);
-      if (!replacement || Object.keys(replacement.buckets).length === 0) {
+      if (!replacement || (Object.keys(replacement.buckets).length === 0 && !replacement.textureData)) {
         continue;
       }
       const replacementId = renderTileId(sourceId, replacementKey);

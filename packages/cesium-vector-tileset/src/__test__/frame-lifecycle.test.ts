@@ -1,4 +1,5 @@
 import type { RenderFrameState } from '../render/scene/render-frame';
+import type { SourceRenderSync } from '../render/scene/source-render-sync';
 import type { StyleEvaluation } from '../render/scene/style-evaluation';
 import type { TilePublishQueue } from '../render/scene/tile-publish-queue';
 import type { TileResidency } from '../render/scene/tile-residency';
@@ -14,7 +15,7 @@ import { FillBucket } from '../data/bucket/fill-bucket';
 import { cameraFrame } from '../render/scene/__test__/camera-helper';
 import { drawBatchForOwner, registerDrawLayers } from '../render/scene/draw-batch';
 import { UNBOUNDED_BUDGET } from '../render/scene/frame-budget';
-import { zoomForFrame } from '../render/scene/render-frame';
+import { sourceTileLodForFrame, zoomForFrame } from '../render/scene/render-frame';
 import { SceneCollections } from '../render/scene/scene-collections';
 import { TileGeneration } from '../render/scene/tile-generation';
 import { buildVectorTile } from '../render/vector/__test__/vector-tile-helper';
@@ -34,11 +35,12 @@ function frame(vectorProvider?: VectorDrapingProvider): RenderFrameState {
 }
 
 /** Real Root coverage/paint owners; only the already uploaded GPU boundary is supplied. */
-async function uploadedWaterLifecycle() {
+async function uploadedWaterLifecycle(tileID = new OverscaledTileID(13, 0, 13, 4093, 2724), heightScale = 1) {
   const mode = SceneMode.SCENE3D;
   vi.spyOn(performance, 'now').mockReturnValue(0);
   const makeStyle = (color = '#9ebdff') => ({
     version: 8 as const,
+    transition: { duration: 0, delay: 0 },
     sources: { world: { type: 'vector' as const, tiles: ['http://example.invalid/{z}/{x}/{y}.pbf'] } },
     layers: [{ 'id': 'water', 'type': 'fill' as const, 'source': 'world', 'source-layer': 'water', 'paint': { 'fill-color': color, 'fill-antialias': false, 'fill-color-transition': { duration: 0, delay: 0 } } }],
   });
@@ -48,7 +50,6 @@ async function uploadedWaterLifecycle() {
   const pyramid = internals.style.tilePyramids.world;
   pyramid._sourceLoaded = true;
   const load = vi.spyOn(pyramid.getSource(), 'loadTile').mockImplementation(() => new Promise(() => {}));
-  const tileID = new OverscaledTileID(13, 0, 13, 4093, 2724);
   const { z, x, y } = tileID.canonical;
   const rectangle = new WebMercatorTilingScheme().tileXYToRectangle(x, y, z);
   const center = Rectangle.center(rectangle);
@@ -68,14 +69,15 @@ async function uploadedWaterLifecycle() {
     globe: { show: true, tilesLoaded: true, _surface: { _tilesToRender: [{ level: z, x, y, rectangle }] } },
   });
   const position = (height: number, longitudeOffset = 0) => {
-    state.camera.setView({ destination: Cartesian3.fromRadians(center.longitude + longitudeOffset, center.latitude, height), orientation: { pitch: -Math.PI / 2 } });
+    state.camera.setView({ destination: Cartesian3.fromRadians(center.longitude + longitudeOffset, center.latitude, height * heightScale), orientation: { pitch: -Math.PI / 2 } });
     state.cullingVolume = state.camera.frustum.computeCullingVolume(state.camera.positionWC, state.camera.directionWC, state.camera.upWC);
   };
   position(3000);
-  internals.evaluation.evaluate(zoomForFrame(pyramid, state, new WeakMap())!.styleZoom);
+  const styleZoom = zoomForFrame(pyramid, state, new WeakMap())!.styleZoom;
+  internals.evaluation.evaluate(styleZoom);
   const layer = internals.style.getLayer('water') as FillStyleLayer;
-  layer.recalculate(new EvaluationParameters(14), []);
-  const bucket = new FillBucket({ layers: [layer], zoom: 13 } as never);
+  layer.recalculate(new EvaluationParameters(styleZoom), []);
+  const bucket = new FillBucket({ layers: [layer], zoom: z } as never);
   bucket.addFeature({} as never, [[new Point(0, 0), new Point(4096, 0), new Point(4096, 4096), new Point(0, 4096)]], 0, tileID, {});
   const data = new Tile(tileID, 512);
   data.state = 'loaded';
@@ -83,7 +85,7 @@ async function uploadedWaterLifecycle() {
   data.buckets.water = bucket;
   pyramid._activeTiles.setTile(tileID.key, data);
   const tileId = `world/${tileID.key}`;
-  buildVectorTile(internals.vector, { mode, tileId, tileID, buckets: data.buckets, styleZoom: 14, styleRevision: internals.style.styleRevision });
+  buildVectorTile(internals.vector, { mode, tileId, tileID, buckets: data.buckets, styleZoom, styleRevision: internals.style.styleRevision });
   const [surface] = internals.vector.getTileCollections(tileId);
   tileset.add(surface);
   const native = Cesium as unknown as { DrawCommand: new (options: object) => NonNullable<RenderFrameState['commandList']>[number]; Pass: { OPAQUE: number } };
@@ -187,10 +189,10 @@ async function uploadedWaterLifecycle() {
         break;
       expect(renderScene.render().renderError).toBeUndefined();
     }
-    // The settled camera wants the four z14 tiles under this z13 rectangle and
+    // The settled camera wants the four children under this rectangle and
     // dispatches them once, keeping the uploaded ancestor as their fallback.
     expect(load.mock.calls.map(([tile]) => tile.tileID.key).sort())
-      .toEqual(tileID.children(14).map(id => id.key).sort());
+      .toEqual(tileID.children(z + 1).map(id => id.key).sort());
     // Past that first dispatch, no later idle tick requests anything.
     load.mockClear();
     quiet();
@@ -212,6 +214,7 @@ async function uploadedWaterLifecycle() {
     surface,
     upload,
     requestRender,
+    pyramid,
     makeStyle,
     onDraw: (callback: () => void) => {
       onDraw = callback;
@@ -220,6 +223,46 @@ async function uploadedWaterLifecycle() {
 }
 
 describe('primitive frame lifecycle', () => {
+  it('requests cleanup for raster work discovered after source sync without recalculating stable paint', async () => {
+    const owner = await uploadedWaterLifecycle();
+    const internals = (owner.tileset as unknown as { _renderer: { sourceSync: SourceRenderSync; style: Style } })._renderer;
+    let pending = false;
+    let first = true;
+    const updateSource = internals.sourceSync.updateSource.bind(internals.sourceSync);
+    // The real full-frame consumer discovers this state only after source
+    // sync. The cross-walk deadline algorithm is exercised in tile-fade tests;
+    // here no active raster material can supply a fractional-opacity wake.
+    vi.spyOn(owner.pyramid, 'hasRasterTransition').mockImplementation(() => pending);
+    vi.spyOn(internals.sourceSync, 'updateSource').mockImplementation((...args) => {
+      const result = updateSource(...args);
+      pending = first;
+      first = false;
+      return result;
+    });
+    const recalculate = vi.spyOn(internals.style.getLayer('water')!, 'recalculate');
+    try {
+      owner.scene.requestRender();
+      owner.requestRender.mockClear();
+      const pendingFrame = owner.tick();
+      expect(pendingFrame.renderError).toBeUndefined();
+      expect(pendingFrame.rendered).toBe(true);
+      expect(pendingFrame.cameraChanged).toBe(false);
+      expect(pendingFrame.requested).toBe(true);
+      expect(owner.pyramid.hasTransition()).toBe(false);
+      expect(recalculate).not.toHaveBeenCalled();
+      const cleanup = owner.tick();
+      expect(cleanup.rendered).toBe(true);
+      expect(cleanup.renderError).toBeUndefined();
+      expect(cleanup.requested).toBe(false);
+      expect(recalculate).not.toHaveBeenCalled();
+      expect(owner.tick().rendered).toBe(false);
+    }
+    finally {
+      owner.tileset.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
   it('waits until the placement deadline, wakes Native internally, and preserves the consumed request', async () => {
     const owner = await uploadedWaterLifecycle();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -310,24 +353,59 @@ describe('primitive frame lifecycle', () => {
     }
   });
 
-  it('consumes a postRender covering wake already served by a camera render with 2 viewports', async () => {
+  it('consumes constant-source covering debt already served by a camera render with 2 viewports', async () => {
     const viewports = 2;
-    const owner = await uploadedWaterLifecycle();
+    // Globe permits variable source detail above covering zoom four. This
+    // low-zoom 3D camera exercises the real constant-source selection branch.
+    const owner = await uploadedWaterLifecycle(new OverscaledTileID(3, 0, 3, 3, 3), 1024);
     try {
       owner.position(6000);
       expect(owner.tick().rendered).toBe(true);
       owner.quiet();
       expect(owner.state.afterRender).toHaveLength(1);
       expect(owner.requestRender).not.toHaveBeenCalled();
+      const selectionCache = new WeakMap();
+      const previousSelection = sourceTileLodForFrame(owner.pyramid, owner.state, selectionCache, 0)!;
       // This genuinely changed camera renders before the deferred callback;
       // Root now samples the preceding confirmed Globe/source zoom pair.
       owner.position(6000, 0.000001);
+      expect(previousSelection.sameSelection(sourceTileLodForFrame(owner.pyramid, { ...owner.state, frameNumber: owner.state.frameNumber! + 1 }, selectionCache, 0)!)).toBe(true);
       const served = owner.tick(viewports);
       expect(served.cameraChanged).toBe(true);
       owner.quiet();
       expect(owner.state.commandList!.some(command => drawBatchForOwner(command.owner)?.layerId === 'water')).toBe(true);
       expect(owner.state.afterRender).toHaveLength(0);
       expect(served.requested, 'Old covering debt was consumed by this real render; no fresh work requests another').toBe(false);
+      expect(owner.tick().rendered).toBe(false);
+    }
+    finally {
+      owner.tileset.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('keeps fresh variable-globe confirmation after a camera render consumes old covering debt', async () => {
+    const owner = await uploadedWaterLifecycle();
+    try {
+      owner.position(6000);
+      expect(owner.tick().rendered).toBe(true);
+      owner.quiet();
+      expect(owner.state.afterRender).toHaveLength(1);
+      const selectionCache = new WeakMap();
+      const previousSelection = sourceTileLodForFrame(owner.pyramid, owner.state, selectionCache, 0)!;
+      owner.position(6000, 0.000001);
+      expect(previousSelection.sameSelection(sourceTileLodForFrame(owner.pyramid, { ...owner.state, frameNumber: owner.state.frameNumber! + 1 }, selectionCache, 0)!)).toBe(false);
+      const served = owner.tick(2);
+      expect(served.cameraChanged).toBe(true);
+      owner.quiet();
+      expect(served.requested).toBe(false);
+      expect(owner.state.afterRender).toHaveLength(1);
+      // The old callback is consumed by the camera render. Its postRender
+      // now owes one confirmation of the new variable-source selection.
+      expect(owner.tick().requested).toBe(true);
+      expect(owner.tick(2).rendered).toBe(true);
+      owner.quiet();
+      expect(owner.state.afterRender).toHaveLength(0);
       expect(owner.tick().rendered).toBe(false);
     }
     finally {

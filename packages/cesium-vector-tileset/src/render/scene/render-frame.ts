@@ -2,12 +2,13 @@ import type { Camera, CullingVolume, MapProjection, Scene } from 'cesium';
 import type { OverscaledTileID } from '../../tile/tile-id';
 import type { TileCovering } from '../../tile/tile-pyramid';
 import type { VectorDrapingProvider } from '../vector/vector-tile-renderer';
-import type { CameraFocus, CameraScale } from './camera-focus';
+import type { CameraFocus } from './camera-focus';
 import type { CameraBounds } from './covering';
+import type { DrapedSurfaceScene } from './draped-surface-pass';
 import type { GlobeLike } from './globe-covering';
 import { Cartesian3, Math as CesiumMath, GeographicProjection, SceneMode, WebMercatorProjection } from 'cesium';
 import { MAX_TILE_ZOOM } from '../../geo/world-bounds';
-import { columbusCameraFocus, globeCameraFocus, globeCameraScale } from './camera-focus';
+import { cameraBearing, columbusCameraFocus, globeCameraFocus } from './camera-focus';
 import { cameraZoom, mapZoomToSourceZoom, planarCameraBounds, planarTileIDs } from './covering';
 import { sourceLodCamera, SourceTileLod } from './source-tile-lod';
 
@@ -29,7 +30,7 @@ export interface RenderFrameState {
       mapProjection?: MapProjection;
       vectorProvider?: VectorDrapingProvider;
       _frameState?: RenderFrameState;
-    };
+    } & Partial<DrapedSurfaceScene>;
   };
   canvasHeight?: number;
   drawingBufferHeight?: number;
@@ -73,6 +74,7 @@ export interface CameraFrameSnapshot {
   readonly mapProjection: MapProjection;
   readonly cameraToCenterDistance: number | undefined;
   readonly orthographic: boolean;
+  readonly bearing: number | undefined;
 }
 
 interface CameraCache {
@@ -81,6 +83,7 @@ interface CameraCache {
   position: Cartesian3;
   direction: Cartesian3;
   right: Cartesian3;
+  up: Cartesian3;
   mode: SceneMode;
   projection: MapProjection;
   width: number;
@@ -98,12 +101,13 @@ interface CameraCache {
   sourceLodCamera: ReturnType<typeof sourceLodCamera>;
   sourceLodMeasured: boolean;
   focus?: CameraFocus;
-  groundScale?: CameraScale;
   sourceLods: WeakMap<object, { camera: CameraCache; source: CoveringSource; sourceZoom: number; minZoom: number; maxZoom: number; round: boolean; reparse: boolean; lod: SourceTileLod }>;
   zoom?: number;
   styleZoom?: number;
   centerDistanceMeasured?: boolean;
   cameraToCenterDistance?: number;
+  viewMatrix?: readonly number[];
+  bearing?: number;
 }
 
 // One camera measurement per cache/frame, shared by every source.
@@ -143,6 +147,7 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
     // Cesium normalizes the world basis when local axes change.
     && Cartesian3.equalsEpsilon(previous.direction, camera.directionWC, CesiumMath.EPSILON14)
     && Cartesian3.equalsEpsilon(previous.right, camera.rightWC, CesiumMath.EPSILON14)
+    && Cartesian3.equalsEpsilon(previous.up, camera.upWC, CesiumMath.EPSILON14)
     // Near-identical bases can cross the finite-focus boundary. Preserve
     // normalization reuse only while the actual projection/focus agrees.
     && (mode === SceneMode.SCENE2D || Cartesian3.equals(previous.direction, camera.directionWC)
@@ -155,23 +160,19 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
   const focus = focusForCamera(camera, mode, projection, width, height);
   // Source selection uses its optical focus and coarsens distant tiles.
   const zoom = focus?.zoom ?? cameraZoom(input) ?? previous?.zoom ?? cameraZoom({ ...input, sampleY: height - 1 });
-  // Ground styles in a free 3D view use altitude, so pitch cannot enlarge
-  // roads/labels or hide nearby minzoom layers. Projected views retain their
-  // MapLibre camera scale and perspective semantics.
-  const groundScale = mode === SceneMode.SCENE3D ? globeCameraScale(camera, projection, width, height) : undefined;
-  const referenceZoom = mode === SceneMode.SCENE3D ? groundScale?.zoom : zoom;
-  const styleZoom = (groundScale || !focus) && referenceZoom !== undefined && previous?.styleZoom !== undefined
+  const styleZoom = (mode === SceneMode.SCENE3D || !focus) && zoom !== undefined && previous?.styleZoom !== undefined
     && previous.mode === mode && previous.projection === projection
     && previous.width === width && previous.height === height
-    && Math.abs(referenceZoom - previous.styleZoom) < STYLE_ZOOM_TOLERANCE
+    && Math.abs(zoom - previous.styleZoom) < STYLE_ZOOM_TOLERANCE
     ? previous.styleZoom
-    : referenceZoom;
+    : zoom;
   const current: CameraCache = {
     frame,
     frameNumber: frame.frameNumber,
     position: Cartesian3.clone(camera.positionWC),
     direction: Cartesian3.clone(camera.directionWC),
     right: Cartesian3.clone(camera.rightWC),
+    up: Cartesian3.clone(camera.upWC),
     mode,
     projection,
     width,
@@ -189,7 +190,6 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
     sourceLodCamera: undefined,
     sourceLodMeasured: false,
     focus,
-    groundScale,
     sourceLods: previous?.sourceLods ?? new WeakMap(),
     zoom,
     styleZoom,
@@ -200,8 +200,6 @@ function zoomForCamera(frame: RenderFrameState, cache: CoveringCache, sceneMode?
 
 /** Symbol perspective distance uses the same units as the Native view clip W. */
 function cameraCenterDistance(camera: CameraCache): number | undefined {
-  if (camera.mode === SceneMode.SCENE3D)
-    return camera.groundScale?.cameraToCenterDistance;
   if (camera.focus)
     return camera.focus.cameraToCenterDistance;
   if (camera.mode === SceneMode.COLUMBUS_VIEW) {
@@ -240,10 +238,17 @@ export function captureCameraForFrame(frame: RenderFrameState, cache: CoveringCa
     camera.cameraToCenterDistance = orthographic ? undefined : cameraCenterDistance(camera);
     camera.centerDistanceMeasured = true;
   }
+  // Reuse the same world view while the measured pose is unchanged. Native's
+  // repeated basis normalization otherwise amplifies machine noise through
+  // ECEF translation and keeps stationary collision layouts perpetually dirty.
+  if (!camera.viewMatrix) {
+    camera.viewMatrix = Object.freeze(Array.from(viewMatrix));
+    camera.bearing = cameraBearing(frame.camera, mode, camera.projection, camera.focus?.center);
+  }
   return Object.freeze({
     frameNumber: frame.frameNumber,
     mode,
-    viewMatrix: Object.freeze(Array.from(viewMatrix)),
+    viewMatrix: camera.viewMatrix,
     positionWC: Object.freeze(Cartesian3.clone(frame.camera.positionWC)),
     projectionMatrix: Object.freeze(Array.from(projectionMatrix)),
     centerLng: camera.centerLng,
@@ -253,7 +258,23 @@ export function captureCameraForFrame(frame: RenderFrameState, cache: CoveringCa
     mapProjection: camera.projection,
     cameraToCenterDistance: camera.cameraToCenterDistance,
     orthographic,
+    bearing: camera.bearing,
   });
+}
+
+/** Use the physical frame snapshot before Native moves a 2D viewport camera. */
+export function cameraBearingForFrame(frame: RenderFrameState, snapshot?: CameraFrameSnapshot): number | undefined {
+  const mode = frame.mode ?? SceneMode.SCENE3D;
+  if (snapshot && snapshot.frameNumber === frame.frameNumber && snapshot.mode === mode)
+    return snapshot.bearing;
+  const projection = frame.mapProjection ?? frame.camera._scene?.mapProjection;
+  if (!projection)
+    return undefined;
+  const canvas = frame.camera._scene?.canvas;
+  const width = canvas?.clientWidth ?? frame.context?.drawingBufferWidth ?? 0;
+  const height = canvas?.clientHeight ?? frame.context?.drawingBufferHeight ?? 0;
+  const focus = focusForCamera(frame.camera, mode, projection, width, height);
+  return cameraBearing(frame.camera, mode, projection, focus?.center);
 }
 
 /** Stable identity of the camera pose and viewport, excluding near/far clipping. */

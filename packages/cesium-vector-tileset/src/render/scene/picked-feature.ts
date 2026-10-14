@@ -23,10 +23,9 @@ export function pickedFeature(
     && !pattern.hasPickObject(pickObject)) {
     return undefined;
   }
-  const vectorPickObject = pickObject as TilePickObject;
-  const featureIndex = 'type' in pickObject && pickObject.type === 'pattern'
+  const featureIndex = 'type' in pickObject
     ? pickObject.tileFeatureIndex
-    : residency.featureIndex(vectorPickObject.tileId, vectorPickObject.generationId);
+    : residency.featureIndex(pickObject.tileId, pickObject.generationId);
   if (!featureIndex) {
     return undefined;
   }
@@ -35,7 +34,7 @@ export function pickedFeature(
   for (let i = 0; i < indexArray.length; i++) {
     const candidate = indexArray.get(i);
     const bucketLayerIds = featureIndex.bucketLayerIDs[candidate.bucketIndex] ?? [];
-    if (candidate.featureIndex === vectorPickObject.featureIndex && bucketLayerIds.includes(vectorPickObject.layerId)) {
+    if (candidate.featureIndex === pickObject.featureIndex && bucketLayerIds.includes(pickObject.layerId)) {
       entry = candidate;
       break;
     }
@@ -52,7 +51,7 @@ export function pickedFeature(
     return undefined;
   }
   return {
-    layerId: vectorPickObject.layerId,
+    layerId: pickObject.layerId,
     properties: feature.properties,
   };
 }

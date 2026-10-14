@@ -151,6 +151,7 @@ export class SourceRenderSync {
         tile.tileID,
         tile.textureData,
         layers,
+        source,
         dynamic,
         source.tileCoords,
         source.flippedWindingOrder ?? false,

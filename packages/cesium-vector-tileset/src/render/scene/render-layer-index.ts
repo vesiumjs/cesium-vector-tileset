@@ -41,6 +41,8 @@ function reuseLayers<T extends StyleLayer>(previous: T[] | undefined, current: T
 
 /** The ordered style-layer view consumed by the four Cesium render tracks. */
 export class RenderLayerIndex {
+  firstExtrusionLayerId?: string;
+
   private _style: Style;
 
   private _order: ReadonlyMap<string, number> = new Map();
@@ -89,7 +91,10 @@ export class RenderLayerIndex {
     }
     this._allRaster = [];
     this._allPattern = [];
+    this.firstExtrusionLayerId = undefined;
     for (const layer of layers) {
+      if (layer.type === 'fill-extrusion' && this.firstExtrusionLayerId === undefined)
+        this.firstExtrusionLayerId = layer.id;
       if (isRasterStyleLayer(layer)) {
         this._allRaster.push(layer);
         if (layer.source) {

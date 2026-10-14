@@ -157,6 +157,9 @@ void main() {
         vec4 eye = czm_windowToEyeCoordinates(gl_FragCoord.xy, depth);
         coordinate = worldPixelDelta(relativePosition(eye.xyz / eye.w));
     }
+    // GlobeDepth packs the current depth buffer's raw value, including log
+    // depth. Compare that same surface depth against external geometry.
+    gl_FragDepth = depth;
     out_FragColor = backgroundColor(coordinate);
 }`;
 
@@ -325,7 +328,7 @@ export class BackgroundGround {
       this._command = context.createViewportQuadCommand(new ShaderSource({ sources: [MATERIAL_SOURCE, FRAGMENT_SOURCE], defines: useLogDepth ? ['LOG_DEPTH_READ_ONLY'] : [] }), {
         owner: this,
         pass: Pass.OPAQUE,
-        renderState: RenderState.fromCache({ depthTest: { enabled: false }, depthMask: false, blending: Cesium.BlendingState.PRE_MULTIPLIED_ALPHA_BLEND }),
+        renderState: RenderState.fromCache({ depthTest: { enabled: true, func: Cesium.DepthFunction.LESS_OR_EQUAL }, depthMask: false, blending: Cesium.BlendingState.PRE_MULTIPLIED_ALPHA_BLEND }),
         uniformMap: {
           color: () => this._paint.color,
           opacity: () => this._paint.opacity,

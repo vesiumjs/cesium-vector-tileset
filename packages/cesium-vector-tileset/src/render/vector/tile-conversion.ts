@@ -3,11 +3,11 @@ import type { Bucket } from '../../data/bucket';
 import type { CirclePrimitiveGeometry, FillPrimitiveGeometry, LinePrimitiveGeometry, ProjectedGeometryList } from '../../data/projected-geometry';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
-import { BufferPointMaterial, BufferPolygonMaterial, Cartesian3, Color, Ellipsoid } from 'cesium';
+import type { CircleFeatureStyle } from './feature-attributes';
+import { BufferPolygonMaterial, Cartesian3, Color } from 'cesium';
 import { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
 import { projectCircleGeometry, projectFillGeometry, projectLineGeometry } from '../../data/projected-geometry-transfer';
 import { surfaceGranularity } from '../geometry/surface-subdivision';
-import { RASTER_SURFACE_OFFSET_M } from '../raster/raster-geometry';
 import { MORPHING, SCENE3D } from '../scene/scene-mode';
 import {
   circleBucketPrimitives,
@@ -39,7 +39,7 @@ export interface PolygonRenderPrimitive {
 
 export interface PointRenderPrimitive {
   position: Cartesian3;
-  material: BufferPointMaterial;
+  style: CircleFeatureStyle;
   pickObject: TilePickObject;
 }
 
@@ -63,66 +63,6 @@ export interface TileRenderResult {
   layerIds: string[];
 }
 
-export const LAYER_RADIAL_EPSILON_METERS = 0.01;
-const OUTLINE_RADIAL_EPSILON_METERS = 0.001;
-
-// Share shifted geometry between family layers within one build. The source
-// tile can outlive many builds, so the cache belongs to the build, not its key.
-export type RadialOffsetCache = WeakMap<Float64Array, Map<number, Float64Array>>;
-
-export function radialOffsetPositions(positions: Float64Array, meters: number, radialOffsetCache: RadialOffsetCache): Float64Array {
-  const iterator = offsetRadialPositions(positions, meters, radialOffsetCache);
-  let step = iterator.next();
-  while (!step.done) step = iterator.next();
-  return step.value;
-}
-
-function* offsetRadialPositions(positions: Float64Array, meters: number, radialOffsetCache: RadialOffsetCache): Generator<void, Float64Array> {
-  if (meters === 0) {
-    return positions;
-  }
-  const cached = radialOffsetCache.get(positions)?.get(meters);
-  if (cached) {
-    return cached;
-  }
-  const shifted = new Float64Array(positions.length);
-  // Each resumable feature owns its scratch values across budget yields.
-  const position = new Cartesian3();
-  const normal = new Cartesian3();
-  for (let i = 0; i < shifted.length; i += 3) {
-    position.x = positions[i];
-    position.y = positions[i + 1];
-    position.z = positions[i + 2];
-    Ellipsoid.WGS84.geodeticSurfaceNormal(position, normal);
-    shifted[i] = position.x + normal.x * meters;
-    shifted[i + 1] = position.y + normal.y * meters;
-    shifted[i + 2] = position.z + normal.z * meters;
-    if ((i / 3 + 1) % 32 === 0 && i + 3 < shifted.length)
-      yield;
-  }
-  let offsets = radialOffsetCache.get(positions);
-  if (!offsets) {
-    offsets = new Map();
-    radialOffsetCache.set(positions, offsets);
-  }
-  offsets.set(meters, shifted);
-  return shifted;
-}
-
-export function layerRadialOffsetMeters(layerId: string, layerOrder?: ReadonlyMap<string, number>): number {
-  return RASTER_SURFACE_OFFSET_M
-    + (layerOrder?.get(layerId) ?? 0) * LAYER_RADIAL_EPSILON_METERS;
-}
-
-function radialOffsetPoint(position: Cartesian3, meters: number): Cartesian3 {
-  if (meters === 0) {
-    return position;
-  }
-  const normal = Ellipsoid.WGS84.geodeticSurfaceNormal(position, new Cartesian3());
-  Cartesian3.multiplyByScalar(normal, meters, normal);
-  return Cartesian3.add(position, normal, normal);
-}
-
 function toColor(r: number, g: number, b: number, a: number): Color {
   const clamp = (value: number): number => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
   return new Color(clamp(r), clamp(g), clamp(b), clamp(a));
@@ -144,15 +84,15 @@ interface ConvertFamily {
   branch: ConvertBranch;
   tileId: string;
   workerGeometry?: import('../../data/projected-geometry').ProjectedBucketGeometry;
-  fill?: import('../../data/projected-geometry').ProjectedBucketGeometry['fill'];
+  fill?: import('../../data/projected-geometry').ProjectedBucketGeometry['fill'] | FillPrimitiveGeometry[];
   line?: import('../../data/projected-geometry').ProjectedBucketGeometry['lines'];
   circle?: import('../../data/projected-geometry').ProjectedBucketGeometry['circles'];
 }
 
 /**
  * Resumable bucket conversion. A dense tile evaluates thousands of features;
- * Heavy radial projection yields within a feature. Render inputs publish only
- * after that feature's coordinates complete, so resumed work stays atomic.
+ * Feature style and outline extraction run under the build budget; Worker
+ * coordinates remain shared with each published layer.
  */
 export interface TileConversionState {
   generationId: number;
@@ -160,12 +100,11 @@ export interface TileConversionState {
   familyIndex: number;
   layerIndex: number;
   primIndex: number;
-  featureWork?: Generator<void>;
+  featureWork?: Generator<void, number>;
   tileID: TileID;
-  layerOrder?: ReadonlyMap<string, number>;
   styleZoom?: number;
   mode?: SceneMode;
-  radialOffsetCache?: RadialOffsetCache;
+  draped: boolean;
   result: TileRenderResult;
 }
 
@@ -174,10 +113,10 @@ export function beginTileConversion(
   tileID: TileID,
   generationId: number,
   sourceId?: string,
-  layerOrder?: ReadonlyMap<string, number>,
   skipLayerIds?: ReadonlySet<string>,
   styleZoom?: number,
   mode?: SceneMode,
+  draped = false,
 ): TileConversionState {
   const result: TileRenderResult = { polygons: [], points: [], linePrimitives: [], layerIds: [] };
   // A worker bucket can be shared by several style-layer ids. Build the
@@ -222,12 +161,13 @@ export function beginTileConversion(
       : bucket instanceof LineBucket
         ? 'line'
         : 'circle';
-    // Fills and lines share the worker mesh when both modes choose the same
-    // subdivision. Coarser globe meshes still need their planar version.
-    const sameSurfaceMesh = (branch === 'fill' || branch === 'line') && mode !== undefined
+    // Fill owns distinct masked planar and clipped globe meshes. Lines share
+    // a mesh when both modes choose the same subdivision.
+    const sameSurfaceMesh = branch === 'line' && mode !== undefined
       && surfaceGranularity(branch, canonicalZoom, mode) === surfaceGranularity(branch, canonicalZoom, SCENE3D);
     const sameWorkerGeometry = mode === SCENE3D || mode === MORPHING
       || branch === 'circle'
+      || (branch === 'fill' && mode !== undefined)
       || sameSurfaceMesh;
     families.push({
       bucket,
@@ -242,7 +182,7 @@ export function beginTileConversion(
     });
   }
   families.sort((a, b) => Number(b.branch === 'fill') - Number(a.branch === 'fill'));
-  return { families, familyIndex: 0, layerIndex: 0, primIndex: 0, tileID, layerOrder, styleZoom, mode, generationId, result, radialOffsetCache: new WeakMap() };
+  return { families, familyIndex: 0, layerIndex: 0, primIndex: 0, tileID, styleZoom, mode, draped, generationId, result };
 }
 
 /**
@@ -271,20 +211,26 @@ export function advanceTileConversion(state: TileConversionState, budget: Budget
     }
     const layerId = family.renderLayerIds[state.layerIndex];
     const prims = convertFamilyPrims(state, family);
-    if (state.primIndex >= prims.length) {
+    const outlineBucket = family.branch === 'fill' && family.bucket instanceof FillBucket ? family.bucket : undefined;
+    if (state.primIndex >= prims.length + (outlineBucket?.polygons.length ?? 0)) {
       state.layerIndex++;
       state.primIndex = 0;
       continue;
     }
-    state.featureWork ??= convertOneFeature(state, family, layerId, prims.get(state.primIndex));
-    while (!state.featureWork.next().done) {
+    // Source outlines remain drawable when clipping removes every fill face.
+    // Keep their traversal in this family's existing cooperative cursor.
+    state.featureWork ??= outlineBucket && state.primIndex >= prims.length
+      ? convertFillOutline(state, outlineBucket, layerId, state.primIndex - prims.length, prims.length)
+      : convertOneFeature(state, family, layerId, Array.isArray(prims) ? prims[state.primIndex] : prims.get(state.primIndex));
+    let work = state.featureWork.next();
+    while (!work.done) {
       if (budget.exhausted)
         return false;
+      work = state.featureWork.next();
     }
     state.featureWork = undefined;
-    state.primIndex++;
+    state.primIndex = work.value;
   }
-  state.radialOffsetCache = undefined;
   return true;
 }
 
@@ -292,11 +238,14 @@ export function advanceTileConversion(state: TileConversionState, budget: Budget
 function convertFamilyPrims(
   state: TileConversionState,
   family: ConvertFamily,
-): ProjectedGeometryList<{ featureIndex: number }> {
+): ProjectedGeometryList<{ featureIndex: number }> | FillPrimitiveGeometry[] {
   const { bucket } = family;
   if (family.branch === 'fill') {
     return family.fill ??= bucket instanceof FillBucket
-      ? (family.workerGeometry?.fill ?? projectFillGeometry(fillBucketPrimitives(bucket, state.tileID, state.mode)))
+      ? state.draped
+        ? fillBucketPrimitives(bucket, state.tileID, state.mode, 'drape')
+        : ((state.mode !== undefined && state.mode !== SCENE3D && state.mode !== MORPHING ? family.workerGeometry?.fillPlanar : family.workerGeometry?.fill)
+          ?? projectFillGeometry(fillBucketPrimitives(bucket, state.tileID, state.mode)))
       : projectFillGeometry([]);
   }
   if (family.branch === 'line') {
@@ -317,32 +266,25 @@ type LinePrimitive = LinePrimitiveGeometry;
 type CirclePrimitive = CirclePrimitiveGeometry;
 
 /**
- * Convert a single feature primitive: style evaluation plus the radial
- * layer offset and pick-object bookkeeping. Bodies are the four branches of
- * the old per-family loop, unchanged; the stepper above supplies the loop.
+ * Convert a single feature primitive: style evaluation and pick-object bookkeeping.
+ * Ground positions are shared with the Worker; style order belongs to commands.
  */
 function* convertOneFeature(
   state: TileConversionState,
   family: ConvertFamily,
   layerId: string,
   prim: { featureIndex: number },
-): Generator<void> {
+): Generator<void, number> {
   const { bucket } = family;
   const { result } = state;
-  // Keep vector and raster layers in one radial ordering. Raster tiles are
-  // lifted by RASTER_SURFACE_OFFSET_M to avoid fighting Cesium's globe, so
-  // vector ground geometry needs the same base offset when the style places
-  // a vector layer above or below a raster layer.
-  const layerOffset = layerRadialOffsetMeters(layerId, state.layerOrder);
   const tileId = family.tileId;
   const styleZoom = state.styleZoom;
 
   if (family.branch === 'fill' && bucket instanceof FillBucket) {
     const primitive = prim as FillPrimitive;
     const style = fillStyleForFeature(bucket, primitive.featureIndex, layerId, styleZoom);
-    const shiftedPositions = yield* offsetRadialPositions(primitive.positions, layerOffset, state.radialOffsetCache!);
     result.polygons.push({
-      positions: shiftedPositions,
+      positions: primitive.positions,
       ringVertexCount: primitive.ringVertexCount,
       holes: primitive.holes,
       triangles: primitive.triangles,
@@ -351,30 +293,6 @@ function* convertOneFeature(
       }),
       pickObject: pickObject(tileId, layerId, primitive.featureIndex, state.generationId),
     });
-
-    // Cesium's BufferPolygonMaterial only stores the fill color; its
-    // outline fields are not rendered. Build explicit closed polylines
-    // for a declared MapLibre fill outline instead of silently dropping
-    // the border. The source polygon's hole offsets delimit each ring, and the
-    // line pipeline renders them in every scene mode. Original rings are a
-    // bucket-owned Worker payload, independent of this surface mesh variant.
-    if (style.outlineWidthPx > 0 && style.outlineColor.alpha > 0) {
-      for (const outlinePath of fillOutlinePaths(bucket, primitive, state.mode)) {
-        // Outline paths already contain the closing sample for closed
-        // rings. Appending it again creates a zero-length final segment
-        // and changes the line geometry at every polygon corner.
-        if (outlinePath.positions.length < 6) {
-          continue;
-        }
-        result.linePrimitives.push({
-          layerId,
-          featureIndex: primitive.featureIndex,
-          positions: outlinePath.positions,
-          tilePositions: outlinePath.tilePositions,
-          offsetMeters: layerOffset + OUTLINE_RADIAL_EPSILON_METERS,
-        });
-      }
-    }
   }
   else if (family.branch === 'line' && bucket instanceof LineBucket) {
     const primitive = prim as LinePrimitive;
@@ -383,30 +301,52 @@ function* convertOneFeature(
     result.linePrimitives.push({
       layerId,
       featureIndex: primitive.featureIndex,
-      // Keep the shared centerline intact; each layer applies its height
-      // in the shader, in projected x or along the world ellipsoid normal.
       positions: primitive.positions,
       tilePositions: primitive.tilePositions,
       prepared: state.mode === SCENE3D ? primitive.prepared : undefined,
-      offsetMeters: layerOffset,
     });
   }
   else if (family.branch === 'circle' && bucket instanceof CircleBucket) {
     const primitive = prim as CirclePrimitive;
     const style = circleStyleForFeature(bucket, primitive.featureIndex, layerId, styleZoom);
     result.points.push({
-      position: radialOffsetPoint(Cartesian3.fromElements(
+      position: Cartesian3.fromElements(
         primitive.position[0],
         primitive.position[1],
         primitive.position[2],
-      ), layerOffset),
-      material: new BufferPointMaterial({
-        color: toColor(style.color.red, style.color.green, style.color.blue, style.color.alpha),
-        outlineColor: toColor(style.outlineColor.red, style.outlineColor.green, style.outlineColor.blue, style.outlineColor.alpha),
-        outlineWidth: Math.max(0, Math.min(255, style.outlineWidthPx)),
-        size: Math.max(1, Math.min(255, style.sizePx)),
-      }),
+      ),
+      style,
       pickObject: pickObject(tileId, layerId, primitive.featureIndex, state.generationId),
     });
   }
+  return state.primIndex + 1;
+}
+
+/** Consume Worker-owned source rings independently of the clipped surface. */
+function* convertFillOutline(
+  state: TileConversionState,
+  bucket: FillBucket,
+  layerId: string,
+  polygonIndex: number,
+  primitiveCount: number,
+): Generator<void, number> {
+  const polygon = bucket.polygons[polygonIndex];
+  const canonical = 'canonical' in state.tileID ? state.tileID.canonical : state.tileID;
+  const subdivision = state.mode === undefined ? 1 : surfaceGranularity('fill', canonical.z, state.mode);
+  let end = polygonIndex + 1;
+  if (subdivision === 1) {
+    while (end < bucket.polygons.length && bucket.polygons[end].polygonGroupId === polygon.polygonGroupId)
+      end++;
+  }
+  const style = fillStyleForFeature(bucket, polygon.featureIndex, layerId, state.styleZoom);
+  if (style.outlineWidthPx > 0 && style.outlineColor.alpha > 0) {
+    for (const path of fillOutlinePaths(bucket, { polygonIndex, subdivision }, state.mode)) {
+      // Closed source rings already carry their final closing sample.
+      if (path.positions.length < 6)
+        continue;
+      state.result.linePrimitives.push({ layerId, featureIndex: polygon.featureIndex, positions: path.positions, tilePositions: path.tilePositions });
+      yield;
+    }
+  }
+  return primitiveCount + end;
 }

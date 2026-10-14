@@ -1,37 +1,19 @@
 import type { ExtrusionDepthScene } from '../vector/extrusion-depth-pass';
+import type { ReplayDrawCommand } from './draw-command-replay';
 import type { LineVisibilityScene } from './line-visibility';
 import type { RenderFrameState } from './render-frame';
+import type { RetainedSourceStyle } from './tile-residency';
 import * as Cesium from 'cesium';
-import { BufferPointCollection, BufferPolygonCollection, DepthFunction, PointPrimitiveCollection, SceneMode } from 'cesium';
+import { BufferPolygonCollection, DepthFunction, SceneMode } from 'cesium';
 import { ExtrusionDepthPass } from '../vector/extrusion-depth-pass';
-import { drawBatchForOwner, linePaintForOwner, uniformLineExtentForOwner } from './draw-batch';
+import { drawBatchForOwner, linePaintForOwner, retainedStyleForBatch, tileClipForOwner, uniformLineExtentForOwner } from './draw-batch';
 import { LineVisibility } from './line-visibility';
 
 const pass = (Cesium as typeof Cesium & { Pass: { OPAQUE: number; TRANSLUCENT: number; OVERLAY: number } }).Pass;
 const renderState = (Cesium as unknown as { RenderState: { fromCache: (options: object) => object } }).RenderState;
-const surfaceStates = new WeakMap<object, object>();
+const surfaceStates = new WeakMap<object, { ground: object; overlay: object }>();
 
-interface NativeShaderSource {
-  sources: string[];
-  clone: () => NativeShaderSource;
-}
-
-interface NativeShaderProgram {
-  vertexShaderSource: NativeShaderSource;
-  fragmentShaderSource: NativeShaderSource;
-  _attributeLocations: Record<string, number>;
-}
-
-interface NativeShaderCache {
-  getDerivedShaderProgram: (source: NativeShaderProgram, key: string) => NativeShaderProgram | undefined;
-  createDerivedShaderProgram: (source: NativeShaderProgram, key: string, options: {
-    vertexShaderSource: NativeShaderSource;
-    fragmentShaderSource: NativeShaderSource;
-    attributeLocations: Record<string, number>;
-  }) => NativeShaderProgram;
-}
-
-type NativeCommand = NonNullable<RenderFrameState['commandList']>[number] & { dirty: boolean; shaderProgram?: NativeShaderProgram; renderState?: { depthMask?: boolean } };
+type NativeCommand = NonNullable<RenderFrameState['commandList']>[number] & { dirty: boolean; shaderProgram?: object; renderState?: { depthMask?: boolean } };
 // Native collection renderers own their blend pass. Prepare a cached Native derivative
 // so style ordering never changes the renderer's blend-transition detection.
 const drawCommand = (Cesium as unknown as {
@@ -72,58 +54,11 @@ function extrusionState(state: object): { offscreen: object; opaque: object } {
   return states;
 }
 
-const CIRCLE_PAINT = 'vector-circle-paint';
-const CIRCLE_COLOR = `
-vec4 cvt_circleColor(vec4 outline, vec4 fill, float coverage)
-{
-    float alpha = mix(outline.a, fill.a, coverage);
-    vec3 rgb = mix(outline.rgb * outline.a, fill.rgb * fill.a, coverage);
-    return vec4(alpha > 0.0 ? rgb / alpha : vec3(0.0), alpha);
-}
-`;
-
-function circleProgram(source: NativeShaderProgram, cache: NativeShaderCache, buffer: boolean): NativeShaderProgram {
-  const cached = cache.getDerivedShaderProgram(source, CIRCLE_PAINT);
-  if (cached) {
-    return cached;
-  }
-  // Cesium adapter: retain Native coverage, discard, gamma and
-  // pick/log-depth code; interpolate premultiplied fill/stroke contributions.
-  const original = buffer
-    ? 'vec4 color = vec4(mix(v_outlineColor.rgb, v_color.rgb, innerAlpha), outerAlpha);\n    color.a *= mix(v_outlineColor.a, v_color.a, innerAlpha);'
-    : 'vec4 color = mix(v_outlineColor, v_color, innerAlpha);';
-  const replacement = `vec4 color = cvt_circleColor(v_outlineColor, v_color, innerAlpha);${buffer ? '\n    color.a *= outerAlpha;' : ''}`;
-  const fragment = source.fragmentShaderSource.clone();
-  let replaced = 0;
-  fragment.sources = fragment.sources.map((text) => {
-    if (!text.includes(original)) {
-      return text;
-    }
-    replaced++;
-    return text.replace(original, replacement);
-  });
-  if (replaced !== 1) {
-    throw new Error('Cesium circle fragment shader changed; update the circle paint adapter.');
-  }
-  fragment.sources.unshift(CIRCLE_COLOR);
-  // Native recursively destroys derived programs with their base shader.
-  // The collection keeps that base ownership; this command adds no refcount.
-  return cache.createDerivedShaderProgram(source, CIRCLE_PAINT, {
-    vertexShaderSource: source.vertexShaderSource,
-    fragmentShaderSource: fragment,
-    attributeLocations: source._attributeLocations,
-  });
-}
-
-function paintCommand(source: NativeCommand, context: RenderFrameState['context']): NativeCommand {
+function paintCommand(source: NativeCommand): NativeCommand {
   let command = paintCommands.get(source);
   if (!command || source.dirty) {
     command = drawCommand.shallowClone(source, command);
     source.dirty = false;
-    if (source.shaderProgram && (source.owner instanceof BufferPointCollection || source.owner instanceof PointPrimitiveCollection)) {
-      const cache = (context as { shaderCache: NativeShaderCache }).shaderCache;
-      command.shaderProgram = circleProgram(source.shaderProgram, cache, source.owner instanceof BufferPointCollection);
-    }
     paintCommands.set(source, command);
   }
   return command;
@@ -135,20 +70,23 @@ interface VisibleScene extends LineVisibilityScene {
 }
 
 interface DerivedCommand {
-  renderState?: { depthMask?: boolean };
+  renderState?: { depthMask?: boolean; depthTest?: { enabled?: boolean; func?: number } };
   derivedCommands?: {
     picking?: { pickCommand: DerivedCommand };
     logDepth?: { command: DerivedCommand };
   };
 }
 
-function surfaceState(state: { depthMask?: boolean }): object {
-  let surface = surfaceStates.get(state);
-  if (!surface) {
-    surface = renderState.fromCache({ ...state, depthMask: false });
-    surfaceStates.set(state, surface);
+function surfaceState(state: { depthMask?: boolean }, overlay = false): object {
+  let states = surfaceStates.get(state);
+  if (!states) {
+    states = {
+      ground: renderState.fromCache({ ...state, depthMask: false }),
+      overlay: renderState.fromCache({ ...state, depthMask: false, depthTest: { enabled: false } }),
+    };
+    surfaceStates.set(state, states);
   }
-  return surface;
+  return overlay ? states.overlay : states.ground;
 }
 
 type FrameCommand = NonNullable<RenderFrameState['commandList']>[number] & {
@@ -162,8 +100,12 @@ interface DrawCommandEntry {
   batch: NonNullable<ReturnType<typeof drawBatchForOwner>>;
   layer: number;
   promotionLayer: number;
+  phase: number;
   tile?: number;
   order: number;
+  surfaceOverlay: boolean;
+  sourceState?: FrameCommand['renderState'];
+  preparedState?: FrameCommand['renderState'];
   extrusion?: { depth: NativeCommand; states: ReturnType<typeof extrusionState>; translucent: boolean };
 }
 
@@ -181,6 +123,9 @@ function paintOrder(a: DrawCommandEntry, b: DrawCommandEntry): number {
   if (layerDifference !== 0) {
     return layerDifference;
   }
+  const phaseDifference = a.phase - b.phase;
+  if (phaseDifference !== 0)
+    return phaseDifference;
   if (a.tile !== undefined && b.tile !== undefined) {
     const tileDifference = b.tile - a.tile;
     if (tileDifference !== 0) {
@@ -194,11 +139,15 @@ function symbolOrder(a: DrawCommandEntry, b: DrawCommandEntry): number {
   return a.layer - b.layer || a.order - b.order;
 }
 
-function preservePickDepth(command: DerivedCommand | undefined): void {
+function preservePickDepth(command: DerivedCommand | undefined, colorState: NonNullable<DerivedCommand['renderState']>): void {
   const pick = command?.derivedCommands?.picking?.pickCommand;
-  if (pick?.renderState?.depthMask) {
-    pick.renderState = surfaceState(pick.renderState);
-  }
+  const state = pick?.renderState;
+  if (!pick || !state)
+    return;
+  // Native caches pick state by shader, so layer reordering can change the
+  // color command's depth policy while its existing pick state stays stale.
+  if (state.depthMask || state.depthTest?.enabled !== colorState.depthTest?.enabled || state.depthTest?.func !== colorState.depthTest?.func)
+    pick.renderState = renderState.fromCache({ ...state, depthMask: false, depthTest: colorState.depthTest });
 }
 
 function enableExtrusionPickColor(command: DerivedCommand | undefined): void {
@@ -267,8 +216,32 @@ export class DrawCommands {
     this._extrusionDepth.destroy();
   }
 
+  /** Native terrain commands arrive after the owner's ordered slots prepare. */
+  finishSurfaceCommand(command: ReplayDrawCommand, frame: RenderFrameState, scene: { updateDerivedCommands?: (command: object) => void }): void {
+    if (!frame.passes?.pick || !scene.updateDerivedCommands)
+      return;
+    scene.updateDerivedCommands(command);
+    const derived = command as DerivedCommand;
+    if (derived.renderState) {
+      preservePickDepth(derived, derived.renderState);
+      preservePickDepth(derived.derivedCommands?.logDepth?.command, derived.renderState);
+    }
+  }
+
   get extrusionGpuBytes(): number {
     return this._extrusionDepth.memoryBytes;
+  }
+
+  private _prepareSurfaceState(record: DrawCommandEntry): void {
+    const state = record.command.renderState;
+    // Native canonicalizes equal states. A prepared overlay can be another
+    // command's original state, so its role belongs to this entry, not the
+    // shared object. Accept a producer's fresh state before applying policy.
+    if (state !== record.preparedState)
+      record.sourceState = state;
+    if (record.sourceState)
+      record.command.renderState = surfaceState(record.sourceState, record.surfaceOverlay);
+    record.preparedState = record.command.renderState;
   }
 
   prepare(
@@ -281,6 +254,8 @@ export class DrawCommands {
     hiddenLayers: ReadonlyMap<string, ReadonlySet<string>> = EMPTY_HIDDEN,
     hiddenTiles: ReadonlySet<string> = EMPTY_TILES,
     layerVisibility: ReadonlyMap<string, boolean> = EMPTY_VISIBILITY,
+    firstExtrusionLayerId?: string,
+    retainedStyle?: RetainedSourceStyle,
   ): void {
     this._lineMercatorProjection = (frameState.mapProjection ?? frameState.camera._scene?.mapProjection) instanceof Cesium.WebMercatorProjection ? 1 : 0;
     const commands = frameState.commandList;
@@ -290,6 +265,8 @@ export class DrawCommands {
     try {
       this._lineVisibility.prepare(frameState, mode, scene);
       let lastGeometryLayer = -1;
+      const firstExtrusionLayer = firstExtrusionLayerId === undefined ? Infinity : layerOrder.get(firstExtrusionLayerId) ?? Infinity;
+      const retainedFirstExtrusionLayer = retainedStyle?.firstExtrusionLayerId === undefined ? Infinity : retainedStyle.layerOrder.get(retainedStyle.firstExtrusionLayerId) ?? Infinity;
       let write = firstCommand;
       for (let index = firstCommand; index < commands.length; index++) {
         const source = commands[index];
@@ -314,52 +291,48 @@ export class DrawCommands {
           continue;
         }
         let command = source as FrameCommand;
-        // Buffer points expand in pixels after projecting their centers. Their
-        // ground bounds cannot safely frustum/horizon-cull those pixels or picks.
-        // Change the Native source once so its cached paint derivative inherits
-        // the policy; GPU clipping/depth and source tile selection still apply.
-        if (batch?.kind === 'circle' && command.owner instanceof BufferPointCollection && command.cull !== false)
-          command.cull = false;
         const extrusion = batch?.kind === 'extrusion' && command.renderState
           ? { ...extrusionCommand(source as NativeCommand), states: extrusionState(command.renderState), translucent: source.pass === pass.TRANSLUCENT }
           : undefined;
         if (extrusion) {
           command = extrusion.color;
         }
-        else if (command.owner instanceof BufferPointCollection || command.owner instanceof BufferPolygonCollection || command.owner instanceof PointPrimitiveCollection) {
-          command = paintCommand(command as NativeCommand, frameState.context);
+        else if (command.owner instanceof BufferPolygonCollection) {
+          command = paintCommand(command as NativeCommand);
         }
-        // Surface layers retain scene-depth testing without occluding later
-        // style layers. Extrusion depth is prepared for the entire layer below.
-        if (batch && batch.kind !== 'extrusion' && command.renderState?.depthMask) {
-          command.renderState = surfaceState(command.renderState);
-        }
-        const clip = uniforms?.clip.bind(frameState);
+        const clip = (uniforms?.clip ?? tileClipForOwner(command.owner))?.bind(frameState);
+        if (clip && !uniforms && command.uniformMap?.u_line_clip_planar !== clip.u_line_clip_planar)
+          command.uniformMap = { ...command.uniformMap, ...clip };
         if (uniforms && (command.uniformMap?.u_line_width !== uniforms.widthUniform || command.uniformMap?.u_line_mercator_projection !== this._lineProjectionUniform)) {
           command.uniformMap = {
             ...command.uniformMap,
             ...clip,
             u_line_width: uniforms.widthUniform,
+            u_line_shape: uniforms.shapeUniform,
             u_line_color: uniforms.colorUniform,
-            u_line_layer_offset: uniforms.offsetUniform,
             u_line_meters_per_pixel: uniforms.metersPerPixelUniform,
             u_line_mercator_projection: this._lineProjectionUniform,
           };
         }
         let record: DrawCommandEntry | undefined;
         if (batch) {
-          const layer = layerOrder.get(batch.layerId);
+          // A retained source still owns its old style; backgrounds and live
+          // sources use the latest order even when their layer IDs are reused.
+          const heldStyle = retainedStyleForBatch(batch, retainedStyle);
+          const layer = (heldStyle?.layerOrder ?? layerOrder).get(batch.layerId);
           record = this._records.get(source);
           if (!record) {
-            record = { command, batch, layer: 0, promotionLayer: 0, order: 0 };
+            record = { command, batch, layer: 0, promotionLayer: 0, phase: 0, order: 0, surfaceOverlay: false };
             this._records.set(source, record);
           }
           record.command = command;
           record.batch = batch;
           record.layer = layer ?? Number.MAX_SAFE_INTEGER;
           record.promotionLayer = layer ?? -1;
+          record.phase = batch.kind === 'fill-outline' && batch.explicit ? 1 : 0;
           record.tile = batch.tileId ? tileRanks.get(batch.tileId) : undefined;
           record.order = index;
+          record.surfaceOverlay = record.layer > (heldStyle ? retainedFirstExtrusionLayer : firstExtrusionLayer);
           record.extrusion = extrusion;
           if (batch.kind !== 'symbol') {
             lastGeometryLayer = Math.max(lastGeometryLayer, record.promotionLayer);
@@ -424,10 +397,16 @@ export class DrawCommands {
         const record = this._symbols[index];
         commands[slot] = record.command;
         this._entries[slot - firstCommand] = record;
+        this._prepareSurfaceState(record);
       }
       for (const record of this._paint) {
-        if (!record.extrusion)
+        if (!record.extrusion) {
+          // MapLibre's opaque-pass cutoff is its first 3D layer. Later
+          // surfaces follow paint order above buildings, while earlier ones
+          // retain scene depth and never write it for subsequent surfaces.
+          this._prepareSurfaceState(record);
           continue;
+        }
         const id = record.batch.layerId;
         let layer = this._extrusionLayers.get(id);
         if (!layer) {
@@ -487,8 +466,10 @@ export class DrawCommands {
           // surface depth state for ordinary and logarithmic-depth picking.
           scene.updateDerivedCommands(record.command);
           const derived = record.command as DerivedCommand;
-          preservePickDepth(derived);
-          preservePickDepth(derived.derivedCommands?.logDepth?.command);
+          if (derived.renderState) {
+            preservePickDepth(derived, derived.renderState);
+            preservePickDepth(derived.derivedCommands?.logDepth?.command, derived.renderState);
+          }
         }
       }
     }

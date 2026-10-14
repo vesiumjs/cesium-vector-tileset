@@ -1,5 +1,4 @@
 import type {
-  BufferPointCollection,
   PrimitiveCollection,
 
   SceneMode,
@@ -8,6 +7,7 @@ import type { DashAtlas } from '../../assets/dash-atlas';
 import type { DashRow } from '../../source/worker-source';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { TileGeneration } from '../scene/tile-generation';
+import type { RetainedSourceStyle } from '../scene/tile-residency';
 import type { ExtrusionLighting } from './extrusion-geometry';
 import type { TileRenderResult } from './tile-conversion';
 import type { VectorCameraPaintSnapshot, VectorCollectionReplacement, VectorPaintFrame, VectorPaintPreparation, VectorPaintState } from './vector-paint-updater';
@@ -19,13 +19,11 @@ import {
 } from 'cesium';
 import { DashMaterial } from '../line/dash-material';
 import { discardLineBuild } from '../line/line-renderer';
-import { drawLayersForOwner, registerDrawLayers } from '../scene/draw-batch';
+import { drawBatchForOwner, drawLayersForOwner, registerDrawLayers, retainedStyleForBatch } from '../scene/draw-batch';
 import { collectionGpuBytes } from '../scene/resource-memory';
 import { RetiredPool } from '../scene/retired-pool';
 import { createVectorPaintState, VectorPaintUpdater } from './vector-paint-updater';
 import { VectorTileBuilder } from './vector-tile-builder';
-
-export type BufferCollection = BufferPolygonCollection | BufferPointCollection;
 
 /**
  * Minimal structural surface of Cesium's VectorProvider consumed for terrain
@@ -52,7 +50,7 @@ export function isClampHeightReference(heightReference: HeightReference): boolea
  * 2D and Columbus View. Each primitive kind has its own tile collection, so
  * scene residency can attach and replace it independently.
  */
-export type VectorCollection = BufferCollection | PrimitiveCollection;
+export type VectorCollection = BufferPolygonCollection | PrimitiveCollection;
 export interface VectorTileRecord {
   generation?: TileGeneration;
   generationId: number;
@@ -89,6 +87,8 @@ export class VectorTileRenderer {
   private _pixelRatio: number;
 
   private _vectorProvider?: VectorDrapingProvider;
+
+  private _drapeMemory?: (visit: MemoryBudgetVisitor) => void;
 
   private _heightReference: HeightReference = HeightReference.NONE;
 
@@ -187,7 +187,8 @@ export class VectorTileRenderer {
    * Only fill polygons drape; circle points, lines, symbols, extrusions and
    * patterns keep their ellipsoid heights.
    */
-  setDraping(vectorProvider: VectorDrapingProvider | undefined, heightReference: HeightReference): void {
+  setDraping(vectorProvider: VectorDrapingProvider | undefined, heightReference: HeightReference, memory?: (visit: MemoryBudgetVisitor) => void): void {
+    this._drapeMemory = memory;
     if (this._vectorProvider === vectorProvider && this._heightReference === heightReference) {
       return;
     }
@@ -210,7 +211,7 @@ export class VectorTileRenderer {
    * the fills and they vanish. Call after all publishes and replacements so
    * same-frame collections are marked without a one-frame gap.
    */
-  markDrapedCollections(frameNumber: number, layerOrder: ReadonlyMap<string, number>): boolean {
+  markDrapedCollections(frameNumber: number, layerOrder: ReadonlyMap<string, number>, retainedStyle?: RetainedSourceStyle): boolean {
     if (!this._isDraping()) {
       return false;
     }
@@ -228,9 +229,11 @@ export class VectorTileRenderer {
     for (const collection of this._drapeHolds)
       owned.add(collection);
     const ordered = [...owned].filter(collection => collection.show).map((collection) => {
+      const heldStyle = retainedStyleForBatch(drawBatchForOwner(collection), retainedStyle);
+      const order = heldStyle?.layerOrder ?? layerOrder;
       let rank = Infinity;
       for (const layerId of drawLayersForOwner(collection)) {
-        rank = Math.min(rank, layerOrder.get(layerId) ?? Infinity);
+        rank = Math.min(rank, order.get(layerId) ?? Infinity);
       }
       return { collection, rank };
     }).sort((a, b) => a.rank - b.rank).map(entry => entry.collection);
@@ -352,6 +355,7 @@ export class VectorTileRenderer {
    * pinned; only pooled retired records are evictable. Shared owners count once.
    */
   visitMemoryEntries(visit: MemoryBudgetVisitor): void {
+    this._drapeMemory?.(visit);
     const owners = new Set<object>();
     for (const [tileId, record] of this._records) {
       let bytes = 0;

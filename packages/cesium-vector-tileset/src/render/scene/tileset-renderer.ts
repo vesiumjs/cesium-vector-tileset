@@ -15,6 +15,7 @@ import type { VectorCollection } from '../vector/vector-tile-renderer';
 import type { Budget } from './frame-budget';
 import type { RenderFrameState } from './render-frame';
 import {
+  Cartesian2,
   DeveloperError,
   HeightReference,
   PrimitiveCollection,
@@ -30,10 +31,12 @@ import { destroyRasterResources, rasterSourceInfo, RasterTileRenderer } from '..
 import { SymbolTileRenderer } from '../symbol/symbol-renderer';
 import { isClampHeightReference, VectorTileRenderer } from '../vector/vector-tile-renderer';
 import { BackgroundRenderer } from './background-renderer';
+import { DrapedSurfacePass } from './draped-surface-pass';
 import { DrawCommands } from './draw-commands';
 import { MAX_TILE_COMMITS } from './frame-budget';
 import { FramePreparation, pixelRatioCompensation } from './frame-preparation';
 import { pickedFeature } from './picked-feature';
+import { cameraBearingForFrame } from './render-frame';
 import { RenderLayerIndex } from './render-layer-index';
 import { SceneCollections } from './scene-collections';
 import { SceneRenderWake } from './scene-render-wake';
@@ -79,7 +82,15 @@ export class TilesetRenderer {
 
   readonly commands = new DrawCommands();
 
+  readonly draped = new DrapedSurfacePass(this.commands, () => {
+    this._memoryBudgetDirty = true;
+    this.wake.request();
+  });
+
   lightRevision = 0;
+
+  private readonly _lightRotation = new Cartesian2(1, 0);
+  private _cameraBearing?: number;
 
   readonly publishQueue: TilePublishQueue;
   private _ready = false;
@@ -180,7 +191,12 @@ export class TilesetRenderer {
       symbolLayers: sourceId => this.layerIndex.symbolForSource(sourceId),
       patternLayers: sourceId => this.layerIndex.patternForSource(sourceId),
       rasterLayers: sourceId => this.layerIndex.rasterForSource(sourceId),
-      rasterSource: sourceId => rasterSourceInfo(this.style.tilePyramids[sourceId]?.getSource()),
+      rasterSource: (sourceId) => {
+        const source = this.style.tilePyramids[sourceId]?.getSource();
+        if (!source)
+          throw new Error(`Raster publication requires source ${sourceId}`);
+        return rasterSourceInfo(source);
+      },
       isRenderable: (sourceId, tileKey) => this.style.tilePyramids[sourceId]?.isRenderableId(tileKey) ?? false,
       publish: result => this.residency.commit(result),
       publishPattern: (sourceId, tileID, update) => {
@@ -222,6 +238,7 @@ export class TilesetRenderer {
     const transitions = this.style.getRenderTransitionFlags();
     return {
       zoom: this.evaluation.zoom,
+      bearing: this._cameraBearing,
       evaluationId: this.evaluation.evaluationId,
       styleRevision: this.style.styleRevision,
       force: transitions.vector,
@@ -240,7 +257,7 @@ export class TilesetRenderer {
     const resolveReady = this._readyResolve!;
     const rejectReady = this._readyReject;
     this.layerIndex = new RenderLayerIndex(this.style);
-    this.evaluation = new StyleEvaluation(this.style, this.layerIndex);
+    this.evaluation = new StyleEvaluation(this.style, this.layerIndex, this._lightRotation);
     this.style.triggerRepaint = () => this.wake.request();
     this.style.zoomLevelsToOverscale = this._zoomLevelsToOverscale;
     this.style.on('data', this._onStyleData);
@@ -404,6 +421,7 @@ export class TilesetRenderer {
   setStyle(nextStyle: StyleSpecification): void {
     this._assertNotDestroyed();
     const cameraPaint = this.vector.captureLivePaint();
+    const patternPaint = this.pattern.captureLivePaint();
     // Style preflights unsupported operations before applying the diff.
     // Failures reach the caller without silently discarding a working scene.
     const change = this.style.setState(nextStyle);
@@ -412,7 +430,7 @@ export class TilesetRenderer {
     }
     const { previous: previousStyle, next } = change;
     this._styleSpec = next;
-    const { changes, paintOnly } = classifyStyleChange(change, this.style);
+    const { changes, paintOnly } = classifyStyleChange(change, this.style, this.mode);
     if (paintOnly) {
       // Existing paint updaters own material/attribute changes and request
       // continuation when a write needs a GPU upload. Geometry stays resident.
@@ -421,12 +439,15 @@ export class TilesetRenderer {
       return;
     }
     this.vector.freezePaint(cameraPaint);
+    this.pattern.freezePaint(patternPaint);
     this.publishQueue.clear();
+    const previousFirstExtrusionLayerId = this.layerIndex.firstExtrusionLayerId;
     this.layerIndex.rebuildIndex();
     this.collections.flushRemovals();
     const sourceIds = new Set(Object.keys(next.sources));
     const addedSourceIds = new Set(next.layers.flatMap(layer => 'source' in layer && !(layer.source in previousStyle.sources) ? [layer.source] : []));
-    this.residency.reconcileSources(sourceIds, addedSourceIds, new Map(previousStyle.layers.map((layer, index) => [layer.id, index])));
+    const retainedOrder = new Map(previousStyle.layers.map((layer, index) => [layer.id, index]));
+    this.residency.reconcileSources(sourceIds, addedSourceIds, retainedOrder, previousFirstExtrusionLayerId);
     for (const sourceId in this.style._updatedSources) {
       if (this.style._updatedSources[sourceId] === 'reload'
         && sourceId in previousStyle.sources && sourceIds.has(sourceId)) {
@@ -587,6 +608,7 @@ export class TilesetRenderer {
     this.placement.release();
     this.covering.destroy();
     this.vector.setDraping(undefined, this._heightReference);
+    this.draped.release();
   }
 
   postPassesUpdate(frameState: RenderFrameState): void {
@@ -608,7 +630,8 @@ export class TilesetRenderer {
       // Cesium consumes this queue even when requestRenderMode skips drawing.
       // Bind before readiness so asynchronous style loading can wake rendering.
       this.wake.afterRender = frameState.afterRender;
-      this.vector.setDraping(frameState.camera._scene?.vectorProvider, this._heightReference);
+      const provider = this.draped.bind(frameState.camera._scene, frameState.mode ?? this.mode, this._heightReference);
+      this.vector.setDraping(provider, this._heightReference, provider === this.draped.provider ? this.draped.visitMemoryEntries : undefined);
     }
     if (this.collections.flushRemovals())
       this._memoryBudgetDirty = true;
@@ -656,9 +679,16 @@ export class TilesetRenderer {
     }
 
     const coveringZoom = coverings.find(item => item.covering !== undefined)?.covering?.styleZoom;
+    const bearing = cameraBearingForFrame(frameState, this.covering.cameraFrame);
+    this._cameraBearing = bearing;
+    if (bearing !== undefined) {
+      this._lightRotation.x = Math.cos(bearing);
+      this._lightRotation.y = Math.sin(bearing);
+    }
     const evaluatedStyle = this.evaluation.evaluate(coveringZoom);
     this.lightRevision = evaluatedStyle.lightRevision;
     this.vector.lighting = evaluatedStyle.lighting;
+    this.pattern.lighting = evaluatedStyle.lighting;
     const transitionFlags = evaluatedStyle.transitions;
     if (geometryChanged) {
       this.layerIndex.rebuildIndex();
@@ -709,6 +739,11 @@ export class TilesetRenderer {
         imageUpdateRevision: this.style.images.imageUpdateRevision,
         budget: frameBudget,
       }));
+      // Source sync can discover a fade that expires within this same walk.
+      // Request cleanup from unacknowledged work, not fractional opacity or
+      // the earlier style transition snapshot.
+      if (tilePyramid.hasRasterTransition())
+        this.wake.request();
       totalRenderable += result.renderableCount;
       retiredCapacity += tilePyramid._tileCache.max;
       residentChanged ||= result.changed;
@@ -724,6 +759,10 @@ export class TilesetRenderer {
     // Native commands retain their material's samplers for this frame.
     // Refresh appearances before first updates can submit those commands.
     this._memoryBudgetDirty = this.symbol.refreshImages(this.style.images) || this._memoryBudgetDirty;
+    // Held and staged circle owners may submit their first child directly.
+    // Bind the physical camera before the upload queue computes command bounds.
+    this.vector.updateLivePaint(this._paintFrame(frameBudget));
+    this.pattern.updateCameraPaint(this.evaluation.zoom, this._cameraBearing);
     const firstCommand = frameState.commandList?.length ?? 0;
     this._backgroundRenderer.update(this.style, frameState, this.mode, this.wake.request);
     // Advance already committed resources before building more. Both stages
@@ -760,6 +799,7 @@ export class TilesetRenderer {
     }
     const paintFrame = {
       zoom: this.evaluation.zoom,
+      bearing: this._cameraBearing,
       evaluationId: evaluatedStyle.evaluationId,
       force: transitionFlags.vector,
       styleRevision: this.style.styleRevision,
@@ -768,7 +808,6 @@ export class TilesetRenderer {
       lightRevision: evaluatedStyle.lightRevision,
       budget: frameBudget,
     };
-    this.vector.updateLivePaint(paintFrame);
     const collectionReplacements = frameWork.run('paint', runnable, budget =>
       this.vector.updatePaint({ ...paintFrame, budget }), this.preparation.continuationMs);
     if (this.vector.needsPaintUpdate) {
@@ -778,16 +817,16 @@ export class TilesetRenderer {
     for (const { tileId, old, replacement } of collectionReplacements) {
       this.collections.replaceWhenReady(tileId, old, replacement);
     }
-    const fadeOpacityOf = (tileId: string): number | undefined => {
-      const slash = tileId.indexOf('/');
+    const rasterFrameOf = (tileId: string) => {
+      const slash = tileId.lastIndexOf('/');
       const tilePyramid = this.style.tilePyramids[tileId.slice(0, slash)];
-      return tilePyramid?.getRasterFadeOpacity(tileId.slice(slash + 1));
+      return tilePyramid && { source: tilePyramid.getSource(), fade: tilePyramid.getRasterFade(tileId.slice(slash + 1)) };
     };
     const rasterUpdate = this.raster.update(
       this.style.renderRevision,
       transitionFlags.raster,
       transitionFlags.rasterLayerIds,
-      fadeOpacityOf,
+      rasterFrameOf,
     );
     this.collections.applyRasterUpdate(rasterUpdate);
     if (rasterUpdate.added.length > 0 || rasterUpdate.removed.length > 0 || rasterUpdate.textureChanged) {
@@ -829,17 +868,26 @@ export class TilesetRenderer {
       this._drapeFrameNumber += 1;
     }
     this.collections.syncDrapedVisibility(this.layerIndex.visibility());
-    if (this.vector.markDrapedCollections(frameState.frameNumber ?? this._drapeFrameNumber, this.residency.retainedLayerOrder ?? this.layerIndex.order)) {
+    const retainedStyle = this.residency.retainedStyle;
+    if (this.vector.markDrapedCollections(frameState.frameNumber ?? this._drapeFrameNumber, this.layerIndex.order, retainedStyle)) {
       this.wake.request();
     }
     // Draw completed collections after placement and visibility settle.
     // Newly queued resources enter Native preparation on the next frame.
     this.collections.updateChildren(frameState, pumped);
-    this.commands.prepare(frameState, firstCommand, this.mode, this.residency.retainedLayerOrder ?? this.layerIndex.order, this.covering.scene, this.residency.drawRanks, this.residency.hiddenSurfaceLayers, this.residency.hiddenStyleTiles, this.layerIndex.visibility());
+    this.draped.prepare(frameState, {
+      layerOrder: this.layerIndex.order,
+      retainedStyle,
+      tileRanks: this.residency.drawRanks,
+      hiddenTiles: this.residency.hiddenStyleTiles,
+      hiddenLayers: this.residency.hiddenSurfaceLayers,
+      visibility: this.layerIndex.visibility(),
+    });
+    this.commands.prepare(frameState, firstCommand, this.mode, this.layerIndex.order, this.covering.scene, this.residency.drawRanks, this.residency.hiddenSurfaceLayers, this.residency.hiddenStyleTiles, this.layerIndex.visibility(), this.layerIndex.firstExtrusionLayerId, retainedStyle);
     this._lastSubmittedCommands = (frameState.commandList?.length ?? firstCommand) - firstCommand;
     // Symbol atlases and picking data must survive the last old color frame.
     // Native afterRender also covers both date-line viewports before release.
-    if (frameState.passes?.render && this.tilesLoaded && this.residency.retainedLayerOrder) {
+    if (frameState.passes?.render && this.tilesLoaded && retainedStyle) {
       const revision = this.style.styleRevision;
       frameState.afterRender?.push(() => {
         if (!this._destroyed && this.style.styleRevision === revision && this.tilesLoaded

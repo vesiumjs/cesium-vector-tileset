@@ -1,6 +1,6 @@
 import type { Bucket } from '../../data/bucket';
 import type { CircleBucket, FillBucket, FillExtrusionBucket, LineBucket } from '../../data/bucket-runtime';
-import type { FeaturePaintRange, ProgramConfiguration } from '../../data/program-configuration';
+import type { FeaturePaintRange } from '../../data/program-configuration';
 import type { StyleLayer } from '../../style/style-layer';
 import type { CircleStyleLayer } from '../../style/style-layer/circle-style-layer';
 import { Color } from 'cesium';
@@ -25,6 +25,9 @@ export interface LineFeatureStyle {
   color: Color;
   /** width in pixels */
   widthPx: number;
+  gapWidthPx: number;
+  offsetPx: number;
+  blurPx: number;
 }
 
 export interface ExtrusionFeatureStyle {
@@ -47,10 +50,7 @@ export interface CircleFeatureStyle {
   outlineColor: Color;
   /** stroke width in pixels */
   outlineWidthPx: number;
-}
-
-export function circlePaintVisible(color: Color, outlineColor: Color, outlineWidth: number): boolean {
-  return color.alpha > 0 || (outlineWidth > 0 && outlineColor.alpha > 0);
+  blur: number;
 }
 
 export function paintRevision(bucket: Pick<Bucket, 'layers'> & { programConfigurations?: { paintRevision: number } }): number {
@@ -59,6 +59,13 @@ export function paintRevision(bucket: Pick<Bucket, 'layers'> & { programConfigur
     revision += layer.paintRevision;
   return revision;
 }
+
+export interface FeaturePaintConfiguration {
+  getAttributeArray: (property: string) => { arrayBuffer: ArrayBuffer; bytesPerElement: number; length: number } | undefined;
+  getInterpolationFactor: (property: string, zoom: number) => number;
+}
+
+interface PaintLayer { paint: Pick<StyleLayer['paint'], 'get'> }
 
 interface AttributeData {
   values: Float32Array;
@@ -86,7 +93,7 @@ export function findRange(bucket: FillBucket | LineBucket | CircleBucket | FillE
  * Read the paint slot owned by a feature.
  * Returns null when the property is constant (no attribute array).
  */
-function readAttribute(config: ProgramConfiguration, property: string, range: FeaturePaintRange): AttributeData | null {
+function readAttribute(config: FeaturePaintConfiguration, property: string, range: FeaturePaintRange): AttributeData | null {
   const array = config.getAttributeArray(property);
   if (!array) {
     return null;
@@ -141,7 +148,7 @@ export function straightAlphaColor(red: number, green: number, blue: number, alp
   );
 }
 
-function readColor(config: ProgramConfiguration, property: string, range: FeaturePaintRange, zoom: number): Color | null {
+function readColor(config: FeaturePaintConfiguration, property: string, range: FeaturePaintRange, zoom: number): Color | null {
   const values = readAttribute(config, property, range);
   if (!values) {
     return null;
@@ -178,7 +185,7 @@ function readColor(config: ProgramConfiguration, property: string, range: Featur
  * `a_fill_color`/`a_halo_color` attributes rely on.
  */
 export function vertexColor(
-  config: ProgramConfiguration,
+  config: FeaturePaintConfiguration,
   property: string,
   vertexStart: number,
   zoom: number,
@@ -186,7 +193,7 @@ export function vertexColor(
   return readColor(config, property, { index: 0, start: vertexStart, end: vertexStart + 1 }, zoom);
 }
 
-function readNumber(config: ProgramConfiguration, property: string, range: FeaturePaintRange, zoom: number): number | null {
+function readNumber(config: FeaturePaintConfiguration, property: string, range: FeaturePaintRange, zoom: number): number | null {
   const values = readAttribute(config, property, range);
   if (!values) {
     return null;
@@ -212,7 +219,7 @@ export function constantValue(layer: { paint: Pick<StyleLayer['paint'], 'get'> }
   return value;
 }
 
-function colorFor(config: ProgramConfiguration, layer: StyleLayer, property: string, range: FeaturePaintRange, zoom: number): Color {
+function colorFor(config: FeaturePaintConfiguration, layer: PaintLayer, property: string, range: FeaturePaintRange, zoom: number): Color {
   const fromAttribute = readColor(config, property, range, zoom);
   if (fromAttribute) {
     return fromAttribute;
@@ -224,7 +231,7 @@ function colorFor(config: ProgramConfiguration, layer: StyleLayer, property: str
   return straightAlphaColor(value.r, value.g, value.b, value.a);
 }
 
-function numberFor(config: ProgramConfiguration, layer: StyleLayer, property: string, range: FeaturePaintRange, zoom: number): number {
+function numberFor(config: FeaturePaintConfiguration, layer: PaintLayer, property: string, range: FeaturePaintRange, zoom: number): number {
   const fromAttribute = readNumber(config, property, range, zoom);
   if (fromAttribute !== null) {
     return fromAttribute;
@@ -252,7 +259,7 @@ export function layerFor<T extends { layers: Array<{ id: string }> }>(bucket: T,
   return layer as T['layers'][number];
 }
 
-function layerOpacity(layer: StyleLayer, property: string): number {
+function layerOpacity(layer: PaintLayer, property: string): number {
   const value = constantValue(layer, property);
   return typeof value === 'number' && Number.isFinite(value) ? value : 1;
 }
@@ -278,6 +285,12 @@ export function extrusionPatternOpacityForFeature(bucket: FillExtrusionBucket, f
   return numberFor(config, layer, 'fill-extrusion-opacity', range, zoom);
 }
 
+/** Declaration presence owns the explicit outline role, independent of evaluated color. */
+export function hasExplicitFillOutline(layer: Pick<StyleLayer, 'getPaintProperty'>): boolean {
+  const outline = layer.getPaintProperty('fill-outline-color');
+  return outline !== undefined && outline !== null;
+}
+
 export function fillStyleForFeature(bucket: FillBucket, featureIndex: number, layerId?: string, zoom = bucket.zoom): FillFeatureStyle {
   const layer = layerFor(bucket, layerId);
   const range = findRange(bucket, featureIndex);
@@ -292,8 +305,7 @@ export function fillStyleForFeature(bucket: FillBucket, featureIndex: number, la
   // evaluated paint value to fill-color; use the already evaluated fill color
   // here rather than asking the data-driven binder for an implicit property.
   const antialias = constantValue(layer, 'fill-antialias') !== false;
-  const outline = layer.getPaintProperty?.('fill-outline-color');
-  const hasExplicitOutline = outline !== undefined && outline !== null;
+  const hasExplicitOutline = hasExplicitFillOutline(layer);
   const outlineColor = !antialias
     ? Color.TRANSPARENT.clone()
     : hasExplicitOutline
@@ -313,12 +325,20 @@ export function lineStyleForFeature(bucket: LineBucket, featureIndex: number, la
   const layer = layerFor(bucket, layerId);
   const range = findRange(bucket, featureIndex);
   const config = bucket.programConfigurations.get(layer.id);
+  return lineStyleForPaint(layer, config, range, zoom);
+}
+
+/** Live and retained lines decode the same constant/source/composite contract. */
+export function lineStyleForPaint(layer: PaintLayer, config: FeaturePaintConfiguration, range: FeaturePaintRange, zoom: number): LineFeatureStyle {
   const color = colorFor(config, layer, 'line-color', range, zoom);
   const opacity = numberFor(config, layer, 'line-opacity', range, zoom);
   color.alpha *= opacity * layerOpacity(layer, 'line-layer-opacity');
   return {
     color,
     widthPx: numberFor(config, layer, 'line-width', range, zoom),
+    gapWidthPx: numberFor(config, layer, 'line-gap-width', range, zoom),
+    offsetPx: numberFor(config, layer, 'line-offset', range, zoom),
+    blurPx: numberFor(config, layer, 'line-blur', range, zoom),
   };
 }
 
@@ -353,8 +373,6 @@ export function circleStyleForFeature(bucket: CircleBucket<CircleStyleLayer>, fe
   const color = colorFor(config, layer, 'circle-color', range, zoom);
   const opacity = numberFor(config, layer, 'circle-opacity', range, zoom);
   color.alpha *= opacity;
-  // Native circles interpolate RGB and alpha independently at the stroke
-  // boundary. A transparent fill must not contribute its old hue there.
   if (color.alpha === 0)
     Color.TRANSPARENT.clone(color);
   const outlineColor = colorFor(config, layer, 'circle-stroke-color', range, zoom);
@@ -367,5 +385,6 @@ export function circleStyleForFeature(bucket: CircleBucket<CircleStyleLayer>, fe
     sizePx: numberFor(config, layer, 'circle-radius', range, zoom) * 2,
     outlineColor,
     outlineWidthPx: numberFor(config, layer, 'circle-stroke-width', range, zoom),
+    blur: numberFor(config, layer, 'circle-blur', range, zoom),
   };
 }

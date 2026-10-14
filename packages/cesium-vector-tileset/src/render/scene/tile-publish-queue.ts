@@ -112,6 +112,7 @@ export interface TilePublishOptions {
   patternLayers: (sourceId: string) => readonly PatternStyleLayer[];
   rasterLayers: (sourceId: string) => readonly RasterStyleLayer[];
   rasterSource: (sourceId: string) => {
+    identity: object;
     dynamic: boolean;
     tileCoords?: readonly RasterTileCoordinate[];
     flippedWindingOrder?: boolean;
@@ -434,7 +435,6 @@ export class TilePublishQueue {
       buckets: tile.buckets,
       atlas: tile.imageAtlas,
       layers,
-      layerOrder: this._options.layerOrder(),
       sourceId,
       styleZoom: tileZoomOf(tile.tileID),
       mode: this._options.sceneMode(),
@@ -736,12 +736,16 @@ export class TilePublishQueue {
    * @internal
    */
   private _addRaster(job: PublishJob): RasterTileUpdate {
+    const layers = this._options.rasterLayers(job.sourceId);
+    if (layers.length === 0)
+      return { removed: [], added: [], removedMaterials: [] };
     const source = this._options.rasterSource(job.sourceId);
     return this._options.raster.addTile(
       job.tileId,
       job.generation.data.tileID,
       job.generation.data.textureData,
-      this._options.rasterLayers(job.sourceId),
+      layers,
+      source.identity,
       source.dynamic,
       source.tileCoords,
       source.flippedWindingOrder,
@@ -765,7 +769,6 @@ export class TilePublishQueue {
         buckets: job.generation.data.buckets,
         atlas: job.generation.data.imageAtlas,
         layers: job.patternLayers,
-        layerOrder: this._options.layerOrder(),
         sourceId: job.sourceId,
         styleZoom: tileZoomOf(job.generation.data.tileID),
         mode: this._options.sceneMode(),

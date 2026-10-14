@@ -1,7 +1,7 @@
-import type { PointPrimitive } from 'cesium';
 import type { Bucket } from '../../data/bucket';
 import type { DashRow } from '../../source/worker-source';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
+import type { GeometryPrimitive } from '../geometry/geometry-primitive';
 import type { DashMaterial } from '../line/dash-material';
 import type { LineBuildState } from '../line/line-renderer';
 import type { Budget } from '../scene/frame-budget';
@@ -11,11 +11,8 @@ import type { VectorCollection } from './vector-tile-renderer';
 import {
   BlendOption,
   BoundingSphere,
-  BufferPoint,
-  BufferPointCollection,
   BufferPolygon,
   BufferPolygonCollection,
-  Color,
   ColorGeometryInstanceAttribute,
   ComponentDatatype,
   Geometry,
@@ -24,37 +21,25 @@ import {
   GeometryInstanceAttribute,
   HeightReference,
   PerInstanceColorAppearance,
-  PointPrimitiveCollection,
   PrimitiveCollection,
   PrimitiveType,
   SceneMode,
   ShowGeometryInstanceAttribute,
 } from 'cesium';
-import { FillExtrusionBucket } from '../../data/bucket-runtime';
+import { CircleBucket, FillBucket, FillExtrusionBucket } from '../../data/bucket-runtime';
+import { CircleCollection } from '../circle/circle-collection';
 import { fillBoundingSphere } from '../geometry/fill-bounding-sphere';
-import { GeometryPrimitive } from '../geometry/geometry-primitive';
+import { FillBufferPaint } from '../geometry/fill-buffer-paint';
+import { fillCameraPaintOwners } from '../geometry/fill-camera-paint';
+import { FILL_TRANSLATION_SHADER, FillGeometryPrimitive } from '../geometry/fill-geometry-primitive';
 import { tileBoundingSphere } from '../geometry/tile-bounding-sphere';
 import { beginLineBuild, commitLineBuild, discardLineBuild, stepLineBuild } from '../line/line-renderer';
-import { registerDrawBatch } from '../scene/draw-batch';
+import { LineTileClip, SURFACE_TILE_CLIP_FRAGMENT } from '../line/line-tile-clip';
+import { registerDrawBatch, registerTileClip } from '../scene/draw-batch';
 import { iterateExtrusionBucketPrimitives } from './extrusion-geometry';
 import { deferredExtrusionLayers, ExtrusionPrimitive } from './extrusion-primitive';
-import { circlePaintVisible, constantValue, layerFor, paintRevision } from './feature-attributes';
+import { constantValue, layerFor, paintRevision } from './feature-attributes';
 import { advanceTileConversion, beginTileConversion } from './tile-conversion';
-
-function groupByStyleLayer<T extends { pickObject: { layerId: string } }>(primitives: readonly T[]): Map<string, T[]> {
-  const byLayer = new Map<string, T[]>();
-  for (const primitive of primitives) {
-    const layerId = primitive.pickObject.layerId;
-    const layer = byLayer.get(layerId);
-    if (layer) {
-      layer.push(primitive);
-    }
-    else {
-      byLayer.set(layerId, [primitive]);
-    }
-  }
-  return byLayer;
-}
 
 export type TileID = CanonicalTileID | OverscaledTileID;
 
@@ -104,11 +89,11 @@ export interface VectorTileBuildState extends VectorTileBuildInput {
   extrusionBuild?: ExtrusionBuildState;
   polygonBuild?: StandardPolygonBuildState;
   bufferPolygonBuild?: BufferPolygonBuildState;
+  circleBuild?: Generator<void>;
 }
 
 export interface StandardRenderEntries {
   polygons: StandardPolygonEntry[];
-  points: PointPrimitive[];
 }
 
 export interface StandardPolygonEntry {
@@ -196,10 +181,12 @@ export class VectorTileBuilder {
         state.tileID,
         state.generationId,
         state.sourceId,
-        state.layerOrder,
         state.skipLayerIds,
         state.styleZoom,
         state.mode,
+        state.mode === SceneMode.SCENE3D && (context.heightReference === HeightReference.CLAMP_TO_GROUND
+          || context.heightReference === HeightReference.CLAMP_TO_TERRAIN
+          || context.heightReference === HeightReference.CLAMP_TO_3D_TILE),
       );
       if (!advanceTileConversion(state.convert, budget, 'surface')) {
         return false;
@@ -214,8 +201,8 @@ export class VectorTileBuilder {
       }
       const result = state.result!;
       if (state.mode !== SceneMode.SCENE3D) {
-        state.standard ??= { polygons: [], points: [] };
-        state.polygonBuild ??= beginStandardPolygonBuild(result.polygons, state.tileId, state.mode);
+        state.standard ??= { polygons: [] };
+        state.polygonBuild ??= beginStandardPolygonBuild(result.polygons, state.tileId, state.tileID, state.mode);
         if (!stepStandardPolygonBuild(state.polygonBuild, budget)) {
           return false;
         }
@@ -227,7 +214,7 @@ export class VectorTileBuilder {
         state.polygonBuild = undefined;
       }
       else if (result.polygons.length > 0) {
-        state.bufferPolygonBuild ??= beginBufferPolygonBuild(result.polygons, state.tileID, state.tileId, context.heightReference);
+        state.bufferPolygonBuild ??= beginBufferPolygonBuild(result.polygons, state.tileID, state.tileId, context.heightReference, state.buckets, state.styleZoom);
         if (!stepBufferPolygonBuild(state.bufferPolygonBuild, budget))
           return false;
         state.entries.push(...state.bufferPolygonBuild.entries);
@@ -304,20 +291,14 @@ export class VectorTileBuilder {
         return false;
       }
       const result = state.result!;
-      if (state.mode === SceneMode.SCENE3D && result.points.length > 0) {
-        for (const [layerId, points] of groupByStyleLayer(result.points)) {
-          const collection = buildPointCollection(points, state.tileID);
-          registerDrawBatch(collection, { layerId, tileId: state.tileId, kind: 'circle' });
-          state.entries.push([`points:${layerId}`, collection]);
-        }
-      }
-      else if (state.standard) {
-        const points = buildStandardPoints(result.points, state.tileId);
-        if (points) {
-          state.standard.points = points.entries;
-          state.entries.push(['points', points.collection]);
-        }
-      }
+      state.circleBuild ??= appendCircleCollections(result.points, state.buckets, state.tileId, context.pixelRatio, state.mode, state.entries);
+      do {
+        if (state.circleBuild.next().done)
+          break;
+        if (budget.exhausted)
+          return false;
+      } while (true);
+      state.circleBuild = undefined;
       result.points = [];
       state.phase = 'done';
     }
@@ -338,6 +319,8 @@ export class VectorTileBuilder {
       collection.destroy();
     }
     state.entries = [];
+    state.circleBuild?.return(undefined);
+    state.circleBuild = undefined;
     state.standard = undefined;
     if (state.lineBuild) {
       discardLineBuild(state.lineBuild);
@@ -507,6 +490,7 @@ function* appendExtrusions(
     }
     if (instances.length > 0) {
       const primitive = new ExtrusionPrimitive(instances, lighting);
+      primitive.updateCameraPaint(bucket, layerId, zoom);
       registerDrawBatch(primitive, { layerId, tileId, kind: 'extrusion' });
       collection.add(primitive);
     }
@@ -540,6 +524,8 @@ ${morph ? 'in vec3 a_positionHigh;\nin vec3 a_positionLow;' : ''}
 in vec4 color;
 in float batchId;
 out vec4 v_color;
+out vec3 v_centerEye;
+${FILL_TRANSLATION_SHADER}
 
 void main()
 {
@@ -548,52 +534,45 @@ ${morph
   ? `    p = czm_columbusViewMorph(p,
         czm_translateRelativeToEye(a_positionHigh * 65536.0, a_positionLow), czm_morphTime);`
   : ''}
+    if (any(notEqual(u_fillTranslate, vec2(0.0)))) {
+    vec3 normal = vec3(1.0, 0.0, 0.0);
+    if (czm_morphTime > 0.0 || !u_fillMercator) {
+${morph
+  ? '    normal = normalize((a_positionHigh * 65536.0 + a_positionLow) / (czm_ellipsoidRadii * czm_ellipsoidRadii));'
+  : `    vec2 angular = (position2DHigh.xy * 65536.0 + position2DLow.xy) / czm_ellipsoidRadii.x;
+    float latitude = u_fillMercator ? atan(sinh(angular.y)) : angular.y;
+    normal = vec3(cos(latitude) * cos(angular.x), cos(latitude) * sin(angular.x), sin(latitude));`}
+    }
+    p = cvt_translateFillPosition(p, normal);
+    }
+    v_centerEye = (czm_modelViewRelativeToEye * p).xyz;
     v_color = color;
     gl_Position = czm_modelViewProjectionRelativeToEye * p;
 }
 `;
 }
 
-function standardPolygonPrimitive(instances: GeometryInstance[], mode: SceneMode): GeometryPrimitive {
+function standardPolygonPrimitive(instances: GeometryInstance[], mode: SceneMode): FillGeometryPrimitive {
   const morph = mode === SceneMode.MORPHING;
-  return new GeometryPrimitive({
-    geometryInstances: instances,
-    appearance: new PerInstanceColorAppearance({
-      // Alpha can change with a data/zoom expression after construction. Keep
-      // blending enabled for the shared primitive so a later translucent
-      // value is not silently rendered as opaque.
-      translucent: true,
-      flat: true,
-      faceForward: true,
-      closed: false,
-      vertexShaderSource: surfaceVertexShader(morph),
-    }),
-    compressVertices: true,
-    vertexCacheOptimize: true,
-  }, morph ? 'surface-morph' : 'surface-planar');
+  return new FillGeometryPrimitive(instances, new PerInstanceColorAppearance({
+    // Alpha can change with a data/zoom expression after construction. Keep
+    // blending enabled for the shared primitive so a later translucent
+    // value is not silently rendered as opaque.
+    translucent: true,
+    flat: true,
+    faceForward: true,
+    closed: false,
+    vertexShaderSource: surfaceVertexShader(morph),
+    fragmentShaderSource: `
+in vec4 v_color;
+${SURFACE_TILE_CLIP_FRAGMENT}
+void main()
+{
+    clipSurfaceTile();
+    out_FragColor = czm_gammaCorrect(v_color);
 }
-
-function standardPointCollection(
-  points: TileRenderResult['points'],
-): { collection: PointPrimitiveCollection; entries: PointPrimitive[] } | undefined {
-  if (points.length === 0) {
-    return undefined;
-  }
-  const collection = new PointPrimitiveCollection({ blendOption: BlendOption.OPAQUE_AND_TRANSLUCENT });
-  const entries: PointPrimitive[] = [];
-  for (const primitive of points) {
-    const point = collection.add({
-      position: primitive.position,
-      pixelSize: Math.max(1, Math.min(255, primitive.material.size)),
-      color: Color.clone(primitive.material.color),
-      outlineColor: Color.clone(primitive.material.outlineColor),
-      outlineWidth: Math.max(0, Math.min(255, primitive.material.outlineWidth)),
-      id: primitive.pickObject,
-      show: circlePaintVisible(primitive.material.color, primitive.material.outlineColor, primitive.material.outlineWidth),
-    });
-    entries.push(point);
-  }
-  return { collection, entries };
+`,
+  }), morph ? 'surface-morph' : 'surface-planar', true);
 }
 
 interface StandardPolygonBuildState {
@@ -605,11 +584,12 @@ interface StandardPolygonBuildState {
 function beginStandardPolygonBuild(
   polygons: TileRenderResult['polygons'],
   tileId: string,
+  tileID: TileID,
   mode: SceneMode,
 ): StandardPolygonBuildState {
   const collection = new PrimitiveCollection();
   const entries: StandardPolygonEntry[] = [];
-  return { collection, entries, iterator: appendStandardPolygons(collection, entries, polygons, tileId, mode) };
+  return { collection, entries, iterator: appendStandardPolygons(collection, entries, polygons, tileId, tileID, mode) };
 }
 
 function stepStandardPolygonBuild(state: StandardPolygonBuildState, budget: Budget): boolean {
@@ -634,8 +614,12 @@ function* appendStandardPolygons(
   entries: StandardPolygonEntry[],
   polygons: TileRenderResult['polygons'],
   tileId: string,
+  tileID: TileID,
   mode: SceneMode,
 ): Generator<void> {
+  const clip = new LineTileClip(tileID);
+  const owners: Array<{ layerId: string; paint: FillGeometryPrimitive }> = [];
+  fillCameraPaintOwners.set(collection, owners);
   const byLayer = new Map<string, TileRenderResult['polygons']>();
   for (const polygon of polygons) {
     const layerId = polygon.pickObject.layerId;
@@ -655,7 +639,7 @@ function* appendStandardPolygons(
   for (const [layerId, layer] of byLayer) {
     let bytes = 16;
     let instances: GeometryInstance[] = [];
-    let primitive: GeometryPrimitive | undefined;
+    let primitive: FillGeometryPrimitive | undefined;
     for (const polygon of layer) {
       const inputBytes = 8 * (40 + polygon.positions.length + polygon.triangles.length);
       if (instances.length > 0 && bytes + inputBytes > maximumBytes) {
@@ -666,6 +650,8 @@ function* appendStandardPolygons(
       }
       if (!primitive) {
         primitive = standardPolygonPrimitive(instances, mode);
+        owners.push({ layerId, paint: primitive });
+        registerTileClip(primitive, clip);
         // Own partial as well as sealed batches until the complete track is
         // handed off. Discard can then destroy every unpublished primitive.
         collection.add(primitive);
@@ -692,34 +678,14 @@ function* appendStandardPolygons(
   }
 }
 
-function buildStandardPoints(
-  points: TileRenderResult['points'],
-  tileId: string,
-): { collection: PrimitiveCollection; entries: PointPrimitive[] } | undefined {
-  if (points.length === 0) {
-    return undefined;
-  }
-  const collection = new PrimitiveCollection();
-  const entries: PointPrimitive[] = [];
-  for (const [layerId, layer] of groupByStyleLayer(points)) {
-    const built = standardPointCollection(layer);
-    if (built) {
-      registerDrawBatch(built.collection, { layerId, tileId, kind: 'circle' });
-      collection.add(built.collection);
-      entries.push(...built.entries);
-    }
-  }
-  return { collection, entries };
-}
-
 interface BufferPolygonBuildState {
   entries: Array<[string, BufferPolygonCollection]>;
   iterator: Generator<void, void>;
 }
 
-function beginBufferPolygonBuild(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference): BufferPolygonBuildState {
+function beginBufferPolygonBuild(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, buckets: BucketMap, zoom: number): BufferPolygonBuildState {
   const entries: BufferPolygonBuildState['entries'] = [];
-  return { entries, iterator: appendBufferPolygonCollections(polygons, tileID, tileId, heightReference, entries) };
+  return { entries, iterator: appendBufferPolygonCollections(polygons, tileID, tileId, heightReference, buckets, zoom, entries) };
 }
 
 function stepBufferPolygonBuild(state: BufferPolygonBuildState, budget: Budget): boolean {
@@ -730,7 +696,7 @@ function stepBufferPolygonBuild(state: BufferPolygonBuildState, budget: Budget):
   return false;
 }
 
-function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
+function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, heightReference: HeightReference, buckets: BucketMap, zoom: number, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
   const layers = new Map<string, TileRenderResult['polygons']>();
   for (let index = 0; index < polygons.length; index++) {
     const primitive = polygons[index];
@@ -743,11 +709,14 @@ function* appendBufferPolygonCollections(polygons: TileRenderResult['polygons'],
       yield;
   }
   for (const [layerId, layer] of layers) {
-    yield* appendBufferPolygonCollection(layer, tileID, tileId, layerId, heightReference, entries);
+    const bucket = buckets[layerId];
+    if (!(bucket instanceof FillBucket))
+      throw new Error(`Missing fill bucket ${layerId}`);
+    yield* appendBufferPolygonCollection(layer, tileID, tileId, layerId, heightReference, bucket, zoom, entries);
   }
 }
 
-function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, layerId: string, heightReference: HeightReference, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
+function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], tileID: TileID, tileId: string, layerId: string, heightReference: HeightReference, bucket: FillBucket, zoom: number, entries: BufferPolygonBuildState['entries']): Generator<void, void> {
   let vertexCount = 0;
   let holeCount = 0;
   let triangleCount = 0;
@@ -777,6 +746,8 @@ function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], 
     holeCountMax: holeCount,
     triangleCountMax: triangleCount,
   });
+  const paint = new FillBufferPaint(collection, polygons.map(polygon => polygon.positions));
+  fillCameraPaintOwners.set(collection, [{ layerId, paint }]);
   registerDrawBatch(collection, { layerId, tileId, kind: 'fill' });
   // This build owns the allocation until all layers finish and transfer it.
   entries.push([`polygons:${layerId}`, collection]);
@@ -793,27 +764,28 @@ function* appendBufferPolygonCollection(polygons: TileRenderResult['polygons'], 
     }, scratch);
     yield;
   }
+  paint.updateCameraPaint(layerFor(bucket, layerId), zoom);
 }
 
-function buildPointCollection(points: TileRenderResult['points'], tileID: TileID): BufferPointCollection {
-  const collection = new BufferPointCollection({
-    allowPicking: true,
-    // Native's circle shader encodes edge coverage in alpha even for opaque paint.
-    blendOption: BlendOption.TRANSLUCENT,
-    // Precomputed tile sphere: disables Cesium's per-update fromVertices
-    // scan over every vertex (see tile-bounding-sphere.ts).
-    boundingVolume: tileBoundingSphere(tileID),
-    primitiveCountMax: points.length,
-  });
-  // One flyweight per build (see buildPolygonCollection).
-  const scratch = new BufferPoint();
-  for (const primitive of points) {
-    collection.add({
-      position: primitive.position,
-      material: primitive.material,
-      pickObject: primitive.pickObject,
-      show: circlePaintVisible(primitive.material.color, primitive.material.outlineColor, Math.floor(primitive.material.outlineWidth)),
-    }, scratch);
+function* appendCircleCollections(points: TileRenderResult['points'], buckets: BucketMap, tileId: string, pixelRatio: number, mode: SceneMode, entries: VectorTileBuildState['entries']): Generator<void> {
+  const layers = new Map<string, CircleCollection>();
+  for (const point of points) {
+    const layerId = point.pickObject.layerId;
+    let collection = layers.get(layerId);
+    if (!collection) {
+      collection = new CircleCollection(layerId, tileId, pixelRatio, mode);
+      const bucket = buckets[layerId];
+      if (!(bucket instanceof CircleBucket))
+        throw new Error(`Missing circle bucket ${layerId}`);
+      collection.updatePolicy(bucket, pixelRatio);
+      layers.set(layerId, collection);
+      entries.push([`points:${layerId}`, collection]);
+    }
+    collection.append(point);
+    yield;
   }
-  return collection;
+  for (const collection of layers.values()) {
+    collection.finish();
+    yield;
+  }
 }
