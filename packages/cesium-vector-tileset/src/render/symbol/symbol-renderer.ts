@@ -1,4 +1,5 @@
 import type {
+  GeometryAttribute,
   PrimitiveCollection,
 } from 'cesium';
 import type { ImageAtlas, ImagePosition } from '../../assets/image-atlas';
@@ -9,6 +10,7 @@ import type { SymbolStyleLayer } from '../../style/style-layer/symbol-style-laye
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { Budget } from '../scene/frame-budget';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
+import type { FrozenSymbolCameraPaint } from './frozen-symbol-paint';
 import type { SymbolPrimitiveGeometry, SymbolTileGeometry } from './symbol-geometry';
 import type { SymbolGpuResources, SymbolHalf } from './symbol-gpu-resources';
 import type { PlacementView, SymbolTileSelection } from './symbol-placement';
@@ -25,14 +27,17 @@ import {
   SharedAtlasTextures,
 } from '../../assets/shared-atlas-textures';
 import { SymbolBucket } from '../../data/bucket-runtime';
+import { samePaintZoom } from '../../style/render-transition';
 import { geometryBytes } from '../geometry/geometry-bytes';
 import { RetiredPool } from '../scene/retired-pool';
 import { MinimumProgressBudget } from '../scene/scene-frame-budget';
 import { constantValue, straightAlphaColor } from '../vector/feature-attributes';
+import { freezeSymbolCameraPaint } from './frozen-symbol-paint';
 import { symbolBucketGeometry } from './symbol-geometry';
 import { mergeSymbolHalves, symbolGeometry } from './symbol-gpu-resources';
-import { SymbolCollisionIndex, SymbolProjectionContext, updateLineSymbolGeometry } from './symbol-placement';
+import { SymbolCollisionIndex, SymbolProjectionContext, updateLineSymbolGeometry, updateVariableSymbolGeometry } from './symbol-placement';
 import { copyPlacementView, samePlacementView, SymbolPlacementScope } from './symbol-placement-pass';
+import { NO_SYMBOL_TRANSLATION, readSymbolTranslation, resolveSymbolTranslation } from './symbol-translation';
 
 export type { MergedSymbolCollections, SymbolGpuResources, SymbolHalf } from './symbol-gpu-resources';
 export { mergeSymbolHalves, SYMBOL_FADE_ATTRIBUTE, SYMBOL_VERTEX_SHADER, SymbolAppearance } from './symbol-gpu-resources';
@@ -43,7 +48,7 @@ type TileID = CanonicalTileID | OverscaledTileID;
 export type SymbolPlacementWork = (operation: (budget: Budget) => void) => void;
 
 /** The evaluated value of a constant symbol paint colour. */
-function symbolColor(layer: SymbolStyleLayer, property: string): Color {
+function symbolColor(layer: Pick<SymbolStyleLayer, 'paint'>, property: string): Color {
   const value = constantValue(layer, property) as { r: number; g: number; b: number; a: number } | undefined;
   if (!value) {
     return Color.WHITE.clone();
@@ -55,17 +60,15 @@ function symbolColor(layer: SymbolStyleLayer, property: string): Color {
  * The evaluated text halo paint of a layer. MapLibre draws the halo as an
  * annulus behind the glyph fill; a zero or absent width disables it.
  */
-function symbolHalo(layer: SymbolStyleLayer, part: 'text' | 'icon' = 'text'): TextHalo | undefined {
+function symbolHalo(layer: Pick<SymbolStyleLayer, 'paint'>, part: 'text' | 'icon' = 'text'): TextHalo {
   const prefix = part === 'text' ? 'text-halo' : 'icon-halo';
   const widthValue = constantValue(layer, `${prefix}-width`);
   const width = typeof widthValue === 'number' && Number.isFinite(widthValue) ? widthValue : 0;
-  if (width <= 0) {
-    return undefined;
-  }
   const blurValue = constantValue(layer, `${prefix}-blur`);
   const blur = typeof blurValue === 'number' && Number.isFinite(blurValue) ? blurValue : 0;
+  const color = symbolColor(layer, `${prefix}-color`);
   return {
-    color: symbolColor(layer, `${prefix}-color`),
+    color,
     width,
     blur,
   };
@@ -73,9 +76,8 @@ function symbolHalo(layer: SymbolStyleLayer, part: 'text' | 'icon' = 'text'): Te
 
 /**
  * The symbol fragment shader as a Cesium material: it samples the glyph/icon
- * atlas and turns the signed distance field into coverage the same way
- * MapLibre's symbol_sdf fragment shader does. Text halos are a second draw
- * pass upstream; they are not wired yet.
+ * atlas and turns the signed distance field into fill and halo coverage the
+ * same way MapLibre's symbol_sdf fragment shader does.
  */
 export const SYMBOL_MATERIAL_SOURCE = `
 in vec2 v_tex;
@@ -83,6 +85,7 @@ in vec3 v_data;
 in float v_is_sdf;
 in vec4 v_color;
 in vec4 v_halo_color;
+in vec2 v_halo_size;
 
 uniform sampler2D u_texture;
 uniform sampler2D u_texture_icon;
@@ -131,14 +134,16 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
         // MapLibre's symbol_sdf halo: an annulus reaching halo_width pixels
         // beyond the glyph edge, composited under the fill in one pass
         // (text + (1 - text.a) * halo).
-        if (u_halo_width > 0.0)
+        float haloWidth = v_halo_size.x >= 0.0 ? v_halo_size.x : u_halo_width;
+        float haloBlur = v_halo_size.y >= 0.0 ? v_halo_size.y : u_halo_blur;
+        if (haloWidth > 0.0)
         {
             float SDF_PX = 8.0;
-            float gammaHalo = (u_halo_blur * 1.19 / SDF_PX + EDGE_GAMMA) / fontScale;
+            float gammaHalo = (haloBlur * 1.19 / SDF_PX + EDGE_GAMMA) / fontScale;
             float innerEdgeHalo = innerEdge + gammaHalo * gammaScale;
             float gammaScaledHalo = gammaHalo * gammaScale;
             float alphaHalo = smoothstep(innerEdgeHalo - gammaScaledHalo, innerEdgeHalo + gammaScaledHalo, sampled);
-            float haloEdge = (6.0 - u_halo_width / fontScale) / SDF_PX;
+            float haloEdge = (6.0 - haloWidth / fontScale) / SDF_PX;
             alphaHalo = gammaScale < 0.0 ? 0.5 : min(smoothstep(haloEdge - gammaScaledHalo, haloEdge + gammaScaledHalo, sampled), 1.0 - alphaHalo);
 
             vec3 fillRgb = fillColor.rgb * (alpha * opacity * fillColor.a);
@@ -173,7 +178,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
         // Atlas filtering operates on premultiplied pixels, as in MapLibre.
         // Native material blending expects straight RGB and applies alpha.
         material.diffuse = icon.a > 0.0 ? icon.rgb / icon.a : vec3(0.0);
-        material.alpha = icon.a * opacity * fillColor.a;
+        material.alpha = icon.a * opacity;
         return material;
     }
 
@@ -184,7 +189,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
 `;
 
 interface AtlasSource {
-  canvas: HTMLCanvasElement;
+  image: HTMLCanvasElement | OffscreenCanvas | typeof Material.DefaultImageId;
   width: number;
   height: number;
   /**
@@ -199,33 +204,16 @@ interface AtlasSource {
 // their pixel data is immutable once a tile's worker result has arrived, so
 // tiles whose atlas payload object is reused — republished tiles and tiles
 // sharing one style-level atlas — reuse the same canvas.
-const glyphAtlasCache = new WeakMap<Uint8Array | Uint8ClampedArray, AtlasSource>();
-const iconAtlasCache = new WeakMap<Uint8Array | Uint8ClampedArray, AtlasSource>();
-
-/**
- * Upload a single-channel SDF atlas (the glyph atlas) into a canvas. The
- * shader samples .a, so every channel receives the same byte.
- */
-export function glyphAtlasSource(data: Uint8Array | Uint8ClampedArray, width: number, height: number, shareKey: string): AtlasSource {
-  const cached = glyphAtlasCache.get(data);
-  // Same payload object always resolves to the same key (callers derive it
-  // from object identity), so a mismatch means aliasing: build fresh rather
-  // than retargeting the shared canvas.
-  if (cached && cached.shareKey === shareKey) {
-    return cached;
-  }
-  const source = writeAtlasCanvas(data, width, height, true, shareKey);
-  glyphAtlasCache.set(data, source);
-  return source;
-}
+type IconAtlasSource = AtlasSource & { image: HTMLCanvasElement };
+const iconAtlasCache = new WeakMap<Uint8Array | Uint8ClampedArray, IconAtlasSource>();
 
 /** Upload an RGBA sprite atlas into a canvas. */
-export function iconAtlasSource(data: Uint8Array | Uint8ClampedArray, width: number, height: number, shareKey: string): AtlasSource {
+export function iconAtlasSource(data: Uint8Array | Uint8ClampedArray, width: number, height: number, shareKey: string): IconAtlasSource {
   const cached = iconAtlasCache.get(data);
   if (cached && cached.shareKey === shareKey) {
     return cached;
   }
-  const source = writeAtlasCanvas(data, width, height, false, shareKey);
+  const source = writeAtlasCanvas(data, width, height, shareKey);
   iconAtlasCache.set(data, source);
   return source;
 }
@@ -239,24 +227,18 @@ export function iconAtlasShareKey(positions: Record<string, ImagePosition>): str
   return `icon/${atlasLayoutKey(positions)}`;
 }
 
-function writeAtlasCanvas(data: Uint8Array | Uint8ClampedArray, width: number, height: number, gray: boolean, shareKey: string): AtlasSource {
+function writeAtlasCanvas(data: Uint8Array | Uint8ClampedArray, width: number, height: number, shareKey: string): IconAtlasSource {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
   if (!context) {
-    throw new Error('A 2D canvas context is required to upload the glyph atlas');
+    throw new Error('A 2D canvas context is required to upload the icon atlas');
   }
   const image = context.createImageData(width, height);
-  if (gray) {
-    for (let index = 0; index < data.length; index++)
-      image.data.fill(data[index], index * 4, index * 4 + 4);
-  }
-  else {
-    image.data.set(data);
-  }
+  image.data.set(data);
   context.putImageData(image, 0, 0);
-  return { canvas, width, height, shareKey };
+  return { image: canvas, width, height, shareKey };
 }
 
 interface TextHalo {
@@ -272,22 +254,23 @@ function symbolMaterial(
   pixelRatio: number,
   halo?: TextHalo,
   iconAtlas?: AtlasSource,
+  opacity = 1,
 ): Material {
   const material = new Material({
     translucent: true,
     fabric: {
       uniforms: {
-        u_texture: atlas.canvas,
+        u_texture: atlas.image,
         // Text batches may carry sprite-image quads (icons-in-text); they
         // sample the sprite atlas selected by v_is_sdf. Icon batches reuse
         // their own atlas for both samplers.
-        u_texture_icon: iconAtlas?.canvas ?? atlas.canvas,
+        u_texture_icon: iconAtlas?.image ?? atlas.image,
         u_texsize: new Cartesian2(atlas.width, atlas.height),
         u_texsize_icon: new Cartesian2(iconAtlas?.width ?? atlas.width, iconAtlas?.height ?? atlas.height),
         u_device_pixel_ratio: pixelRatio,
         u_is_text: isText,
-        // Size rides the vertex (constant/zoom stops packed per part), so the
-        // material needs no size uniform and never churns on a zoom change.
+        // Size uniforms belong to each physical geometry owner, allowing
+        // this material and its atlas samplers to stay shared across buckets.
         u_halo_color: new Cartesian4(
           halo?.color.red ?? 0,
           halo?.color.green ?? 0,
@@ -311,10 +294,16 @@ function symbolMaterial(
   material.uniforms.u_symbol_camera_distance = 0;
   material.uniforms.u_symbol_orthographic = 0;
   material.uniforms.u_symbol_mercator_projection = 0;
+  material.uniforms.u_symbol_opacity = opacity;
   const liveUniforms = (material as Material & { _uniforms: Record<string, () => unknown> })._uniforms;
   liveUniforms.u_symbol_camera_distance = () => material.uniforms.u_symbol_camera_distance;
   liveUniforms.u_symbol_orthographic = () => material.uniforms.u_symbol_orthographic;
   liveUniforms.u_symbol_mercator_projection = () => material.uniforms.u_symbol_mercator_projection;
+  liveUniforms.u_symbol_opacity = () => material.uniforms.u_symbol_opacity;
+  for (const uniform of ['u_symbol_size', 'u_symbol_size_t', 'u_symbol_size_kind'])
+    liveUniforms[uniform] = () => 0;
+  for (const property of ['color', 'halo_color', 'opacity', 'halo_width', 'halo_blur'])
+    liveUniforms[`u_symbol_${property}_t`] = () => 0;
   (material as Material & { _uniforms: Record<string, () => unknown> })._uniforms.u_camera_zoom
     = () => material.uniforms.u_camera_zoom;
   return material;
@@ -376,16 +365,35 @@ export function buildSymbolHalves(options: SymbolCollectionOptions): SymbolHalf[
     halves.push({
       layerId: options.layerId,
       part,
+      sizeData: batch.sizeData,
+      translation: NO_SYMBOL_TRANSLATION,
+      translationOffset: new Cartesian2(),
       geometry,
       material,
       opacity: { geometry: batch },
-      dynamic: batch.instances.some(instance => !!instance.line)
+      paint: batch.paint
+        ? {
+            geometry: batch,
+            minfontscales: (geometry.attributes as unknown as Record<string, GeometryAttribute>).a_minfontscale.values as Float32Array,
+            sizes: (geometry.attributes as unknown as Record<string, GeometryAttribute>).a_size.values as Float32Array,
+            symbolModes: (geometry.attributes as unknown as Record<string, GeometryAttribute>).a_symbol_modes.values as Float32Array,
+            factors: new Float32Array(5),
+            dirty: 0,
+          }
+        : undefined,
+      dynamic: batch.variableBounds || batch.instances.some(instance => !!instance.line)
         ? { geometry: batch, dirty: true }
         : undefined,
     });
   };
   buildPart(options.geometry.icon, 'icon', iconMaterial);
   buildPart(options.geometry.text, 'text', textMaterial);
+  if (options.geometry.icon?.variableTextFit) {
+    const text = halves.find(half => half.part === 'text');
+    const icon = halves.find(half => half.part === 'icon');
+    if (text && icon)
+      icon.boundsTranslation = text.translationOffset;
+  }
 
   return halves;
 }
@@ -393,23 +401,106 @@ export function buildSymbolHalves(options: SymbolCollectionOptions): SymbolHalf[
 /**
  * The evaluated value of a constant symbol opacity paint.
  */
-function symbolOpacity(layer: SymbolStyleLayer, property: string): number {
+function symbolOpacity(layer: Pick<SymbolStyleLayer, 'paint'>, property: string): number {
   const value = constantValue(layer, property);
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
 }
 /**
- * The material colors for one symbol layer with its constant opacity paints
- * folded in. text-opacity / icon-opacity are constant-only here
- * (data-driven opacity would need a per-vertex channel); folding into the
- * material color keeps the per-vertex collision opacity as the single dynamic
- * channel. Exported for unit tests.
+ * Uniform colors stay separate from opacity so image quads ignore fill alpha.
+ * Data-driven colors leave uniforms at identity and contribute glyph paint.
  */
 export function symbolLayerColors(layer: SymbolStyleLayer): { textColor: Color; iconColor: Color } {
   const textColor = symbolColor(layer, 'text-color');
-  textColor.alpha *= symbolOpacity(layer, 'text-opacity');
   const iconColor = symbolColor(layer, 'icon-color');
-  iconColor.alpha *= symbolOpacity(layer, 'icon-opacity');
   return { textColor, iconColor };
+}
+
+const symbolPaintProperties = ['color', 'halo-color', 'opacity', 'halo-width', 'halo-blur'] as const;
+const symbolPaintViews = new WeakMap<object, { buffer: ArrayBuffer; values: Float32Array }>();
+
+interface CommittedSymbolPaint {
+  revision: number;
+  camera?: FrozenSymbolCameraPaint;
+}
+
+/** Uniform paint is independent of the per-glyph endpoint interpolation factors. */
+function applySymbolUniformPaint(half: SymbolHalf, layer: Pick<SymbolStyleLayer, 'paint'>): void {
+  const color = symbolColor(layer, `${half.part}-color`);
+  const halo = symbolHalo(layer, half.part);
+  const uniforms = half.material.uniforms;
+  Cartesian4.fromElements(color.red, color.green, color.blue, color.alpha, uniforms.u_color as Cartesian4);
+  Cartesian4.fromElements(halo.color.red, halo.color.green, halo.color.blue, halo.color.alpha, uniforms.u_halo_color as Cartesian4);
+  uniforms.u_halo_width = halo.width;
+  uniforms.u_halo_blur = halo.blur;
+  uniforms.u_symbol_opacity = symbolOpacity(layer, `${half.part}-opacity`);
+}
+
+/** Each drawable owner retains its binder interval while following camera zoom. */
+function updateSymbolPaintFactors(paint: NonNullable<SymbolHalf['paint']>, zoom: number): void {
+  const { config, prefix } = paint.geometry.paint!;
+  for (const [index, property] of symbolPaintProperties.entries())
+    paint.factors[index] = config.getInterpolationFactor(`${prefix}-${property}`, zoom);
+}
+
+/** Copy original worker endpoints only when their paint revision changes. */
+function updateSymbolAttributePaint(paint: NonNullable<SymbolHalf['paint']>): void {
+  const geometry = paint.geometry;
+  const { config, prefix } = geometry.paint!;
+  const views = symbolPaintProperties.map((property) => {
+    const array = config.getAttributeArray(`${prefix}-${property}`);
+    if (!array)
+      return undefined;
+    let cached = symbolPaintViews.get(array);
+    if (!cached || cached.buffer !== array.arrayBuffer) {
+      cached = { buffer: array.arrayBuffer, values: new Float32Array(array.arrayBuffer) };
+      symbolPaintViews.set(array, cached);
+    }
+    return { values: cached.values, components: array.bytesPerElement / Float32Array.BYTES_PER_ELEMENT };
+  });
+  const [color, halo, opacity, width, blur] = views;
+  const scalarChanged = !!(opacity || width || blur);
+  for (const instance of geometry.instances) {
+    for (let glyph = instance.vertexStart; glyph < instance.vertexStart + instance.vertexCount; glyph += 4) {
+      const source = instance.paintVertexStart! + glyph - instance.vertexStart;
+      const colorFrom = source * (color?.components ?? 0);
+      const colorTo = colorFrom + (color?.components === 4 ? 2 : 0);
+      const haloFrom = source * (halo?.components ?? 0);
+      const haloTo = haloFrom + (halo?.components === 4 ? 2 : 0);
+      const opacityFrom = source * (opacity?.components ?? 0);
+      const widthFrom = source * (width?.components ?? 0);
+      const blurFrom = source * (blur?.components ?? 0);
+      const opacityMin = opacity ? opacity.values[opacityFrom] : 1;
+      const opacityMax = opacity ? opacity.values[opacityFrom + (opacity.components === 2 ? 1 : 0)] : 1;
+      const widthMin = width ? width.values[widthFrom] : -1;
+      const widthMax = width ? width.values[widthFrom + (width.components === 2 ? 1 : 0)] : -1;
+      const blurMin = blur ? blur.values[blurFrom] : -1;
+      const blurMax = blur ? blur.values[blurFrom + (blur.components === 2 ? 1 : 0)] : -1;
+      for (let vertex = glyph; vertex < glyph + 4; vertex++) {
+        const offset = vertex * 4;
+        if (color) {
+          geometry.colors[offset] = color.values[colorFrom];
+          geometry.colors[offset + 1] = color.values[colorFrom + 1];
+          geometry.colors[offset + 2] = color.values[colorTo];
+          geometry.colors[offset + 3] = color.values[colorTo + 1];
+        }
+        if (halo) {
+          geometry.halos[offset] = halo.values[haloFrom];
+          geometry.halos[offset + 1] = halo.values[haloFrom + 1];
+          geometry.halos[offset + 2] = halo.values[haloTo];
+          geometry.halos[offset + 3] = halo.values[haloTo + 1];
+        }
+        if (scalarChanged) {
+          paint.sizes[offset + 1] = opacityMin;
+          paint.sizes[offset + 2] = opacityMax;
+          paint.sizes[offset + 3] = blurMin;
+          paint.symbolModes[vertex * 2 + 1] = blurMax;
+          paint.minfontscales[offset + 2] = widthMin;
+          paint.minfontscales[offset + 3] = widthMax;
+        }
+      }
+    }
+  }
+  paint.dirty |= (color ? 1 : 0) | (halo ? 2 : 0) | (scalarChanged ? 4 : 0);
 }
 /** Main-thread inputs for one tile's symbol batches. */
 export interface SymbolTileInput {
@@ -562,7 +653,8 @@ function sameTileSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 
 function sameSymbolBatch(a: OrderedSymbolBatch, b: OrderedSymbolBatch): boolean {
   return a.entry === b.entry && a.index === b.index
-    && a.options.textOptional === b.options.textOptional && a.options.iconOptional === b.options.iconOptional;
+    && a.options.textOptional === b.options.textOptional && a.options.iconOptional === b.options.iconOptional
+    && a.options.textTranslation === b.options.textTranslation && a.options.iconTranslation === b.options.iconTranslation;
 }
 
 /** Resumable per-layer symbol extraction state (see stepBuild). */
@@ -1008,17 +1100,19 @@ export class SymbolTileRenderer {
     glyphSource: AtlasSource | undefined,
     iconSource: AtlasSource | undefined,
   ): SymbolHalf[] {
-    // text-opacity / icon-opacity are constant-only here (data-driven opacity
-    // would need a per-vertex channel); folding into the material color keeps
-    // the per-vertex collision opacity as the single dynamic channel.
+    // Keep uniform opacity in the material and feature opacity in glyph paint,
+    // leaving the collision stream exclusively owned by placement.
     const { textColor, iconColor } = symbolLayerColors(layer);
     const halo = symbolHalo(layer);
+    // The transition tree identifies a paint schema across all of its ticks.
+    // A later style mutation gets another tree, preserving the held material.
+    const paintOwner = `${this._payloadId(layer)}/${this._payloadId(layer._transitioningPaint)}`;
     const textMaterial = batch.text && glyphSource
-      ? this._cachedMaterial(this._materialKey(textColor, true, input.pixelRatio, halo, glyphSource, iconSource), () => symbolMaterial(glyphSource, textColor, true, input.pixelRatio, halo, iconSource))
+      ? this._cachedMaterial(this._materialKey(true, input.pixelRatio, glyphSource, iconSource), () => symbolMaterial(glyphSource, textColor, true, input.pixelRatio, halo, iconSource, symbolOpacity(layer, 'text-opacity')), paintOwner)
       : undefined;
     const iconHalo = symbolHalo(layer, 'icon');
     const iconMaterial = batch.icon && iconSource
-      ? this._cachedMaterial(this._materialKey(iconColor, false, input.pixelRatio, iconHalo, iconSource, undefined), () => symbolMaterial(iconSource, iconColor, false, input.pixelRatio, iconHalo))
+      ? this._cachedMaterial(this._materialKey(false, input.pixelRatio, iconSource, undefined), () => symbolMaterial(iconSource, iconColor, false, input.pixelRatio, iconHalo, undefined, symbolOpacity(layer, 'icon-opacity')), paintOwner)
       : undefined;
     // Point shared materials at the shared atlas textures: one GPU texture
     // per atlas content instead of one per material. Adoption happens in
@@ -1031,7 +1125,7 @@ export class SymbolTileRenderer {
       this._shared.track(iconSource.shareKey, iconMaterial, 'u_texture');
       this._shared.track(iconSource.shareKey, iconMaterial, 'u_texture_icon');
     }
-    return buildSymbolHalves({
+    const halves = buildSymbolHalves({
       tileId: input.tileId,
       layerId: layer.id,
       geometry: batch,
@@ -1044,6 +1138,18 @@ export class SymbolTileRenderer {
       textMaterial,
       iconMaterial,
     });
+    for (const half of halves) {
+      half.translation = readSymbolTranslation(layer.paint, half.part);
+      if (this._lineView && half.translation !== NO_SYMBOL_TRANSLATION)
+        resolveSymbolTranslation(half.translation, this._lineView.cameraZoom, this._lineView.bearing, half.translationOffset);
+      let committed = this._materialPaint.get(half.material);
+      if (!committed) {
+        committed = this._committedPaintFor(layer, half.part);
+        this._materialPaint.set(half.material, committed);
+      }
+      this._halfPaint.set(half, committed);
+    }
+    return halves;
   }
 
   /**
@@ -1059,20 +1165,14 @@ export class SymbolTileRenderer {
   }
 
   /**
-   * Resolve the glyph source for one tile's payload. Glyph sets differ per
-   * tile, so the canvas stays per tile - but it is registered under a stable
-   * shareKey, collapsing the per-layer uploads of the tile into one shared
-   * texture on adopt.
+   * Register the tile's single-channel glyph pixels once. Materials declare
+   * their sampler with Cesium's default image until the retained R8 texture
+   * is adopted; glyphs never expand through an RGBA canvas.
    */
   glyphSourceFor(image: NonNullable<SymbolTileInput['glyphAtlasImage']>): AtlasSource {
     const shareKey = `glyph/payload${this._payloadId(image.data)}/${image.width}x${image.height}`;
-    const source = glyphAtlasSource(image.data, image.width, image.height, shareKey);
-    this._shared.canvas(shareKey, image.width, image.height, () => source.canvas);
-    // Upload the raw SDF bytes as R8 (no RGBA expansion, quarter the bytes).
-    // The shader samples .r, which matches the replicated canvas channels,
-    // so canvas and texture paths render identically.
-    this._shared.setDirectUpload(shareKey, image.data, PixelFormat.RED, image.width, image.height);
-    return source;
+    this._shared.bytes(shareKey, image.data, PixelFormat.RED, image.width, image.height);
+    return { image: Material.DefaultImageId, width: image.width, height: image.height, shareKey };
   }
 
   /**
@@ -1082,30 +1182,23 @@ export class SymbolTileRenderer {
   iconSourceFor(iconAtlas: NonNullable<SymbolTileInput['iconAtlas']>): AtlasSource {
     const { image } = iconAtlas;
     const shareKey = iconAtlasShareKey(iconAtlas.iconPositions);
-    const canvas = this._shared.canvas(shareKey, image.width, image.height, () => iconAtlasSource(image.data, image.width, image.height, shareKey).canvas);
-    return { canvas: canvas as HTMLCanvasElement, width: canvas.width, height: canvas.height, shareKey };
+    const canvas = this._shared.canvas(shareKey, image.width, image.height, () => iconAtlasSource(image.data, image.width, image.height, shareKey).image);
+    return { image: canvas, width: canvas.width, height: canvas.height, shareKey };
   }
 
   /**
    * @internal
    */
   private _materialKey(
-    color: Color,
     isText: boolean,
     pixelRatio: number,
-    halo: TextHalo | undefined,
     atlas: AtlasSource,
     iconAtlas: AtlasSource | undefined,
   ): string {
     const atlasKey = (source: AtlasSource): string => `${source.shareKey}:${source.width}x${source.height}`;
     return [
       isText ? 't' : 'i',
-      color.red,
-      color.green,
-      color.blue,
-      color.alpha,
       pixelRatio,
-      halo ? `${halo.color.red},${halo.color.green},${halo.color.blue},${halo.color.alpha},${halo.width},${halo.blur}` : '-',
       atlasKey(atlas),
       iconAtlas ? atlasKey(iconAtlas) : '-',
     ].join('|');
@@ -1113,17 +1206,37 @@ export class SymbolTileRenderer {
 
   /**
    * Return the shared material for a paint/atlas key, creating it on miss.
-   * No tile/layer identity in the key: identical paint over identical atlas
-   * content is one Material (one GPU texture) no matter how many tiles or
-   * layers use it. Lifecycle is entry-counted (_retainEntry/_releaseEntry),
-   * so a key change here never destroys - it just stops sharing.
+   * Tiles of one layer revision share materials and atlas textures. Separate
+   * layer revisions preserve held paint during replacement. Entry references
+   * release the material when the last generation leaves.
    * @internal
    */
-  private _cachedMaterial(key: string, create: () => Material): Material {
+  private readonly _materialPaintOwners = new WeakMap<Material, string>();
+  private readonly _materialPaint = new WeakMap<Material, CommittedSymbolPaint>();
+  private readonly _halfPaint = new WeakMap<SymbolHalf, CommittedSymbolPaint>();
+  private readonly _layerPaint = new WeakMap<SymbolStyleLayer, Partial<Record<'text' | 'icon', CommittedSymbolPaint>>>();
+
+  private _committedPaintFor(layer: SymbolStyleLayer, part: 'text' | 'icon'): CommittedSymbolPaint {
+    let parts = this._layerPaint.get(layer);
+    if (!parts) {
+      parts = {};
+      this._layerPaint.set(layer, parts);
+    }
+    let committed = parts[part];
+    if (!committed || committed.revision !== layer.paintRevision) {
+      committed = { revision: layer.paintRevision, camera: freezeSymbolCameraPaint(layer, part) };
+      parts[part] = committed;
+    }
+    return committed;
+  }
+
+  private _cachedMaterial(key: string, create: () => Material, owner: string): Material {
+    key += `/paint${owner}`;
     let material = this._materials.get(key);
     if (!material || material.isDestroyed()) {
       material = create();
       this._materials.set(key, material);
+      this._materialPaintOwners.set(material, owner);
     }
     return material;
   }
@@ -1203,6 +1316,7 @@ export class SymbolTileRenderer {
     for (const half of entry.halves) {
       this._pendingDynamicHalves.delete(half);
       this._pendingOpacityHalves.delete(half);
+      this._pendingPaintHalves.delete(half);
     }
     for (const material of entry.materials) {
       this._releaseMaterial(material);
@@ -1309,7 +1423,7 @@ export class SymbolTileRenderer {
       if (!(bucket instanceof SymbolBucket)) {
         continue;
       }
-      const batch = symbolBucketGeometry(bucket, input.tileID, input.tileKey, input.collisionBoxArray);
+      const batch = symbolBucketGeometry(bucket, input.tileID, input.tileKey, input.collisionBoxArray, layer.id);
       if (!batch.text && !batch.icon) {
         continue;
       }
@@ -1348,6 +1462,15 @@ export class SymbolTileRenderer {
 
   private _pendingDynamicHalves = new Set<SymbolHalf>();
 
+  private _pendingPaintHalves = new Set<SymbolHalf>();
+
+  private _syncPaint(half: SymbolHalf): void {
+    half.paint?.target?.primitive.syncPaint(half);
+    if (half.paint?.dirty)
+      this._pendingPaintHalves.add(half);
+    else this._pendingPaintHalves.delete(half);
+  }
+
   /**
    * @internal
    */
@@ -1384,6 +1507,9 @@ export class SymbolTileRenderer {
     for (const half of [...this._pendingDynamicHalves]) {
       this._syncDynamic(half);
     }
+    for (const half of [...this._pendingPaintHalves]) {
+      this._syncPaint(half);
+    }
   }
 
   /**
@@ -1406,12 +1532,13 @@ export class SymbolTileRenderer {
    * @internal
    */
   private _updateSelectedLineBatch(view: PlacementView, geometry: SymbolTileGeometry, halves: readonly SymbolHalf[], selection: SymbolTileSelection | undefined, projections: SymbolProjectionContext): void {
+    const variableChanged = selection && geometry.text?.variablePlacements && updateVariableSymbolGeometry(geometry, view, projections, halves.find(half => half.part === 'text')?.translation, halves.find(half => half.part === 'icon')?.translation);
     for (const half of halves) {
       const dynamic = half.dynamic;
       if (!dynamic || dynamic.geometry !== geometry[half.part]) {
         continue;
       }
-      if (selection && updateLineSymbolGeometry(dynamic.geometry, view, selection.instanceIndices(half.part), projections)) {
+      if (variableChanged?.has(half.part) || (selection && updateLineSymbolGeometry(dynamic.geometry, view, selection.instanceIndices(half.part), projections, half.translation))) {
         dynamic.dirty = true;
       }
       this._syncDynamic(half);
@@ -1464,36 +1591,13 @@ export class SymbolTileRenderer {
     this._shared.retain(iconKey);
     const replacements = new Map<Material, Material>();
     for (const previous of entry.materials) {
-      const uniforms = previous.uniforms;
-      const color = uniforms.u_color as Cartesian4;
-      const haloColor = uniforms.u_halo_color as Cartesian4;
-      const isText = uniforms.u_is_text as boolean;
-      const source = isText ? this.glyphSourceFor(entry.input.glyphAtlasImage!) : iconSource;
-      const paint = new Color(color.x, color.y, color.z, color.w);
-      const halo = uniforms.u_halo_width > 0
-        ? { color: new Color(haloColor.x, haloColor.y, haloColor.z, haloColor.w), width: uniforms.u_halo_width as number, blur: uniforms.u_halo_blur as number }
-        : undefined;
-      const icon = isText ? iconSource : undefined;
-      const material = this._cachedMaterial(
-        this._materialKey(paint, isText, uniforms.u_device_pixel_ratio as number, halo, source, icon),
-        () => symbolMaterial(source, paint, isText, uniforms.u_device_pixel_ratio as number, halo, icon),
-      );
-      material.uniforms.u_camera_zoom = uniforms.u_camera_zoom;
-      material.uniforms.u_symbol_camera_distance = uniforms.u_symbol_camera_distance;
-      material.uniforms.u_symbol_orthographic = uniforms.u_symbol_orthographic;
-      material.uniforms.u_symbol_mercator_projection = uniforms.u_symbol_mercator_projection;
-      this._shared.track(source.shareKey, material, 'u_texture');
-      this._shared.track(iconKey, material, 'u_texture_icon');
-      this._retainMaterial(material);
+      const material = this._copyMaterial(entry, previous, iconSource, this._materialPaintOwners.get(previous)!);
+      const committed = this._materialPaint.get(previous);
+      if (committed)
+        this._materialPaint.set(material, committed);
       replacements.set(previous, material);
     }
-    for (const primitive of entry.primitives)
-      primitive.replaceMaterials(replacements);
-    const previousMaterials = entry.materials;
-    entry.materials = new Set(replacements.values());
-    for (const material of previousMaterials) {
-      this._releaseMaterial(material);
-    }
+    this._replaceEntryMaterials(entry, replacements);
     entry.atlasKeys = entry.atlasKeys.map((key) => {
       if (!key.startsWith('icon/')) {
         return key;
@@ -1502,6 +1606,67 @@ export class SymbolTileRenderer {
       return iconKey;
     });
     return true;
+  }
+
+  /** Copy a paint owner while reusing its atlas textures and camera uniforms. */
+  private _copyMaterial(entry: SymbolTileEntry, previous: Material, iconSource: AtlasSource | undefined, owner: string): Material {
+    const uniforms = previous.uniforms;
+    const color = uniforms.u_color as Cartesian4;
+    const haloColor = uniforms.u_halo_color as Cartesian4;
+    const isText = uniforms.u_is_text as boolean;
+    const source = isText ? this.glyphSourceFor(entry.input.glyphAtlasImage!) : iconSource!;
+    const paint = new Color(color.x, color.y, color.z, color.w);
+    const halo = { color: new Color(haloColor.x, haloColor.y, haloColor.z, haloColor.w), width: uniforms.u_halo_width as number, blur: uniforms.u_halo_blur as number };
+    const icon = isText ? iconSource : undefined;
+    const material = this._cachedMaterial(
+      this._materialKey(isText, uniforms.u_device_pixel_ratio as number, source, icon),
+      () => symbolMaterial(source, paint, isText, uniforms.u_device_pixel_ratio as number, halo, icon, uniforms.u_symbol_opacity as number),
+      owner,
+    );
+    material.uniforms.u_camera_zoom = uniforms.u_camera_zoom;
+    material.uniforms.u_symbol_camera_distance = uniforms.u_symbol_camera_distance;
+    material.uniforms.u_symbol_orthographic = uniforms.u_symbol_orthographic;
+    material.uniforms.u_symbol_mercator_projection = uniforms.u_symbol_mercator_projection;
+    this._shared.track(source.shareKey, material, 'u_texture');
+    this._shared.track(iconSource?.shareKey ?? source.shareKey, material, 'u_texture_icon');
+    return material;
+  }
+
+  /** Transfer entry references together with the GPU commands' material bindings. */
+  private _replaceEntryMaterials(entry: SymbolTileEntry, replacements: Map<Material, Material>): void {
+    for (const material of new Set(replacements.values()))
+      this._retainMaterial(material);
+    for (const primitive of entry.primitives)
+      primitive.replaceMaterials(replacements);
+    const previousMaterials = entry.materials;
+    entry.materials = new Set(replacements.values());
+    for (const material of previousMaterials) {
+      this._releaseMaterial(material);
+    }
+  }
+
+  /** A live transition/global-state tick must not overwrite an older drawable owner. */
+  private _isolateHeldPaint(entry: SymbolTileEntry): boolean {
+    let replacements: Map<Material, Material> | undefined;
+    for (const half of entry.halves) {
+      const committed = this._halfPaint.get(half);
+      if (!committed?.camera || committed === this._materialPaint.get(half.material) || replacements?.has(half.material))
+        continue;
+      replacements ??= new Map();
+      const iconSource = entry.input.iconAtlas ? this.iconSourceFor(entry.input.iconAtlas) : undefined;
+      const owner = `${this._materialPaintOwners.get(half.material)!}/held${this._payloadId(committed)}`;
+      const material = this._copyMaterial(entry, half.material, iconSource, owner);
+      this._materialPaint.set(material, committed);
+      replacements.set(half.material, material);
+    }
+    if (replacements) {
+      for (const material of entry.materials) {
+        if (!replacements.has(material))
+          replacements.set(material, material);
+      }
+      this._replaceEntryMaterials(entry, replacements);
+    }
+    return !!replacements;
   }
 
   /**
@@ -1565,6 +1730,8 @@ export class SymbolTileRenderer {
             pairs: entry.batches[index].pairs,
             textOptional: layout?.get?.('text-optional') === true,
             iconOptional: layout?.get?.('icon-optional') === true,
+            textTranslation: metadata.halves.get(layerId)?.find(half => half.part === 'text')?.translation ?? NO_SYMBOL_TRANSLATION,
+            iconTranslation: metadata.halves.get(layerId)?.find(half => half.part === 'icon')?.translation ?? NO_SYMBOL_TRANSLATION,
           },
           halves: metadata.halves.get(layerId) ?? [],
         });
@@ -1636,12 +1803,127 @@ export class SymbolTileRenderer {
             this._syncOpacity(half);
           }
         }
+        // A variable anchor can switch while fixed justification leaves the
+        // opacity mask unchanged. Publish its new displacement in this view.
+        if (batch.geometry.text?.variablePlacements)
+          this._updateSelectedLineBatch(view, batch.geometry, batch.halves, baseline.selection, projections);
         baseline.fresh = false;
       }
     }
     this._liveSelectionView = copyPlacementView(view);
     this._appliedLiveSelectionRevision = this._liveSelectionRevision;
     this._liveSelectionPlanRevision = this._placementPlanRevision;
+  }
+
+  private readonly _paintInputs = new WeakMap<SymbolTileEntry, { zoom: number; zoomDependent: boolean; revisions: number[] }>();
+
+  /** Held generations keep committed endpoints; every drawable binder follows zoom. */
+  private _updatePaint(zoom: number): void {
+    let translationChanged = false;
+    for (const entry of this._drawableLineEntries()) {
+      const previous = this._paintInputs.get(entry);
+      if (this._tiles.get(entry.input.tileId) !== entry) {
+        const isolated = this._isolateHeldPaint(entry);
+        if (isolated || !previous || (previous.zoomDependent && !samePaintZoom(previous.zoom, zoom))) {
+          for (const half of entry.halves) {
+            const camera = this._halfPaint.get(half)?.camera;
+            if (camera) {
+              const paint = camera(zoom);
+              applySymbolUniformPaint(half, { paint });
+              const translation = readSymbolTranslation(paint, half.part, half.translation);
+              translationChanged ||= translation !== half.translation;
+              half.translation = translation;
+            }
+            if (half.paint)
+              updateSymbolPaintFactors(half.paint, zoom);
+          }
+          if (previous)
+            previous.zoom = zoom;
+          else
+            this._paintInputs.set(entry, { zoom, zoomDependent: entry.halves.some(half => !!this._halfPaint.get(half)?.camera || !!half.paint?.geometry.paint?.config.hasCompositeProperties()), revisions: [] });
+        }
+        continue;
+      }
+      const layers = entry.input.layers;
+      // A settled frame checks O(layers) scalars without allocating arrays or
+      // walking symbol instances. Source-only attributes ignore camera zoom.
+      const paintChanged = !previous
+        || layers.some((layer, index) => previous.revisions[index] !== layer.paintRevision)
+        || entry.batches.some((batch, index) => previous.revisions[layers.length + index * 2] !== (batch.text?.paint?.revision() ?? 0)
+          || previous.revisions[layers.length + index * 2 + 1] !== (batch.icon?.paint?.revision() ?? 0));
+      if (previous && !paintChanged && (!previous.zoomDependent || samePaintZoom(previous.zoom, zoom)))
+        continue;
+      const zoomDependent = paintChanged
+        ? layers.some((layer) => {
+          for (const property of ['text-color', 'text-opacity', 'text-halo-color', 'text-halo-width', 'text-halo-blur', 'icon-color', 'icon-opacity', 'icon-halo-color', 'icon-halo-width', 'icon-halo-blur', 'text-translate', 'text-translate-anchor', 'icon-translate', 'icon-translate-anchor'] as const) {
+            let value: typeof layer._transitioningPaint._values[typeof property] | undefined = layer._transitioningPaint._values[property];
+            // A transition's prior camera value still follows zoom until
+            // evaluation expires it, even when its new value is constant.
+            while (value) {
+              const kind = value.value.expression.kind;
+              if (kind === 'camera' || kind === 'composite')
+                return true;
+              value = value.prior;
+            }
+          }
+          return false;
+        }) || entry.batches.some(batch => batch.text?.paint?.config.hasCompositeProperties() || batch.icon?.paint?.config.hasCompositeProperties())
+        : previous!.zoomDependent;
+      const byId = this._placementEntryIndexFor(entry).layers;
+      for (const half of entry.halves) {
+        const layer = byId.get(half.layerId)!;
+        applySymbolUniformPaint(half, layer);
+        const translation = readSymbolTranslation(layer.paint, half.part, half.translation);
+        translationChanged ||= translation !== half.translation;
+        half.translation = translation;
+        const committed = this._committedPaintFor(layer, half.part);
+        this._halfPaint.set(half, committed);
+        this._materialPaint.set(half.material, committed);
+        const attributePaint = half.paint;
+        if (attributePaint) {
+          const inputs = attributePaint.geometry.paint!;
+          const revision = inputs.revision();
+          if (attributePaint.revision !== revision) {
+            updateSymbolAttributePaint(attributePaint);
+            attributePaint.revision = revision;
+            this._syncPaint(half);
+          }
+          updateSymbolPaintFactors(attributePaint, zoom);
+        }
+      }
+      const revisions = paintChanged
+        ? [
+            ...layers.map(layer => layer.paintRevision),
+            ...entry.batches.flatMap(batch => [batch.text?.paint?.revision() ?? 0, batch.icon?.paint?.revision() ?? 0]),
+          ]
+        : previous!.revisions;
+      this._paintInputs.set(entry, { zoom, zoomDependent, revisions });
+    }
+    if (translationChanged)
+      this._invalidatePlacementInputs();
+  }
+
+  private readonly _translationInputs = new WeakMap<SymbolHalf, { translation: SymbolHalf['translation']; zoom: number; bearing: number | undefined }>();
+
+  /** Resolve once per paint owner, leaving vertices and shared samplers resident. */
+  private _updateTranslations(view: PlacementView): void {
+    for (const entry of this._drawableLineEntries()) {
+      for (const half of entry.halves) {
+        if (half.translation === NO_SYMBOL_TRANSLATION) {
+          if (half.translationOffset.x || half.translationOffset.y) {
+            half.translationOffset.x = half.translationOffset.y = 0;
+            this._translationInputs.delete(half);
+          }
+          continue;
+        }
+        const bearing = half.translation.anchor === 'viewport' ? view.bearing : undefined;
+        const previous = this._translationInputs.get(half);
+        if (previous?.translation === half.translation && previous.zoom === view.cameraZoom && previous.bearing === bearing)
+          continue;
+        resolveSymbolTranslation(half.translation, view.cameraZoom, bearing, half.translationOffset);
+        this._translationInputs.set(half, { translation: half.translation, zoom: view.cameraZoom, bearing });
+      }
+    }
   }
 
   /**
@@ -1661,6 +1943,8 @@ export class SymbolTileRenderer {
   ): void {
     const projections = new SymbolProjectionContext();
     this._shared.adopt(context as { [key: string]: unknown } | undefined);
+    this._updatePaint(view.cameraZoom);
+    this._updateTranslations(view);
     for (const material of this._materialRefs.keys()) {
       material.uniforms.u_camera_zoom = this.cameraZoom;
       material.uniforms.u_symbol_camera_distance = view.cameraToCenterDistance ?? 0;
@@ -1773,7 +2057,7 @@ export class SymbolTileRenderer {
 
   /** Completion includes recency waits and writes awaiting their Native VBO. */
   get hasPendingWork(): boolean {
-    return this._pendingDynamicHalves.size > 0 || this._pendingOpacityHalves.size > 0
+    return this._pendingDynamicHalves.size > 0 || this._pendingOpacityHalves.size > 0 || this._pendingPaintHalves.size > 0
       || this._targetPlacement.pending || this._visiblePlacement.pending
       || (this._hasSeparateHandoffScope && this._handoffPlacement.pending)
       || this.hasRunnableWork;
@@ -1825,6 +2109,10 @@ export class SymbolTileRenderer {
       if (primitive?.canUpload)
         return true;
     }
+    for (const half of this._pendingPaintHalves) {
+      if (half.paint?.target?.primitive.canUpload)
+        return true;
+    }
     return false;
   }
 
@@ -1837,6 +2125,7 @@ export class SymbolTileRenderer {
       for (const half of entry.halves) {
         this._pendingDynamicHalves.delete(half);
         this._pendingOpacityHalves.delete(half);
+        this._pendingPaintHalves.delete(half);
       }
     }
     // A fading tile dropped by direct removal never reaches the pool: it
@@ -1953,6 +2242,7 @@ export class SymbolTileRenderer {
     for (const half of entry.halves) {
       this._pendingDynamicHalves.delete(half);
       this._pendingOpacityHalves.delete(half);
+      this._pendingPaintHalves.delete(half);
     }
     this._tiles.delete(tileId);
     this._invalidatePlacementInputs();
@@ -2120,6 +2410,7 @@ export class SymbolTileRenderer {
     }
     this._retired.clear();
     this._pendingDynamicHalves.clear();
+    this._pendingPaintHalves.clear();
     this._pendingOpacityHalves.clear();
     this._pendingImageEntries.clear();
     this._invalidatePlacementInputs();

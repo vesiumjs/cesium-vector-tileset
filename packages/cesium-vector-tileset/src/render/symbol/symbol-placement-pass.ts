@@ -1,7 +1,9 @@
 import type { Budget } from '../scene/frame-budget';
 import type { SymbolTileGeometry } from './symbol-geometry';
 import type { PlacementView, SymbolPlacementOptions, SymbolProjectionContext, SymbolTileSelection } from './symbol-placement';
-import { sameViewProjection, SymbolCollisionIndex, SymbolTilePlacement } from './symbol-placement';
+import { copyPlacementView, sameViewProjection, SymbolCollisionIndex, SymbolTilePlacement } from './symbol-placement';
+
+export { copyPlacementView } from './symbol-placement';
 
 export interface SymbolPlacementBatch {
   geometry: SymbolTileGeometry;
@@ -79,15 +81,11 @@ export class SymbolPlacementPass {
   }
 }
 
-export function copyPlacementView(view: PlacementView): PlacementView {
-  return { ...view, viewProjection: new Float64Array(view.viewProjection), viewport: view.viewport && { ...view.viewport } };
-}
-
 export function samePlacementParameters(a: PlacementView, b: PlacementView): boolean {
   return a.width === b.width && a.height === b.height && a.pixelRatio === b.pixelRatio
     && a.mercatorProjection === b.mercatorProjection
     && a.cameraToCenterDistance === b.cameraToCenterDistance && a.orthographic === b.orthographic
-    && a.cameraZoom === b.cameraZoom && !!a.projectPosition === !!b.projectPosition
+    && a.cameraZoom === b.cameraZoom && a.bearing === b.bearing && !!a.projectPosition === !!b.projectPosition
     && !!a.isPointVisible === !!b.isPointVisible
     && a.viewport?.x === b.viewport?.x && a.viewport?.y === b.viewport?.y
     && a.viewport?.width === b.viewport?.width && a.viewport?.height === b.viewport?.height;

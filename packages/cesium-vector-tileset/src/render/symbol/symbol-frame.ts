@@ -30,13 +30,21 @@ export function symbolFrame(snapshot: CameraFrameSnapshot, cameraZoom: number): 
     const position: [number, number, number] = [0, 0, 0];
     const worldWidth = 2 * Math.PI * ellipsoid.maximumRadius;
     const centerX = centerLng * Math.PI / 180 * ellipsoid.maximumRadius;
-    projectPosition = (x, y, z) => {
+    projectPosition = (x, y, z, labelPlane) => {
       world.x = x;
       world.y = y;
       world.z = z;
       if (!ellipsoid.cartesianToCartographic(world, cartographic))
         return undefined;
       mapProjection.project(cartographic, projected);
+      if (mode === SceneMode.COLUMBUS_VIEW && labelPlane) {
+        // Native adds the translation to the original projected vertex.
+        // Retain that continuous plane, including coordinates beyond the seam
+        // and WebMercator's latitude clamp, instead of projecting wrapped ECEF.
+        projected.x = labelPlane.x;
+        if (mapProjection instanceof WebMercatorProjection)
+          projected.y = -labelPlane.y;
+      }
       if (mode === SceneMode.SCENE2D)
         projected.x += worldWidth * Math.round((centerX - projected.x) / worldWidth);
       // Native planar vertices use the projected z,x,y axis order.
@@ -54,6 +62,7 @@ export function symbolFrame(snapshot: CameraFrameSnapshot, cameraZoom: number): 
     height: snapshot.drawingBufferHeight,
     pixelRatio: snapshot.pixelRatio,
     cameraZoom,
+    bearing: snapshot.bearing,
     mercatorProjection: mapProjection instanceof WebMercatorProjection,
     cameraToCenterDistance: snapshot.cameraToCenterDistance,
     orthographic: snapshot.orthographic,

@@ -1,12 +1,14 @@
-import type { CollisionBoxArray } from '../../data/array-types.g';
+import type { CollisionBoxArray, TextAnchorOffsetArray } from '../../data/array-types.g';
 import type { SymbolBucket } from '../../data/bucket-runtime';
 import type { ProgramConfiguration } from '../../data/program-configuration';
 import type { OverlapMode } from '../../style/style-layer/overlap-mode';
+import type { TextAnchor } from '../../style/style-layer/variable-text-anchor';
 import type { SizeData } from '../../symbol/symbol-size';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import { getOverlapMode } from '../../style/style-layer/overlap-mode';
+import { TextAnchorEnum } from '../../style/style-layer/variable-text-anchor';
+import { evaluateSizeForFeature, evaluateSizeForZoom } from '../../symbol/symbol-size';
 import { tileLocalToWgs84Ecef } from '../geometry/tile-to-ecef';
-import { vertexColor } from '../vector/feature-attributes';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
@@ -44,24 +46,19 @@ export interface SymbolPrimitiveGeometry {
    * no-op at `u_size_t = 0`.
    */
   sizesMax: Float32Array;
+  /** Transferable bucket size semantics, evaluated per view instead of per vertex. */
+  sizeData: SizeData;
   /**
-   * Zoom stops of a composite size, 2 floats per vertex (`[minZoom,
-   * maxZoom]`); zero for every other size kind. Together with `sizes` and
-   * `sizesMax` the shader derives the size at the current camera zoom.
-   */
-  sizeZooms: Float32Array;
-  /**
-   * Straight-alpha fill color, 4 floats per vertex. White (1,1,1,1) unless
-   * the layer's `text-color`/`icon-color` is data-driven, in which case the
-   * fragment shader multiplies it into the material color - the same channel
-   * MapLibre's `a_fill_color` attribute occupies.
+   * Two packed premultiplied RGBA endpoints, 4 floats per vertex. Each color
+   * uses RG/BA byte pairs, matching MapLibre's composite paint attributes.
    */
   colors: Float32Array;
   /**
-   * Straight-alpha `text-halo-color`, 4 floats per vertex. White for
-   * constant halo colors and for icon batches (whose material has no halo).
+   * Two packed premultiplied halo RGBA endpoints, 4 floats per vertex.
    */
   halos: Float32Array;
+  /** Data paint binds to original worker vertex slots, before orientation extraction. */
+  paint?: { config: ProgramConfiguration; prefix: 'text' | 'icon'; revision: () => number };
   /** Live glyph displacement and angle: device pixels for viewport, Mercator metres for map lines. */
   dynamics: Float32Array;
   /** The bucket's overlap mode, checked against previously placed symbols. */
@@ -72,6 +69,12 @@ export interface SymbolPrimitiveGeometry {
   opacities: Float32Array;
   /** Placement changed the generation channel before its GPU upload. */
   opacityDirty: boolean;
+  /** Published variable-anchor choice, independently owned by this generation. */
+  variablePlacements?: Array<number | undefined>;
+  /** Immutable maximum candidate shift in 24px shaped units and source pixels. */
+  variableBounds?: { sizeData: SizeData; offset: number; sourceOffset: number };
+  /** An icon-text-fit batch follows the chosen text's displacement. */
+  variableTextFit?: boolean;
   /** Triangle indices into the arrays above. */
   indices: Uint32Array;
   /** Placement metadata, one entry per symbol, in vertex order. */
@@ -89,6 +92,8 @@ export interface SymbolInstance {
   vertexStart: number;
   /** Vertex count (always a multiple of four: one quad per glyph or icon). */
   vertexCount: number;
+  /** First original worker paint slot of this symbol. */
+  paintVertexStart?: number;
   /** Extent of the quads in pixels at text-size 24. */
   minX: number;
   minY: number;
@@ -98,6 +103,11 @@ export interface SymbolInstance {
   collisionBox?: { x1: number; y1: number; x2: number; y2: number; layoutSize: number };
   /** Worker line-text collision diameter in CSS pixels, plus runtime padding. */
   collisionCircles?: { diameter: number; padding: number };
+  /** Worker candidates and their own horizontal justification vertex ranges. */
+  variable?: {
+    rotateWithMap: boolean;
+    anchors: ReadonlyArray<{ anchor: TextAnchor; x: number; y: number; vertexStart: number; vertexCount: number }>;
+  };
   /** Present for line-placed labels: the per-frame view state. */
   line?: LineLabelView;
 }
@@ -114,6 +124,8 @@ export interface LineLabelView {
   keepUpright: boolean;
   rotateToLine: boolean;
   writingMode: number;
+  /** The other worker writing orientation, in this part's instance array. */
+  alternate?: number;
 }
 
 export interface SymbolTileGeometry {
@@ -127,7 +139,7 @@ export interface SymbolTileGeometry {
    * the pairing an index-based zip would couple unrelated features whenever
    * the two halves have different counts.
    */
-  pairs: ReadonlyArray<{ text: number; icon: number }>;
+  pairs: ReadonlyArray<{ text: number; icon: number; textAlternative?: number }>;
 }
 
 interface SymbolInstanceRow {
@@ -151,6 +163,8 @@ interface SymbolInstanceRow {
   iconBoxEndIndex: number;
   useRuntimeCollisionCircles: number;
   collisionCircleDiameter: number;
+  textAnchorOffsetStartIndex: number;
+  textAnchorOffsetEndIndex: number;
 }
 
 interface PlacedSymbolView {
@@ -179,6 +193,7 @@ interface LineDataView {
 
 /** Components of the symbol layout vertex (a_pos_offset, a_data, a_pixeloffset). */
 const LAYOUT_COMPONENTS = 12;
+const textAnchors = new Map<number, TextAnchor>(Object.entries(TextAnchorEnum).map(([anchor, value]) => [value, anchor as TextAnchor]));
 
 interface LineGlyphPlacement {
   /** Position per glyph, in the supplied label plane and glyph order. */
@@ -323,73 +338,8 @@ function normalizeAngle(angle: number): number {
 interface SymbolBuffersView {
   layoutVertexArray: { int16: Int16Array; uint16: Uint16Array; length: number };
   indexArray: { uint16: Uint16Array; length: number };
+  segments: { get: () => ReadonlyArray<{ vertexOffset: number; primitiveOffset: number; primitiveLength: number }> };
   programConfigurations: { get: (layerId: string) => ProgramConfiguration };
-}
-
-/**
- * Per-vertex data-driven paint lookup for one symbol part. Symbol buckets
- * populate their paint arrays parallel to the layout vertex array, so the
- * paint value of a vertex is read at the vertex's own index; this mirrors
- * MapLibre's `a_fill_color`/`a_halo_color` symbol attributes, which the layer
- * shader multiplies into `u_color`/`u_halo_color`. A constant property has no
- * array (and no lookup), so the geometry stays white and the material color
- * applies unchanged — one shader path for both kinds.
- */
-interface SymbolPaintView {
-  config: ProgramConfiguration;
-  /** `text-color` or `icon-color`. */
-  colorProperty: string;
-  /** `text-halo-color`; absent for icons, whose material has no halo pass. */
-  haloProperty?: string;
-  /** Zoom the paint arrays were populated at (composite stops interpolate from it). */
-  zoom: number;
-}
-
-/**
- * How one symbol part derives its size. `vertexOwned` parts (source and
- * composite sizes) carry per-feature packed values in the layout vertex;
- * constant and camera sizes carry none, so the geometry bakes the fallback
- * stops here - camera stops interpolate in the shader by the live camera zoom
- * exactly as MapLibre's `evaluateSizeForZoom` does, instead of freezing at
- * the bucket's build zoom.
- */
-export interface SymbolPartSize {
-  /** Lower packed stop (`size * 128`) for vertex-less sizes. */
-  minPacked: number;
-  /** Upper packed stop; equals `minPacked` when there is no zoom interpolation. */
-  maxPacked: number;
-  /** `[minZoom, maxZoom]` for shader interpolation, else undefined. */
-  zoomRange?: readonly [number, number];
-  /** Whether the layout vertex carries the packed value (`source`/`composite`). */
-  vertexOwned: boolean;
-}
-
-/** Packs a symbol size the way the layout vertex stores it, clamped like MapLibre. */
-export function packSymbolSize(size: number): number {
-  return Math.min(255 * 128, Math.max(0, Math.round(size * 128)));
-}
-
-/**
- * Whitespace-stripped size description of one part: which stops the shader
- * mixes and whether the layout vertex owns them. Camera sizes interpolate by
- * the live camera zoom (MapLibre's `evaluateSizeForZoom`), so geometry no
- * longer freezes at the bucket's build zoom.
- */
-function partSize(data: SizeData): SymbolPartSize {
-  if (data.kind === 'constant') {
-    const packed = packSymbolSize(data.layoutSize);
-    return { minPacked: packed, maxPacked: packed, vertexOwned: false };
-  }
-  if (data.kind === 'camera') {
-    return {
-      minPacked: packSymbolSize(data.minSize),
-      maxPacked: packSymbolSize(data.maxSize),
-      zoomRange: [data.minZoom, data.maxZoom],
-      vertexOwned: false,
-    };
-  }
-  // source/composite: the worker packed the per-feature stops into the vertex.
-  return { minPacked: 0, maxPacked: 0, vertexOwned: true };
 }
 
 /**
@@ -419,7 +369,7 @@ function extractGeometry(
    * (constant and camera sizes). `vertexOwned` parts (source/composite) read
    * the worker's own packed stops instead.
    */
-  size: SymbolPartSize,
+  size: SizeData,
   overlapMode: OverlapMode,
   ignorePlacement: boolean,
   viewportPerspective: boolean,
@@ -429,16 +379,29 @@ function extractGeometry(
   line?: LineDataView,
   /** Collects the worker symbol-instance ordinal for each emitted entry. */
   emittedOrdinals?: number[],
-  /**
-   * Per-vertex data-driven fill/halo colors of the layer that owns this part.
-   * Absent for constant-paint layers; every emitted vertex is then white.
-   */
-  paint?: SymbolPaintView,
   pointMapRotation?: SymbolPrimitiveGeometry['pointMapRotation'],
+  variables?: { anchors: TextAnchorOffsetArray; placed: PlacedSymbolView; rotateWithMap: boolean },
 ): ExtractedSymbolGeometry | undefined {
   const int16 = buffers.layoutVertexArray.int16;
   const uint16 = buffers.layoutVertexArray.uint16;
   const indices = buffers.indexArray.uint16;
+  const segments = buffers.segments.get();
+  // Placed records append their quads in buffer order, but their starts are
+  // local to the segment chosen for that record. Variants of one instance
+  // can cross a segment boundary, so resolve each placed record independently.
+  const lineVertexStarts: number[] = [];
+  const placedRecords = line?.placed ?? variables?.placed;
+  if (placedRecords) {
+    let vertexCursor = 0;
+    let segmentIndex = 0;
+    for (let index = 0; index < placedRecords.length; index++) {
+      const placed = placedRecords.get(index);
+      while (segmentIndex + 1 < segments.length && vertexCursor >= segments[segmentIndex + 1].vertexOffset)
+        segmentIndex++;
+      lineVertexStarts.push(segments[segmentIndex].vertexOffset + placed.vertexStartIndex);
+      vertexCursor += placed.numGlyphs * 4;
+    }
+  }
 
   // old vertex index -> new vertex index, -1 for dropped (vertical) vertices.
   const remap = new Int32Array(buffers.layoutVertexArray.length).fill(-1);
@@ -449,24 +412,9 @@ function extractGeometry(
   const tex: number[] = [];
   const sizes: number[] = [];
   const sizesMax: number[] = [];
-  // Two floats per vertex: the zoom stops a composite size's two values
-  // belong to. Zero for every other size kind (the shader then leaves the
-  // lower stop untouched).
-  const sizeZooms: number[] = [];
   const colors: number[] = [];
   const halos: number[] = [];
   const placed: SymbolInstance[] = [];
-
-  // Straight-alpha white; constant properties contribute nothing but the
-  // shader still multiplies, keeping one code path for both paint kinds.
-  const WHITE = [1, 1, 1, 1] as const;
-  const readPaint = (property: string | undefined, vertexStart: number): readonly number[] => {
-    if (!paint || !property) {
-      return WHITE;
-    }
-    const color = vertexColor(paint.config, property, vertexStart, paint.zoom);
-    return color ? [color.red, color.green, color.blue, color.alpha] : WHITE;
-  };
 
   let cursor = 0;
   // The packed size vertex carries two flag bits below the size so the
@@ -483,51 +431,52 @@ function extractGeometry(
       ? instance.numVerticalGlyphVertices
       : instance.numVerticalIconVertices;
 
-    const linePlacement = line ? linePlacedSymbol(instance, kind, line) : undefined;
-    if (line && linePlacement) {
+    const linePlacements = line ? linePlacedSymbols(instance, kind, line, lineVertexStarts) : [];
+    if (line && linePlacements.length) {
       // The placed-driven branch owns its vertices; the instance cursor
       // range is skipped below so nothing double-draws.
       const placedBefore = placed.length;
-      emitLinePlacement(
-        buffers,
-        tileID,
-        sdf,
-        size,
-        textBit,
-        linePlacement,
-        line,
-        positions,
-        offsets,
-        pxoffsets,
-        minfontscales,
-        tex,
-        sizes,
-        sizesMax,
-        sizeZooms,
-        colors,
-        halos,
-        placed,
-        remap,
-        paint,
-      );
-      // emitLinePlacement drops the whole label when a glyph does not fit
-      // (matching upstream): only record ordinals for emitted entries.
-      if (placed.length > placedBefore) {
-        const emitted = placed[placedBefore];
-        if (kind === 'text' && instance.useRuntimeCollisionCircles)
-          emitted.collisionCircles = { diameter: instance.collisionCircleDiameter, padding: collision.textPadding };
-        if (kind === 'icon')
-          emitted.collisionBox = pointCollisionBox(instance, kind, collision, sizes, sizesMax, sizeZooms, emitted.vertexStart);
-        emittedOrdinals?.push(i);
+      for (const linePlacement of linePlacements) {
+        const candidateStart = placed.length;
+        emitLinePlacement(
+          buffers,
+          tileID,
+          sdf,
+          size,
+          textBit,
+          linePlacement,
+          line,
+          positions,
+          offsets,
+          pxoffsets,
+          minfontscales,
+          tex,
+          sizes,
+          sizesMax,
+          colors,
+          halos,
+          placed,
+          remap,
+        );
+        // emitLinePlacement drops the whole label when a glyph does not fit
+        // (matching upstream): only record ordinals for emitted entries.
+        if (placed.length > candidateStart) {
+          const emitted = placed[candidateStart];
+          if (kind === 'text' && instance.useRuntimeCollisionCircles)
+            emitted.collisionCircles = { diameter: instance.collisionCircleDiameter, padding: collision.textPadding };
+          if (kind === 'icon')
+            emitted.collisionBox = pointCollisionBox(instance, kind, collision, sizes, sizesMax, size, emitted.vertexStart);
+          emittedOrdinals?.push(i);
+        }
+      }
+      if (placed.length === placedBefore + 2) {
+        placed[placedBefore].line!.alternate = placedBefore + 1;
+        placed[placedBefore + 1].line!.alternate = placedBefore;
       }
     }
     else if (horizontal > 0) {
       const cartesian = tileLocalToWgs84Ecef(tileID, instance.anchorX, instance.anchorY);
       const vertexStart = positions.length / 3;
-      // One paint read per symbol: every vertex of an instance belongs to the
-      // same feature, whose value sits at the instance's first paint slot.
-      const fill = readPaint(paint?.colorProperty, cursor);
-      const halo = readPaint(paint?.haloProperty, cursor);
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
@@ -546,36 +495,55 @@ function extractGeometry(
         pxoffsets.push(int16[base + 8] / 16, int16[base + 9] / 16);
         minfontscales.push(int16[base + 10] / 256, int16[base + 11] / 256);
         tex.push(uint16[base + 4], uint16[base + 5]);
-        // A constant or camera {text,icon}-size leaves the packed size at zero
-        // because MapLibre ships those kinds as uniforms. Bake the part's
-        // stops into the vertex instead, so the shader reads one code path
-        // (camera stops interpolate by u_camera_zoom exactly like composite).
+        // Keep the worker's packed source/composite endpoints and kind bits,
+        // including a zero lower endpoint. Constant/camera size is an owner uniform.
         const packed = uint16[base + 6];
-        const packedSize = Math.floor(packed / 2);
-        const vertexOwned = size.vertexOwned && packedSize !== 0;
-        sizes.push(vertexOwned
-          ? (packed << 1) + textBit
-          : ((size.minPacked << 1) + (sdf ? 1 : 0) << 1) + textBit);
-        // a_data.w carries the upper stop of a zoom-interpolated size; for
-        // single-value parts it equals the lower stop, so the shader's mix
-        // is a no-op.
-        sizesMax.push(vertexOwned ? uint16[base + 7] : size.maxPacked);
-        sizeZooms.push(size.zoomRange ? size.zoomRange[0] : 0, size.zoomRange ? size.zoomRange[1] : 0);
-        colors.push(fill[0], fill[1], fill[2], fill[3]);
-        halos.push(halo[0], halo[1], halo[2], halo[3]);
+        const vertexSdf = kind === 'text' ? packed & 1 : sdf ? 1 : 0;
+        const vertexOwned = size.kind === 'source' || size.kind === 'composite';
+        sizes.push(vertexOwned ? (packed << 1) + textBit : vertexSdf * 2 + textBit);
+        sizesMax.push(vertexOwned ? uint16[base + 7] : 0);
+        colors.push(65535, 65535, 65535, 65535);
+        halos.push(65535, 65535, 65535, 65535);
         minX = Math.min(minX, int16[base + 2] / 32);
         maxX = Math.max(maxX, int16[base + 2] / 32);
         minY = Math.min(minY, int16[base + 3] / 32);
         maxY = Math.max(maxY, int16[base + 3] / 32);
       }
+      const collisionBox = pointCollisionBox(instance, kind, collision, sizes, sizesMax, size, vertexStart);
+      const variable = variables && instance.textAnchorOffsetEndIndex > instance.textAnchorOffsetStartIndex
+        ? {
+            rotateWithMap: variables.rotateWithMap,
+            anchors: Array.from({ length: instance.textAnchorOffsetEndIndex - instance.textAnchorOffsetStartIndex }, (_, index) => {
+              const candidate = variables.anchors.get(instance.textAnchorOffsetStartIndex + index);
+              const anchor = textAnchors.get(candidate.textAnchor)!;
+              const horizontalAlign = anchor.endsWith('left') ? 0 : anchor.endsWith('right') ? 1 : 0.5;
+              const verticalAlign = anchor.startsWith('top') ? 0 : anchor.startsWith('bottom') ? 1 : 0.5;
+              const justification = horizontalAlign === 0 ? 'left' : horizontalAlign === 1 ? 'right' : 'center';
+              const placedIndex = justification === 'left' ? instance.leftJustifiedTextSymbolIndex : justification === 'right' ? instance.rightJustifiedTextSymbolIndex : instance.centerJustifiedTextSymbolIndex;
+              // Fixed justification aliases all anchors to its one worker shaping.
+              const fixedIndex = placedIndex >= 0 ? placedIndex : [instance.leftJustifiedTextSymbolIndex, instance.centerJustifiedTextSymbolIndex, instance.rightJustifiedTextSymbolIndex].find(value => value >= 0)!;
+              const record = variables.placed.get(fixedIndex);
+              const box = collisionBox!;
+              return {
+                anchor,
+                x: -(horizontalAlign - 0.5) * (box.x2 - box.x1) * 24 / box.layoutSize + candidate.textOffset0,
+                y: -(verticalAlign - 0.5) * (box.y2 - box.y1) * 24 / box.layoutSize + candidate.textOffset1,
+                vertexStart: vertexStart + lineVertexStarts[fixedIndex] - cursor,
+                vertexCount: record.numGlyphs * 4,
+              };
+            }),
+          }
+        : undefined;
       placed.push({
         vertexStart,
         vertexCount: horizontal,
+        paintVertexStart: cursor,
         minX,
         minY,
         maxX,
         maxY,
-        collisionBox: pointCollisionBox(instance, kind, collision, sizes, sizesMax, sizeZooms, vertexStart),
+        collisionBox,
+        ...(variable ? { variable } : {}),
       });
       emittedOrdinals?.push(i);
     }
@@ -587,19 +555,37 @@ function extractGeometry(
   }
 
   const kept: number[] = [];
-  for (let i = 0; i + 2 < indices.length; i += 3) {
-    const a = remap[indices[i]];
-    const b = remap[indices[i + 1]];
-    const c = remap[indices[i + 2]];
-    if (a >= 0 && b >= 0 && c >= 0) {
-      kept.push(a, b, c);
+  for (const segment of segments) {
+    const end = (segment.primitiveOffset + segment.primitiveLength) * 3;
+    for (let i = segment.primitiveOffset * 3; i < end; i += 3) {
+      const a = remap[segment.vertexOffset + indices[i]];
+      const b = remap[segment.vertexOffset + indices[i + 1]];
+      const c = remap[segment.vertexOffset + indices[i + 2]];
+      if (a >= 0 && b >= 0 && c >= 0) {
+        kept.push(a, b, c);
+      }
     }
   }
   if (kept.length === 0) {
     return undefined;
   }
 
+  let variableBounds: SymbolPrimitiveGeometry['variableBounds'];
+  if (variables) {
+    for (const instance of placed) {
+      if (!instance.variable)
+        continue;
+      variableBounds ??= { sizeData: size, offset: 0, sourceOffset: 0 };
+      const maximumSize = Math.max(Math.floor(sizes[instance.vertexStart] / 4), sizesMax[instance.vertexStart]) / 128;
+      for (const anchor of instance.variable.anchors) {
+        const offset = Math.hypot(anchor.x, anchor.y);
+        variableBounds.offset = Math.max(variableBounds.offset, offset);
+        variableBounds.sourceOffset = Math.max(variableBounds.sourceOffset, offset * maximumSize / 24);
+      }
+    }
+  }
   return {
+    ...(variableBounds ? { variableBounds } : {}),
     positions: new Float64Array(positions),
     offsets: new Float32Array(offsets),
     pxoffsets: new Float32Array(pxoffsets),
@@ -607,7 +593,7 @@ function extractGeometry(
     tex: new Float32Array(tex),
     sizes: new Float32Array(sizes),
     sizesMax: new Float32Array(sizesMax),
-    sizeZooms: new Float32Array(sizeZooms),
+    sizeData: size,
     colors: new Float32Array(colors),
     halos: new Float32Array(halos),
     indices: new Uint32Array(kept),
@@ -629,7 +615,7 @@ function pointCollisionBox(
   collision: { boxes: CollisionBoxArray; tilePixelRatio: number; layoutZoom: number },
   sizes: number[],
   sizesMax: number[],
-  sizeZooms: number[],
+  sizeData: SizeData,
   vertexStart: number,
 ): SymbolInstance['collisionBox'] {
   const start = kind === 'text' ? instance.textBoxStartIndex : instance.iconBoxStartIndex;
@@ -639,13 +625,10 @@ function pointCollisionBox(
   }
   const box = collision.boxes.get(start);
   const pixelScale = 1 / collision.tilePixelRatio;
-  const sizeMin = Math.floor(sizes[vertexStart] / 4) / 128;
-  const zoomMin = sizeZooms[vertexStart * 2];
-  const zoomMax = sizeZooms[vertexStart * 2 + 1];
-  const zoomT = zoomMax > zoomMin
-    ? Math.min(1, Math.max(0, (collision.layoutZoom - zoomMin) / (zoomMax - zoomMin)))
-    : 0;
-  const iconLayoutSize = sizeMin + (Math.max(sizeMin, sizesMax[vertexStart] / 128) - sizeMin) * zoomT;
+  const iconLayoutSize = evaluateSizeForFeature(sizeData, evaluateSizeForZoom(sizeData, collision.layoutZoom + 1), {
+    lowerSize: Math.floor(sizes[vertexStart] / 4),
+    upperSize: sizesMax[vertexStart],
+  });
   const layoutSize = kind === 'text'
     ? instance.textBoxScale * pixelScale * 24
     : iconLayoutSize;
@@ -680,11 +663,12 @@ interface LinePlacedRange {
   glyphStartIndex: number;
 }
 
-function linePlacedSymbol(
+function linePlacedSymbols(
   instance: SymbolInstanceRow,
   kind: 'text' | 'icon',
   line: LineDataView,
-): LinePlacedRange | undefined {
+  vertexStarts: readonly number[],
+): LinePlacedRange[] {
   // One justification variant is baked (center first): upstream selects it
   // per frame, which a baked collection cannot do.
   const candidates = kind === 'text'
@@ -692,10 +676,16 @@ function linePlacedSymbol(
         instance.centerJustifiedTextSymbolIndex,
         instance.rightJustifiedTextSymbolIndex,
         instance.leftJustifiedTextSymbolIndex,
-        instance.verticalPlacedTextSymbolIndex,
       ]
-    : [instance.placedIconSymbolIndex, instance.verticalPlacedIconSymbolIndex];
-  for (const placedIndex of candidates) {
+    : [instance.placedIconSymbolIndex];
+  const ranges: LinePlacedRange[] = [];
+  // One horizontal justification and its actual vertical worker shaping.
+  // Keep separate vertex/paint ranges; the camera chooses the orientation.
+  const verticalIndex = kind === 'text' ? instance.verticalPlacedTextSymbolIndex : instance.verticalPlacedIconSymbolIndex;
+  let horizontalFound = false;
+  for (const placedIndex of [...candidates, verticalIndex]) {
+    if (horizontalFound && placedIndex !== verticalIndex)
+      continue;
     if (placedIndex === undefined || placedIndex < 0 || placedIndex >= line.placed.length) {
       continue;
     }
@@ -703,7 +693,7 @@ function linePlacedSymbol(
     if (placed.lineLength === 0 || placed.numGlyphs === 0) {
       continue;
     }
-    return {
+    ranges.push({
       placedIndex,
       anchorX: instance.anchorX,
       anchorY: instance.anchorY,
@@ -716,12 +706,17 @@ function linePlacedSymbol(
       lineOffsetY: placed.lineOffsetY,
       writingMode: placed.writingMode,
       textBoxScale: instance.textBoxScale,
-      vertexStart: placed.vertexStartIndex,
+      vertexStart: vertexStarts[placedIndex],
       numGlyphs: placed.numGlyphs,
       glyphStartIndex: placed.glyphStartIndex,
-    };
+    });
+    horizontalFound = true;
+    // Icon writing variants depend on text-fit point placement, which this
+    // along-line path does not choose independently from its paired text.
+    if (kind === 'icon')
+      break;
   }
-  return undefined;
+  return ranges;
 }
 
 /**
@@ -733,7 +728,7 @@ function emitLinePlacement(
   buffers: SymbolBuffersView,
   tileID: TileID,
   sdf: boolean,
-  size: SymbolPartSize,
+  size: SizeData,
   textBit: number,
   range: LinePlacedRange,
   line: LineDataView,
@@ -744,12 +739,10 @@ function emitLinePlacement(
   tex: number[],
   sizes: number[],
   sizesMax: number[],
-  sizeZooms: number[],
   colors: number[],
   halos: number[],
   placed: SymbolInstance[],
   remap: Int32Array,
-  paint?: SymbolPaintView,
 ): void {
   const int16 = buffers.layoutVertexArray.int16;
   const uint16 = buffers.layoutVertexArray.uint16;
@@ -776,16 +769,6 @@ function emitLinePlacement(
   if (!placement) {
     return;
   }
-  // Straight-alpha white for constant paint; the shader multiplies either way.
-  const readPlacedPaint = (property: string | undefined): readonly number[] => {
-    if (!paint || !property) {
-      return [1, 1, 1, 1];
-    }
-    const color = vertexColor(paint.config, property, range.vertexStart, paint.zoom);
-    return color ? [color.red, color.green, color.blue, color.alpha] : [1, 1, 1, 1];
-  };
-  const fill = readPlacedPaint(paint?.colorProperty);
-  const halo = readPlacedPaint(paint?.haloProperty);
   const vertexStart = positions.length / 3;
   let minX = Infinity;
   let minY = Infinity;
@@ -808,18 +791,12 @@ function emitLinePlacement(
       minfontscales.push(int16[base + 10] / 256, int16[base + 11] / 256);
       tex.push(uint16[base + 4], uint16[base + 5]);
       const packed = uint16[base + 6];
-      const packedSize = Math.floor(packed / 2);
-      const vertexOwned = size.vertexOwned && packedSize !== 0;
-      sizes.push(vertexOwned
-        ? (packed << 1) + textBit
-        : ((size.minPacked << 1) + (sdf ? 1 : 0) << 1) + textBit);
-      // Keep every per-vertex array in lockstep with the layout vertices:
-      // a missing push here would shift sizesMax/sizeZooms/colors for every
-      // later instance.
-      sizesMax.push(vertexOwned ? uint16[base + 7] : size.maxPacked);
-      sizeZooms.push(size.zoomRange ? size.zoomRange[0] : 0, size.zoomRange ? size.zoomRange[1] : 0);
-      colors.push(fill[0], fill[1], fill[2], fill[3]);
-      halos.push(halo[0], halo[1], halo[2], halo[3]);
+      const vertexSdf = textBit ? packed & 1 : sdf ? 1 : 0;
+      const vertexOwned = size.kind === 'source' || size.kind === 'composite';
+      sizes.push(vertexOwned ? (packed << 1) + textBit : vertexSdf * 2 + textBit);
+      sizesMax.push(vertexOwned ? uint16[base + 7] : 0);
+      colors.push(65535, 65535, 65535, 65535);
+      halos.push(65535, 65535, 65535, 65535);
       // Unrotated bounds: the collision pass re-derives the rotated union
       // per quad from the angles, so the stored box only needs the offsets.
       minX = Math.min(minX, ox);
@@ -831,6 +808,7 @@ function emitLinePlacement(
   placed.push({
     vertexStart,
     vertexCount: range.numGlyphs * 4,
+    paintVertexStart: range.vertexStart,
     minX,
     minY,
     maxX,
@@ -870,7 +848,7 @@ export function lineLabelView(
 }
 
 /** Cached worker extraction has no mutable placement or live projection state. */
-type ExtractedSymbolGeometry = Readonly<Omit<SymbolPrimitiveGeometry, 'dynamics' | 'opacities' | 'opacityDirty'>>;
+type ExtractedSymbolGeometry = Readonly<Omit<SymbolPrimitiveGeometry, 'dynamics' | 'opacities' | 'opacityDirty' | 'paint' | 'variablePlacements'>>;
 interface ExtractedSymbolTileGeometry {
   text?: ExtractedSymbolGeometry;
   icon?: ExtractedSymbolGeometry;
@@ -879,14 +857,27 @@ interface ExtractedSymbolTileGeometry {
 const geometryCache = new WeakMap<SymbolBucket, Map<string, ExtractedSymbolTileGeometry>>();
 
 /** Each generation owns its dynamic channels; extracted vertex data is shared. */
-function generationGeometry(extracted: ExtractedSymbolTileGeometry): SymbolTileGeometry {
-  const part = (geometry: ExtractedSymbolGeometry | undefined): SymbolPrimitiveGeometry | undefined => geometry && ({
-    ...geometry,
-    dynamics: new Float32Array(geometry.positions.length),
-    opacities: new Float32Array(geometry.positions.length / 3),
-    opacityDirty: true,
-  });
-  return { text: part(extracted.text), icon: part(extracted.icon), pairs: extracted.pairs };
+function generationGeometry(extracted: ExtractedSymbolTileGeometry, bucket: SymbolBucket, layerId: string): SymbolTileGeometry {
+  const part = (geometry: ExtractedSymbolGeometry | undefined, prefix: 'text' | 'icon'): SymbolPrimitiveGeometry | undefined => {
+    if (!geometry)
+      return;
+    const configurations = bucket[prefix].programConfigurations;
+    const config = configurations.get(layerId);
+    const paint = symbolHasAttributePaint(config, prefix)
+      ? { config, prefix, revision: () => configurations.paintRevision }
+      : undefined;
+    return {
+      ...geometry,
+      paint,
+      dynamics: new Float32Array(geometry.positions.length),
+      opacities: new Float32Array(geometry.positions.length / 3),
+      colors: paint ? geometry.colors.slice() : geometry.colors,
+      halos: paint ? geometry.halos.slice() : geometry.halos,
+      opacityDirty: true,
+      ...(prefix === 'text' && geometry.variableBounds ? { variablePlacements: Array.from<number | undefined>({ length: geometry.instances.length }) } : {}),
+    };
+  };
+  return { text: part(extracted.text, 'text'), icon: part(extracted.icon, 'icon'), pairs: extracted.pairs };
 }
 
 export function symbolBucketGeometry(
@@ -894,6 +885,7 @@ export function symbolBucketGeometry(
   tileID: TileID,
   tileKey: string,
   collisionBoxArray: CollisionBoxArray,
+  layerId: string,
 ): SymbolTileGeometry {
   let byTile = geometryCache.get(bucket);
   if (!byTile) {
@@ -903,7 +895,7 @@ export function symbolBucketGeometry(
   const key = tileKey;
   const cached = byTile.get(key);
   if (cached) {
-    return generationGeometry(cached);
+    return generationGeometry(cached, bucket, layerId);
   }
 
   const instances = bucket.symbolInstances;
@@ -932,27 +924,12 @@ export function symbolBucketGeometry(
     linePointX: index => bucket.lineVertexArray.getx(index),
     linePointY: index => bucket.lineVertexArray.gety(index),
   });
-  // Composite and camera sizes carry the two zoom stops their packed values
-  // belong to; the shader interpolates them by the live camera zoom. Constant
-  // and source kinds leave the vertex untouched.
-  const textSize = partSize(bucket.textSizeData);
-  const iconSize = partSize(bucket.iconSizeData);
-  // A bucket carries one layer; its per-part program configuration holds the
-  // data-driven paint arrays (text filters to text* properties, icon to
-  // icon*), so a missing entry means a constant paint and no vertex colors.
+  // Keep the worker size semantics beside shared static geometry; each owner
+  // evaluates its camera value or composite factor at the live zoom.
+  const textSize = bucket.textSizeData;
+  const iconSize = bucket.iconSizeData;
+  // A family shares layout extraction; each generation binds its own layer paint.
   const bucketLayer = bucket.layers?.[0];
-  const textPaintConfig = bucketLayer
-    ? bucket.text.programConfigurations.programConfigurations[bucketLayer.id]
-    : undefined;
-  const iconPaintConfig = bucketLayer
-    ? bucket.icon.programConfigurations.programConfigurations[bucketLayer.id]
-    : undefined;
-  const textPaint: SymbolPaintView | undefined = textPaintConfig
-    ? { config: textPaintConfig, colorProperty: 'text-color', haloProperty: 'text-halo-color', zoom: bucket.zoom }
-    : undefined;
-  const iconPaint: SymbolPaintView | undefined = iconPaintConfig
-    ? { config: iconPaintConfig, colorProperty: 'icon-color', zoom: bucket.zoom }
-    : undefined;
   const textOrdinals: number[] = [];
   const linePlacement = firstLayout?.get('symbol-placement') !== 'point';
   const textAlongLine = linePlacement && firstLayout?.get('text-rotation-alignment') === 'map';
@@ -973,8 +950,8 @@ export function symbolBucketGeometry(
     collision,
     textAlongLine ? lineDataFor(bucket.text.placedSymbolArray as unknown as LineDataView['placed'], firstLayout?.get('text-keep-upright') === true) : undefined,
     textOrdinals,
-    textPaint,
     !linePlacement && firstLayout?.get('text-pitch-alignment') === 'map' ? firstLayout?.get('text-rotation-alignment') === 'map' ? 'map' : 'viewport' : undefined,
+    !linePlacement && bucket.textAnchorOffsets.length ? { anchors: bucket.textAnchorOffsets, placed: bucket.text.placedSymbolArray as unknown as PlacedSymbolView, rotateWithMap: firstLayout?.get('text-rotation-alignment') === 'map' } : undefined,
   );
   if (text) {
     result.text = text;
@@ -995,17 +972,18 @@ export function symbolBucketGeometry(
     collision,
     iconAlongLine ? lineDataFor(bucket.icon.placedSymbolArray as unknown as LineDataView['placed'], firstLayout?.get('icon-keep-upright') === true) : undefined,
     iconOrdinals,
-    iconPaint,
-    !linePlacement && firstLayout?.get('icon-pitch-alignment') === 'map' ? firstLayout?.get('icon-rotation-alignment').constantOr('viewport') === 'map' ? 'map' : 'viewport' : undefined,
+    !linePlacement ? firstLayout?.get('icon-rotation-alignment').constantOr('viewport') === 'map' ? 'map' : 'viewport' : undefined,
   );
   if (icon) {
-    result.icon = icon;
+    result.icon = text?.variableBounds && firstLayout?.get('icon-text-fit') !== 'none'
+      ? { ...icon, variableBounds: text.variableBounds, variableTextFit: true }
+      : icon;
   }
   // Pair the two halves per worker symbol instance (both ordinal lists are
   // ascending): the placement pass needs it for MapLibre's
   // text-optional/icon-optional combine step.
   if (text || icon) {
-    const pairs: Array<{ text: number; icon: number }> = [];
+    const pairs: Array<{ text: number; icon: number; textAlternative?: number }> = [];
     let ti = 0;
     let ii = 0;
     while (ti < textOrdinals.length || ii < iconOrdinals.length) {
@@ -1014,10 +992,15 @@ export function symbolBucketGeometry(
       const ordinal = Math.min(t, s);
       const textIndex = t === ordinal ? ti++ : -1;
       const iconIndex = s === ordinal ? ii++ : -1;
-      pairs.push({ text: textIndex, icon: iconIndex });
+      const textAlternative = textIndex >= 0 && textOrdinals[ti] === ordinal ? ti++ : undefined;
+      pairs.push({ text: textIndex, icon: iconIndex, ...(textAlternative !== undefined ? { textAlternative } : {}) });
     }
     result.pairs = pairs;
   }
   byTile.set(key, result);
-  return generationGeometry(result);
+  return generationGeometry(result, bucket, layerId);
+}
+
+function symbolHasAttributePaint(config: ProgramConfiguration, prefix: 'text' | 'icon'): boolean {
+  return ['color', 'opacity', 'halo-color', 'halo-width', 'halo-blur'].some(property => config.getAttributeArray(`${prefix}-${property}`));
 }

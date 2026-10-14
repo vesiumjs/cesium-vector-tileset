@@ -1,9 +1,14 @@
 import type { OverlapMode } from '../../style/style-layer/overlap-mode';
-import type { SymbolPrimitiveGeometry } from './symbol-geometry';
+import type { EvaluatedZoomSize } from '../../symbol/symbol-size';
+import type { SymbolPrimitiveGeometry, SymbolTileGeometry } from './symbol-geometry';
+import type { SymbolTranslation, TranslatedSymbolPosition } from './symbol-translation';
 import Point from '@mapbox/point-geometry';
+import { Cartesian2 } from 'cesium';
 import { clipLine } from '../../symbol/clip-line';
+import { evaluateSizeForFeature, evaluateSizeForZoom } from '../../symbol/symbol-size';
 import { projectGlyphsAlongLine } from './symbol-geometry';
 import { symbolGroundPosition, symbolMapPerspectiveRatio, symbolMercatorDelta, symbolMercatorPosition, symbolMetersPerPixel, symbolPerspectiveRatio, symbolViewportGroundAxes } from './symbol-perspective';
+import { NO_SYMBOL_TRANSLATION, symbolTranslationMetres, translatedSymbolPosition } from './symbol-translation';
 
 /**
  * Reserved live-draw validity value in a_dynamic.z. projectGlyphsAlongLine
@@ -24,7 +29,7 @@ export interface PlacementView {
   /** Column-major 4x4 world-to-clip, matching Cesium's Matrix4 layout. */
   viewProjection: ArrayLike<number>;
   /** Match Cesium's projected z,x,y world position in 2D / Columbus View. */
-  projectPosition?: (x: number, y: number, z: number) => readonly [number, number, number] | undefined;
+  projectPosition?: (x: number, y: number, z: number, labelPlane?: { x: number; y: number }) => readonly [number, number, number] | undefined;
   /** Frozen-camera ellipsoid occlusion in 3D; absent in planar views. */
   isPointVisible?: (x: number, y: number, z: number) => boolean;
   /** Drawing buffer size in device pixels. */
@@ -39,6 +44,8 @@ export interface PlacementView {
    * shader draws (`u_camera_zoom`).
    */
   cameraZoom: number;
+  /** Actual ground bearing from the same frozen public camera basis. */
+  bearing?: number;
   /** Focus distance and clip W share Native world units. */
   cameraToCenterDistance: number | undefined;
   orthographic: boolean;
@@ -46,25 +53,50 @@ export interface PlacementView {
   mercatorProjection: boolean;
 }
 
-/**
- * The size one symbol draws at, given its packed vertex fields. Mirrors the
- * vertex shader's `mix(sizeMin, sizeMax, zoomT)` exactly: the same clamp and
- * the same fallback when the vertex carries no zoom range.
- */
-export function interpolatedSymbolSize(
-  packed: number,
-  sizeMax: number,
-  zoomMin: number,
-  zoomMax: number,
-  cameraZoom: number,
-): number {
-  const sizeMin = Math.floor(packed / 4) / 128;
-  if (!(zoomMax > zoomMin)) {
-    return sizeMin;
+const projectionSnapshots = new WeakMap<PlacementView, PlacementView>();
+
+/** Share only copies of one original view with exactly unchanged projection inputs. */
+function projectionSnapshot(view: PlacementView): PlacementView {
+  const previous = projectionSnapshots.get(view);
+  if (previous
+    && previous.width === view.width && previous.height === view.height
+    && previous.pixelRatio === view.pixelRatio && previous.cameraZoom === view.cameraZoom
+    && previous.bearing === view.bearing
+    && previous.cameraToCenterDistance === view.cameraToCenterDistance
+    && previous.orthographic === view.orthographic && previous.mercatorProjection === view.mercatorProjection
+    && previous.projectPosition === view.projectPosition && previous.isPointVisible === view.isPointVisible
+    && previous.viewport?.x === view.viewport?.x && previous.viewport?.y === view.viewport?.y
+    && previous.viewport?.width === view.viewport?.width && previous.viewport?.height === view.viewport?.height
+    && Array.prototype.every.call(previous.viewProjection, (value: number, index: number) => value === view.viewProjection[index])) {
+    return previous;
   }
-  const t = Math.min(1, Math.max(0, (cameraZoom - zoomMin) / (zoomMax - zoomMin)));
-  const upper = Math.max(sizeMin, sizeMax / 128);
-  return sizeMin + (upper - sizeMin) * t;
+  const snapshot = { ...view, viewProjection: new Float64Array(view.viewProjection), viewport: view.viewport && { ...view.viewport } };
+  projectionSnapshots.set(view, snapshot);
+  projectionSnapshots.set(snapshot, snapshot);
+  return snapshot;
+}
+
+/** Own the frozen inputs while preserving the original snapshot's projection identity. */
+export function copyPlacementView(view: PlacementView): PlacementView {
+  const snapshot = projectionSnapshot(view);
+  const copy = { ...snapshot, viewProjection: new Float64Array(snapshot.viewProjection), viewport: snapshot.viewport && { ...snapshot.viewport } };
+  projectionSnapshots.set(copy, snapshot);
+  return copy;
+}
+
+const evaluatedSizes = new WeakMap<SymbolPrimitiveGeometry, { zoom: number; value: EvaluatedZoomSize }>();
+
+/** One zoom evaluation per geometry/view, shared by line projection and collision. */
+export function evaluateSymbolSize(geometry: SymbolPrimitiveGeometry, vertex: number, zoom: number): number {
+  let evaluated = evaluatedSizes.get(geometry);
+  if (!evaluated || evaluated.zoom !== zoom) {
+    evaluated = { zoom, value: evaluateSizeForZoom(geometry.sizeData, zoom) };
+    evaluatedSizes.set(geometry, evaluated);
+  }
+  return evaluateSizeForFeature(geometry.sizeData, evaluated.value, {
+    lowerSize: Math.floor(geometry.sizes[vertex] / 4),
+    upperSize: geometry.sizesMax[vertex],
+  });
 }
 
 /**
@@ -92,8 +124,10 @@ export function symbolViewProjection(
  * Whether two matrices describe the same screen projection. Collision and
  * line placement consume clip X/Y/W; Cesium adjusts clip Z's near/far range
  * even with a stationary camera, so row 2 cannot invalidate those passes.
- * Keep the existing relative epsilon for native floating-point jitter. Callers
- * compare against a retained placement snapshot so small motion accumulates.
+ * Allow floating-point composition noise (64 machine epsilons). ECEF
+ * translation and linear terms cancel during projection, so a larger relative
+ * tolerance on individual entries can hide visible near-ground camera motion.
+ * Compare with a retained snapshot so sub-tolerance motion accumulates.
  */
 export function sameViewProjection(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
   for (let i = 0; i < 16; i++) {
@@ -101,7 +135,7 @@ export function sameViewProjection(a: ArrayLike<number>, b: ArrayLike<number>): 
       continue;
     }
     const scale = Math.max(1, Math.abs(a[i]), Math.abs(b[i]));
-    if (Math.abs(a[i] - b[i]) > scale * 1e-5) {
+    if (Math.abs(a[i] - b[i]) > scale * Number.EPSILON * 64) {
       return false;
     }
   }
@@ -295,14 +329,17 @@ export class SymbolCollisionIndex {
 
 /** Optional halves and the worker's per-symbol text/icon pairing. */
 export interface SymbolPlacementOptions {
-  pairs: ReadonlyArray<{ text: number; icon: number }>;
+  pairs: SymbolTileGeometry['pairs'];
   textOptional?: boolean;
   iconOptional?: boolean;
+  textTranslation?: SymbolTranslation;
+  iconTranslation?: SymbolTranslation;
 }
 
 interface SymbolSelectionVisibility {
   text: Uint8Array;
   icon: Uint8Array;
+  variables?: Array<number | undefined>;
 }
 
 /** A completed candidate set; camera filtering never promotes hidden halves. */
@@ -321,16 +358,32 @@ export class SymbolTileSelection {
 
   private readonly _iconOptional: boolean;
 
+  private readonly _textTranslation: SymbolTranslation;
+
+  private readonly _iconTranslation: SymbolTranslation;
+
   private _placement: SymbolTilePlacement | undefined;
 
   constructor(text: SymbolPrimitiveGeometry | undefined, icon: SymbolPrimitiveGeometry | undefined, view: PlacementView, options: SymbolPlacementOptions, visibility: SymbolSelectionVisibility) {
     this._text = text;
     this._icon = icon;
     this.view = view;
-    this._visibility = visibility;
+    // A complete logical candidate retains both worker writing orientations.
+    // Drawable opacity still belongs to the one selected in the current view.
+    const alternatives = options.pairs.some(pair => pair.textAlternative !== undefined);
+    this._visibility = alternatives ? { ...visibility, text: visibility.text.slice() } : visibility;
+    if (alternatives) {
+      for (const pair of options.pairs) {
+        if (pair.textAlternative !== undefined && (visibility.text[pair.text] || visibility.text[pair.textAlternative])) {
+          this._visibility.text[pair.text] = this._visibility.text[pair.textAlternative] = 1;
+        }
+      }
+    }
     this._textOptional = options.textOptional === true;
     this._iconOptional = options.iconOptional === true;
-    this._pairs = options.pairs.filter(pair => visibility.text[pair.text] || visibility.icon[pair.icon]);
+    this._textTranslation = options.textTranslation ?? NO_SYMBOL_TRANSLATION;
+    this._iconTranslation = options.iconTranslation ?? NO_SYMBOL_TRANSLATION;
+    this._pairs = options.pairs.filter(pair => this._visibility.text[pair.text] || this._visibility.icon[pair.icon]);
   }
 
   /** Whether this frozen pass selected any recoverable text/icon pair. */
@@ -346,11 +399,15 @@ export class SymbolTileSelection {
       if (visibility[index]) {
         yield index;
       }
+      if (part === 'text' && pair.textAlternative !== undefined && visibility[pair.textAlternative])
+        yield pair.textAlternative;
     }
   }
 
   matchesOptions(options: SymbolPlacementOptions): boolean {
-    return this._textOptional === (options.textOptional === true) && this._iconOptional === (options.iconOptional === true);
+    return this._textOptional === (options.textOptional === true) && this._iconOptional === (options.iconOptional === true)
+      && this._textTranslation === (options.textTranslation ?? NO_SYMBOL_TRANSLATION)
+      && this._iconTranslation === (options.iconTranslation ?? NO_SYMBOL_TRANSLATION);
   }
 
   /** Reuse the normal paired collision rules, visiting only baseline candidates. */
@@ -390,6 +447,8 @@ export class SymbolTilePlacement {
 
   private readonly _iconVisibility: Uint8Array;
 
+  private readonly _variablePlacements: Array<number | undefined> | undefined;
+
   private _cursor = 0;
 
   private _done = false;
@@ -414,6 +473,7 @@ export class SymbolTilePlacement {
     this._eligibility = eligibility;
     this._textVisibility = new Uint8Array(text?.instances.length ?? 0);
     this._iconVisibility = new Uint8Array(icon?.instances.length ?? 0);
+    this._variablePlacements = text?.variablePlacements?.slice();
   }
 
   get done(): boolean {
@@ -429,7 +489,7 @@ export class SymbolTilePlacement {
     if (!this._done) {
       throw new Error('Cannot select unfinished symbol placement');
     }
-    return this._selection ??= new SymbolTileSelection(this._text, this._icon, this._view, this._options, { text: this._textVisibility, icon: this._iconVisibility });
+    return this._selection ??= new SymbolTileSelection(this._text, this._icon, this._view, this._options, { text: this._textVisibility, icon: this._iconVisibility, ...(this._variablePlacements ? { variables: this._variablePlacements.slice() } : {}) });
   }
 
   /** Restart only the reusable current-view filter, never a target generation. */
@@ -458,14 +518,61 @@ export class SymbolTilePlacement {
   /**
    * @internal
    */
-  private _placePair(pair: { text: number; icon: number }, projections: SymbolProjectionContext): void {
+  private _placePair(pair: SymbolTileGeometry['pairs'][number], projections: SymbolProjectionContext): void {
     const text = pair.text === -1 ? undefined : this._text!;
     const icon = pair.icon === -1 ? undefined : this._icon!;
     const textAlwaysShow = text?.overlapMode === 'always' && (icon?.overlapMode === 'always' || !icon || this._options.iconOptional === true);
     const iconAlwaysShow = icon?.overlapMode === 'always' && (text?.overlapMode === 'always' || !text || this._options.textOptional === true);
-    const textBox = text && (!this._eligibility || this._eligibility.text[pair.text]) && symbolBox(text, this._view, pair.text, projections, textAlwaysShow);
-    const iconBox = icon && (!this._eligibility || this._eligibility.icon[pair.icon]) && symbolBox(icon, this._view, pair.icon, projections, iconAlwaysShow);
-    let placeText = !!textBox && !this._index.collides(textBox, text!.overlapMode);
+    const textTranslation = this._options.textTranslation ?? NO_SYMBOL_TRANSLATION;
+    const iconTranslation = this._options.iconTranslation ?? NO_SYMBOL_TRANSLATION;
+    const textIndex = text && pair.textAlternative !== undefined && !projections.line(text, pair.text, this._view, textTranslation) ? pair.textAlternative : pair.text;
+    const textEligible = text && (!this._eligibility || this._eligibility.text[textIndex]);
+    const iconEligible = icon && (!this._eligibility || this._eligibility.icon[pair.icon]);
+    const variable = textEligible && text!.instances[textIndex].variable;
+    let textBox: Box | undefined;
+    let iconBox: Box | undefined;
+    let placeText = false;
+    if (variable) {
+      const layoutSize = text!.instances[textIndex].collisionBox!.layoutSize;
+      const previous = this._eligibility?.variables?.[textIndex] ?? text!.variablePlacements?.[textIndex];
+      const attempt = (candidate: number, overlap: OverlapMode) => {
+        const anchor = variable.anchors[candidate];
+        const shift = { x: anchor.x * layoutSize / 24, y: anchor.y * layoutSize / 24, rotateWithMap: variable.rotateWithMap };
+        const box = symbolBox(text!, this._view, textIndex, projections, textAlwaysShow, textTranslation, shift);
+        if (!box || this._index.collides(box, overlap))
+          return false;
+        const fittedIcon = iconEligible && icon!.variableTextFit
+          ? symbolBox(icon!, this._view, pair.icon, projections, iconAlwaysShow, iconTranslation, shift)
+          : undefined;
+        // Candidate trials use the text overlap mode for a fitted icon;
+        // its final verdict below still uses the icon's own mode.
+        if (iconEligible && icon!.variableTextFit && icon!.overlapMode === 'never' && (!fittedIcon || this._index.collides(fittedIcon, overlap)))
+          return false;
+        this._variablePlacements![textIndex] = candidate;
+        textBox = box;
+        iconBox = fittedIcon;
+        return true;
+      };
+      // Keep a previously selected anchor while it remains free, then follow style order.
+      if (previous !== undefined)
+        placeText = attempt(previous, 'never');
+      const modes: OverlapMode[] = text!.overlapMode === 'never' ? ['never'] : ['never', text!.overlapMode];
+      for (const mode of modes) {
+        if (placeText)
+          break;
+        for (let candidate = 0; candidate < variable.anchors.length; candidate++) {
+          if (attempt(candidate, mode)) {
+            placeText = true;
+            break;
+          }
+        }
+      }
+    }
+    else {
+      textBox = textEligible ? symbolBox(text!, this._view, textIndex, projections, textAlwaysShow, textTranslation) : undefined;
+      placeText = !!textBox && !this._index.collides(textBox, text!.overlapMode);
+    }
+    iconBox ??= iconEligible ? symbolBox(icon!, this._view, pair.icon, projections, iconAlwaysShow, iconTranslation) : undefined;
     let placeIcon = !!iconBox && !this._index.collides(iconBox, icon!.overlapMode);
     const iconWithoutText = this._options.textOptional || !text;
     const textWithoutIcon = this._options.iconOptional || !icon;
@@ -481,20 +588,25 @@ export class SymbolTilePlacement {
     // Reserve only after BOTH verdicts, so a pair never blocks its own peer.
     if (text) {
       const visible = placeText ? 1 : 0;
-      this._selectedHalves += visible - this._textVisibility[pair.text];
-      this._textVisibility[pair.text] = visible;
+      this._setVisibility(this._textVisibility, pair.text, textIndex === pair.text ? visible : 0);
+      if (pair.textAlternative !== undefined)
+        this._setVisibility(this._textVisibility, pair.textAlternative, textIndex === pair.textAlternative ? visible : 0);
       if (placeText && textBox && !text.ignorePlacement) {
         this._index.reserve(textBox, text.overlapMode);
       }
     }
     if (icon) {
       const visible = placeIcon ? 1 : 0;
-      this._selectedHalves += visible - this._iconVisibility[pair.icon];
-      this._iconVisibility[pair.icon] = visible;
+      this._setVisibility(this._iconVisibility, pair.icon, visible);
       if (placeIcon && iconBox && !icon.ignorePlacement) {
         this._index.reserve(iconBox, icon.overlapMode);
       }
     }
+  }
+
+  private _setVisibility(visibility: Uint8Array, index: number, visible: number): void {
+    this._selectedHalves += visible - visibility[index];
+    visibility[index] = visible;
   }
 
   /** Publish a completed batch into its CPU opacity arrays. */
@@ -502,12 +614,16 @@ export class SymbolTilePlacement {
     if (!this._done) {
       throw new Error('Cannot commit unfinished symbol placement');
     }
+    if (this._variablePlacements)
+      this._text!.variablePlacements = this._variablePlacements.slice();
     if (this._eligibility) {
       let changed = false;
       for (const pair of this._options.pairs) {
         if (this._eligibility.text[pair.text]) {
           changed = commitInstanceVisibility(this._text!, pair.text, this._textVisibility[pair.text]) || changed;
         }
+        if (pair.textAlternative !== undefined && this._eligibility.text[pair.textAlternative])
+          changed = commitInstanceVisibility(this._text!, pair.textAlternative, this._textVisibility[pair.textAlternative]) || changed;
         if (this._eligibility.icon[pair.icon]) {
           changed = commitInstanceVisibility(this._icon!, pair.icon, this._iconVisibility[pair.icon]) || changed;
         }
@@ -522,6 +638,20 @@ export class SymbolTilePlacement {
 
 function commitInstanceVisibility(geometry: SymbolPrimitiveGeometry, index: number, opacity: number): boolean {
   const instance = geometry.instances[index];
+  if (instance.variable) {
+    const candidate = geometry.variablePlacements![index];
+    const selected = candidate === undefined ? undefined : instance.variable.anchors[candidate];
+    let changed = false;
+    for (let vertex = instance.vertexStart; vertex < instance.vertexStart + instance.vertexCount; vertex++) {
+      const value = opacity && selected && vertex >= selected.vertexStart && vertex < selected.vertexStart + selected.vertexCount ? 1 : 0;
+      if (geometry.opacities[vertex] !== value) {
+        geometry.opacities[vertex] = value;
+        changed = true;
+      }
+    }
+    geometry.opacityDirty ||= changed;
+    return changed;
+  }
   if (geometry.opacities[instance.vertexStart] === opacity) {
     return false;
   }
@@ -567,9 +697,10 @@ export function projectToScreen(
   wz: number,
   projectPosition?: PlacementView['projectPosition'],
   viewport?: PlacementView['viewport'],
+  labelPlane?: { x: number; y: number },
 ): { sx: number; sy: number; clipW: number } | undefined {
   if (projectPosition) {
-    const projected = projectPosition(wx, wy, wz);
+    const projected = projectPosition(wx, wy, wz, labelPlane);
     if (!projected) {
       return undefined;
     }
@@ -590,12 +721,16 @@ export function projectToScreen(
 
 interface ProjectedLine {
   anchor: NonNullable<ReturnType<typeof projectToScreen>>;
+  translatedAnchor: NonNullable<ReturnType<typeof projectToScreen>>;
   perspective: number;
   /** Original per-glyph positions, projected only when a consumer needs them. */
   baked: (glyph: number) => ReturnType<typeof projectToScreen>;
   points: Array<{ x: number; y: number }>;
   angles: number[];
   flipped: boolean;
+  /** Horizontal worker shaping asks for its vertical counterpart. */
+  useVertical?: boolean;
+  /** Unflipped horizontal collision proxy, independent of visible glyph orientation. */
   path: Array<{ x: number; y: number }>;
   /** Absolute Mercator ground metres; present only for map-pitched paths. */
   labelPoints?: Array<{ x: number; y: number }>;
@@ -624,35 +759,103 @@ function linePlane(line: NonNullable<SymbolPrimitiveGeometry['instances'][number
 
 /** Lazy line results shared only within one renderer operation. */
 export class SymbolProjectionContext {
-  private readonly _views = new WeakMap<PlacementView, WeakMap<SymbolPrimitiveGeometry, Map<number, ProjectedLine | undefined>>>();
+  private readonly _snapshots = new WeakMap<PlacementView, PlacementView>();
 
-  line(geometry: SymbolPrimitiveGeometry, instanceIndex: number, view: PlacementView): ProjectedLine | undefined {
-    let geometries = this._views.get(view);
+  private readonly _views = new WeakMap<PlacementView, WeakMap<SymbolPrimitiveGeometry, WeakMap<SymbolTranslation, Map<number, ProjectedLine | undefined>>>>();
+
+  private readonly _translations = new WeakMap<PlacementView, WeakMap<SymbolTranslation, Cartesian2>>();
+
+  translation(view: PlacementView, translation: SymbolTranslation): Cartesian2 {
+    if (!translation.pixels.x && !translation.pixels.y)
+      return Cartesian2.ZERO;
+    const snapshot = this._snapshot(view);
+    let translations = this._translations.get(snapshot);
+    if (!translations) {
+      translations = new WeakMap();
+      this._translations.set(snapshot, translations);
+    }
+    let metres = translations.get(translation);
+    if (!metres) {
+      metres = symbolTranslationMetres(translation, snapshot.cameraZoom, snapshot.bearing);
+      translations.set(translation, metres);
+    }
+    return metres;
+  }
+
+  private _snapshot(view: PlacementView): PlacementView {
+    let snapshot = this._snapshots.get(view);
+    if (!snapshot) {
+      snapshot = projectionSnapshot(view);
+      this._snapshots.set(view, snapshot);
+    }
+    return snapshot;
+  }
+
+  line(geometry: SymbolPrimitiveGeometry, instanceIndex: number, view: PlacementView, translation = NO_SYMBOL_TRANSLATION): ProjectedLine | undefined {
+    const snapshot = this._snapshot(view);
+    let geometries = this._views.get(snapshot);
     if (!geometries) {
       geometries = new WeakMap();
-      this._views.set(view, geometries);
+      this._views.set(snapshot, geometries);
     }
-    let instances = geometries.get(geometry);
+    let translations = geometries.get(geometry);
+    if (!translations) {
+      translations = new WeakMap();
+      geometries.set(geometry, translations);
+    }
+    let instances = translations.get(translation);
     if (!instances) {
       instances = new Map();
-      geometries.set(geometry, instances);
+      translations.set(translation, instances);
     }
-    if (!instances.has(instanceIndex))
-      instances.set(instanceIndex, projectLineInstance(geometry, instanceIndex, view));
-    return instances.get(instanceIndex);
+    // Separate raw projections from the visible orientation verdict. The
+    // horizontal shape decides orientation for both halves, even when its
+    // current view uses the vertical worker's different glyph spacing.
+    const selectedKey = instanceIndex * 2 + 1;
+    if (!instances.has(selectedKey)) {
+      const project = (index: number) => {
+        const key = index * 2;
+        if (!instances!.has(key))
+          instances!.set(key, projectLineInstance(geometry, index, snapshot, this.translation(snapshot, translation)));
+        return instances!.get(key);
+      };
+      const line = geometry.instances[instanceIndex].line!;
+      let selected: ProjectedLine | undefined;
+      if (line.alternate === undefined) {
+        selected = project(instanceIndex);
+      }
+      else {
+        const horizontal = line.writingMode === 2 ? line.alternate : instanceIndex;
+        const primary = project(horizontal);
+        if (primary && !!primary.useVertical === (instanceIndex !== horizontal)) {
+          selected = project(instanceIndex);
+          if (selected && instanceIndex !== horizontal)
+            selected = { ...selected, path: primary.path };
+        }
+      }
+      instances.set(selectedKey, selected);
+    }
+    return instances.get(selectedKey);
   }
 }
 
 /** A frozen-view projection shared by collision and live line attributes. */
-function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: number, view: PlacementView): ProjectedLine | undefined {
+function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: number, view: PlacementView, metres: Cartesian2): ProjectedLine | undefined {
   const line = geometry.instances[instanceIndex].line!;
-  if (line.pathECEF.length < 6 || (view.isPointVisible && !view.isPointVisible(line.anchorECEF.x, line.anchorECEF.y, line.anchorECEF.z)))
+  if (line.pathECEF.length < 6)
+    return undefined;
+  const translated = !!(metres.x || metres.y);
+  const translatedWorld: TranslatedSymbolPosition | undefined = translated ? translatedSymbolPosition(line.anchorECEF.x, line.anchorECEF.y, line.anchorECEF.z, metres) : line.anchorECEF;
+  if (!translatedWorld || (view.isPointVisible && !view.isPointVisible(translatedWorld.x, translatedWorld.y, translatedWorld.z)))
     return undefined;
   const anchor = projectToScreen(view.viewProjection, view.width, view.height, line.anchorECEF.x, line.anchorECEF.y, line.anchorECEF.z, view.projectPosition, view.viewport);
   if (!anchor)
     return undefined;
+  const translatedAnchor = translated ? projectToScreen(view.viewProjection, view.width, view.height, translatedWorld.x, translatedWorld.y, translatedWorld.z, view.projectPosition, view.viewport, translatedWorld.labelPlane) : anchor;
+  if (!translatedAnchor)
+    return undefined;
   const vertex = geometry.instances[instanceIndex].vertexStart;
-  const size = interpolatedSymbolSize(geometry.sizes[vertex], geometry.sizesMax[vertex], geometry.sizeZooms[vertex * 2], geometry.sizeZooms[vertex * 2 + 1], view.cameraZoom);
+  const size = evaluateSymbolSize(geometry, vertex, view.cameraZoom);
   const ratio = geometry.viewportPerspective || geometry.mapPitch ? symbolPerspectiveRatio(view.cameraToCenterDistance, anchor.clipW, view.orthographic) : 1;
   if (ratio === undefined)
     return undefined;
@@ -670,7 +873,10 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
     if (index < 0 || index >= length)
       return undefined;
     const base = index * 3;
-    const point = projectToScreen(view.viewProjection, view.width, view.height, line.pathECEF[base], line.pathECEF[base + 1], line.pathECEF[base + 2], view.projectPosition, view.viewport);
+    const world = translated ? translatedSymbolPosition(line.pathECEF[base], line.pathECEF[base + 1], line.pathECEF[base + 2], metres) : undefined;
+    const point = translated
+      ? world && projectToScreen(view.viewProjection, view.width, view.height, world.x, world.y, world.z, view.projectPosition, view.viewport, world.labelPlane)
+      : projectToScreen(view.viewProjection, view.width, view.height, line.pathECEF[base], line.pathECEF[base + 1], line.pathECEF[base + 2], view.projectPosition, view.viewport);
     if (point) {
       const projected = { x: point.sx, y: point.sy };
       projections.set(index, projected);
@@ -692,8 +898,10 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
     const distance = Math.hypot(dx, dy);
     if (!(distance > 0))
       return undefined;
-    const unit = symbolGroundPosition(fromPlane.x + dx / distance, fromPlane.y + dy / distance);
-    const projected = projectToScreen(view.viewProjection, view.width, view.height, unit.x, unit.y, unit.z, view.projectPosition, view.viewport);
+    const labelX = fromPlane.x + metres.x + dx / distance;
+    const labelY = fromPlane.y + metres.y + dy / distance;
+    const unit = symbolGroundPosition(labelX, labelY);
+    const projected = projectToScreen(view.viewProjection, view.width, view.height, unit.x, unit.y, unit.z, view.projectPosition, view.viewport, translated ? { x: labelX, y: labelY } : undefined);
     if (!projected)
       return undefined;
     const sx = previous.x - projected.sx;
@@ -704,10 +912,10 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
     const minimumLength = required - travelled + 1;
     return { x: previous.x + sx * minimumLength / screenDistance, y: previous.y + sy * minimumLength / screenDistance };
   };
-  const labelAnchor = plane?.anchor ?? { x: anchor.sx, y: anchor.sy };
+  const labelAnchor = plane ? { x: plane.anchor.x + metres.x, y: plane.anchor.y + metres.y } : { x: translatedAnchor.sx, y: translatedAnchor.sy };
   const walk = (flip: boolean) => projectGlyphsAlongLine(
-    index => plane!.path[index].x,
-    index => plane!.path[index].y,
+    index => plane!.path[index].x + metres.x,
+    index => plane!.path[index].y + metres.y,
     0,
     length,
     labelAnchor.x,
@@ -725,7 +933,7 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
     const world = symbolGroundPosition(point.x, point.y);
     if (view.isPointVisible && !view.isPointVisible(world.x, world.y, world.z))
       return undefined;
-    const projected = projectToScreen(view.viewProjection, view.width, view.height, world.x, world.y, world.z, view.projectPosition, view.viewport);
+    const projected = projectToScreen(view.viewProjection, view.width, view.height, world.x, world.y, world.z, view.projectPosition, view.viewport, translated ? point : undefined);
     if (!projected)
       return undefined;
     const screen = { x: projected.sx, y: projected.sy };
@@ -734,8 +942,12 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
   };
   const toScreen = (point: { x: number; y: number }) => geometry.mapPitch ? groundScreen(point) : point;
   let placement = walk(false);
+  let useVertical = false;
   if (!placement)
     return undefined;
+  // MapLibre collides the horizontal worker's first/last glyph path with
+  // flip=false. Keep this walk before keep-upright changes the visible span.
+  const collisionPath = placement.path;
   if (line.keepUpright) {
     const first = toScreen(placement.points[0]);
     let last = toScreen(placement.points[placement.points.length - 1]);
@@ -747,7 +959,7 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
         const distance = Math.hypot(dx, dy);
         if (!(distance > 0))
           return undefined;
-        last = groundScreen({ x: plane.anchor.x + dx / distance * metresPerPixel, y: plane.anchor.y + dy / distance * metresPerPixel });
+        last = groundScreen({ x: plane.anchor.x + metres.x + dx / distance * metresPerPixel, y: plane.anchor.y + metres.y + dy / distance * metresPerPixel });
       }
       else {
         last = screenVertex(line.segment + 1, labelAnchor, 1, 0, 1);
@@ -755,6 +967,7 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
     }
     if (!first || !last)
       return undefined;
+    useVertical = line.writingMode === 1 && Math.abs(last.y - first.y) > Math.abs(last.x - first.x);
     // Primary orientation is determined after world projection, even for
     // map-pitched labels. Screen Y is opposite MapLibre's clip-space Y.
     if (line.writingMode === 2 ? first.y > last.y : first.x > last.x) {
@@ -768,22 +981,26 @@ function projectLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: n
     bakedProjections ??= new Map();
     if (!bakedProjections.has(glyph)) {
       const source = (vertex + glyph * 4) * 3;
-      bakedProjections.set(glyph, projectToScreen(view.viewProjection, view.width, view.height, geometry.positions[source], geometry.positions[source + 1], geometry.positions[source + 2], view.projectPosition, view.viewport));
+      const world = translated ? translatedSymbolPosition(geometry.positions[source], geometry.positions[source + 1], geometry.positions[source + 2], metres) : undefined;
+      bakedProjections.set(glyph, translated
+        ? world && projectToScreen(view.viewProjection, view.width, view.height, world.x, world.y, world.z, view.projectPosition, view.viewport, world.labelPlane)
+        : projectToScreen(view.viewProjection, view.width, view.height, geometry.positions[source], geometry.positions[source + 1], geometry.positions[source + 2], view.projectPosition, view.viewport));
     }
     return bakedProjections.get(glyph);
   };
   if (!geometry.mapPitch)
-    return { ...placement, anchor, perspective: ratio, baked };
+    return { ...placement, anchor, translatedAnchor, perspective: ratio, baked, useVertical, path: collisionPath };
   const points = placement.points.map(groundScreen);
-  const path = placement.path.map(groundScreen);
+  const path = collisionPath.map(groundScreen);
   if (points.some(point => !point) || path.some(point => !point))
     return undefined;
-  return { ...placement, anchor, perspective: ratio, baked, points: points.filter((point): point is { x: number; y: number } => point !== undefined), path: path.filter((point): point is { x: number; y: number } => point !== undefined), labelPoints: placement.points };
+  return { ...placement, anchor, translatedAnchor, perspective: ratio, baked, useVertical, points: points.filter((point): point is { x: number; y: number } => point !== undefined), path: path.filter((point): point is { x: number; y: number } => point !== undefined), labelPoints: placement.points };
 }
 
 /** Project selected line glyphs along the current screen path. */
-export function updateLineSymbolGeometry(geometry: SymbolPrimitiveGeometry, view: PlacementView, instanceIndices: Iterable<number>, projections: SymbolProjectionContext): boolean {
+export function updateLineSymbolGeometry(geometry: SymbolPrimitiveGeometry, view: PlacementView, instanceIndices: Iterable<number>, projections: SymbolProjectionContext, translation = NO_SYMBOL_TRANSLATION): boolean {
   const { positions, dynamics } = geometry;
+  const metres = projections.translation(view, translation);
   let changed = false;
   for (const i of instanceIndices) {
     const instance = geometry.instances[i];
@@ -791,7 +1008,7 @@ export function updateLineSymbolGeometry(geometry: SymbolPrimitiveGeometry, view
     if (!line) {
       continue;
     }
-    const placement = projections.line(geometry, i, view);
+    const placement = projections.line(geometry, i, view, translation);
     if (!placement) {
       changed = hideLineInstance(geometry, i) || changed;
       continue;
@@ -813,8 +1030,8 @@ export function updateLineSymbolGeometry(geometry: SymbolPrimitiveGeometry, view
         changed = hideLineInstance(geometry, i) || changed;
         break;
       }
-      const dx = Math.fround(labelPoint ? symbolMercatorDelta(labelPoint.x, labelBaked!.x) : point.x - baked.sx);
-      const dy = Math.fround(labelPoint ? labelPoint.y - labelBaked!.y : point.y - baked.sy);
+      const dx = Math.fround(labelPoint ? symbolMercatorDelta(labelPoint.x, labelBaked!.x + metres.x) : point.x - baked.sx);
+      const dy = Math.fround(labelPoint ? labelPoint.y - labelBaked!.y - metres.y : point.y - baked.sy);
       const angle = Math.fround(placement.angles[glyph]);
       for (let q = 0; q < 4; q++) {
         const offset = (vertex + glyph * 4 + q) * 3;
@@ -844,55 +1061,198 @@ function hideLineInstance(geometry: SymbolPrimitiveGeometry, instanceIndex: numb
   return changed;
 }
 
+function pointMapAngle(world: TranslatedSymbolPosition, view: PlacementView): number | undefined {
+  const plane = world.labelPlane ?? symbolMercatorPosition(world.x, world.y, world.z);
+  if (!plane)
+    return undefined;
+  const origin = projectToScreen(view.viewProjection, view.width, view.height, world.x, world.y, world.z, view.projectPosition, view.viewport, world.labelPlane);
+  const east = symbolGroundPosition(plane.x + 1, plane.y);
+  const point = projectToScreen(view.viewProjection, view.width, view.height, east.x, east.y, east.z, view.projectPosition, view.viewport, world.labelPlane ? { x: plane.x + 1, y: plane.y } : undefined);
+  return origin && point ? Math.atan2(point.sy - origin.sy, point.sx - origin.sx) : undefined;
+}
+
+/** The same ground label axes feed collision corners and fitted icon shifts. */
+function pointGroundAxes(worldAnchor: TranslatedSymbolPosition, view: PlacementView): ReturnType<typeof symbolViewportGroundAxes> | undefined {
+  const m = view.viewProjection;
+  const { width, height } = view;
+  const anchor = worldAnchor.labelPlane ?? symbolMercatorPosition(worldAnchor.x, worldAnchor.y, worldAnchor.z);
+  if (!anchor)
+    return undefined;
+  const world = symbolGroundPosition(anchor.x, anchor.y);
+  const origin = view.projectPosition ? view.projectPosition(world.x, world.y, world.z, worldAnchor.labelPlane ? anchor : undefined) : [world.x, world.y, world.z];
+  if (!origin)
+    return undefined;
+  // A frame projector reuses its tuple; preserve the origin before the
+  // next projection writes into that same result.
+  const [originX, originY, originZ] = origin;
+  const groundAxis = (x: number, y: number) => {
+    const world = symbolGroundPosition(x, y);
+    const point = view.projectPosition ? view.projectPosition(world.x, world.y, world.z, worldAnchor.labelPlane ? { x, y } : undefined) : [world.x, world.y, world.z];
+    if (!point)
+      return undefined;
+    const dx = point[0] - originX;
+    const dy = point[1] - originY;
+    const dz = point[2] - originZ;
+    // Use undivided clip XY. Dividing by W would add the off-axis
+    // perspective derivative, which is absent from the label plane.
+    return {
+      x: (m[0] * dx + m[4] * dy + m[8] * dz) * (view.viewport?.width ?? width),
+      y: -(m[1] * dx + m[5] * dy + m[9] * dz) * (view.viewport?.height ?? height),
+    };
+  };
+  const east = groundAxis(anchor.x + 1, anchor.y);
+  const south = groundAxis(anchor.x, anchor.y + 1);
+  if (!east || !south)
+    return undefined;
+  return symbolViewportGroundAxes(east, south);
+}
+
+/** Update the selected point anchors after a complete placement has published. */
+export function updateVariableSymbolGeometry(geometry: SymbolTileGeometry, view: PlacementView, projections: SymbolProjectionContext, textTranslation = NO_SYMBOL_TRANSLATION, iconTranslation = NO_SYMBOL_TRANSLATION): Set<'text' | 'icon'> | undefined {
+  const text = geometry.text;
+  if (!text?.variablePlacements)
+    return undefined;
+  const changed = new Set<'text' | 'icon'>();
+  for (const pair of geometry.pairs) {
+    if (pair.text < 0)
+      continue;
+    const instance = text.instances[pair.text];
+    if (!instance.variable)
+      continue;
+    const choice = text.variablePlacements[pair.text];
+    const candidate = choice === undefined ? undefined : instance.variable.anchors[choice];
+    if (!candidate) {
+      if (pair.icon >= 0 && geometry.icon?.variableTextFit && writePointDynamics(geometry.icon, pair.icon, 0, 0, INVALID_LINE_ANGLE))
+        changed.add('icon');
+      continue;
+    }
+    const vertex = instance.vertexStart * 3;
+    const metres = projections.translation(view, textTranslation);
+    const world = translatedSymbolPosition(text.positions[vertex], text.positions[vertex + 1], text.positions[vertex + 2], metres);
+    const anchor = world && projectToScreen(view.viewProjection, view.width, view.height, world.x, world.y, world.z, view.projectPosition, view.viewport, world.labelPlane);
+    if (!world || !anchor)
+      continue;
+    // The original painted anchor supplies perspective; the variable shift
+    // must not feed its moved clip W back into the size calculation.
+    const ratio = symbolPerspectiveRatio(view.cameraToCenterDistance, anchor.clipW, view.orthographic)!;
+    const fontScale = evaluateSymbolSize(text, instance.vertexStart, view.cameraZoom) * ratio / 24;
+    let x = candidate.x * fontScale;
+    let y = candidate.y * fontScale;
+    let angle = 0;
+    if (!text.mapPitch && instance.variable.rotateWithMap) {
+      const projectedAngle = pointMapAngle(world, view);
+      if (projectedAngle === undefined)
+        continue;
+      angle = projectedAngle;
+      ({ x, y } = rotateOffsetYDown(x, y, angle));
+    }
+    const scale = text.mapPitch ? symbolMetersPerPixel(view.cameraZoom) : view.pixelRatio;
+    if (writePointDynamics(text, pair.text, x * scale, y * scale, angle))
+      changed.add('text');
+    const icon = geometry.icon;
+    if (pair.icon < 0 || !icon?.variableTextFit)
+      continue;
+    const iconInstance = icon.instances[pair.icon];
+    const iconVertex = iconInstance.vertexStart * 3;
+    const iconMetres = projections.translation(view, iconTranslation);
+    const iconWorld = translatedSymbolPosition(icon.positions[iconVertex], icon.positions[iconVertex + 1], icon.positions[iconVertex + 2], iconMetres);
+    if (!iconWorld)
+      continue;
+    let iconX = x * (icon.mapPitch ? symbolMetersPerPixel(view.cameraZoom) : view.pixelRatio);
+    let iconY = y * (icon.mapPitch ? symbolMetersPerPixel(view.cameraZoom) : view.pixelRatio);
+    if (!icon.mapPitch) {
+      const iconAnchor = projectToScreen(view.viewProjection, view.width, view.height, iconWorld.x, iconWorld.y, iconWorld.z, view.projectPosition, view.viewport, iconWorld.labelPlane);
+      if (!iconAnchor)
+        continue;
+      iconX += anchor.sx - iconAnchor.sx;
+      iconY += anchor.sy - iconAnchor.sy;
+    }
+    else {
+      const deltaX = metres.x - iconMetres.x;
+      const deltaY = metres.y - iconMetres.y;
+      if (icon.pointMapRotation === 'viewport') {
+        const axes = pointGroundAxes(iconWorld, view);
+        if (!axes)
+          continue;
+        const determinant = axes.east.x * axes.south.y - axes.south.x * axes.east.y;
+        if (determinant === 0)
+          continue;
+        iconX += (deltaX * axes.south.y - deltaY * axes.south.x) / determinant;
+        iconY += (deltaY * axes.east.x - deltaX * axes.east.y) / determinant;
+      }
+      else {
+        iconX += deltaX;
+        iconY += deltaY;
+      }
+    }
+    const iconAngle = !icon.mapPitch && icon.pointMapRotation === 'map' ? pointMapAngle(iconWorld, view) : 0;
+    if (iconAngle !== undefined && writePointDynamics(icon, pair.icon, iconX, iconY, iconAngle))
+      changed.add('icon');
+  }
+  return changed;
+}
+
+function writePointDynamics(geometry: SymbolPrimitiveGeometry, instanceIndex: number, x: number, y: number, angle: number): boolean {
+  const instance = geometry.instances[instanceIndex];
+  x = Math.fround(x);
+  y = Math.fround(y);
+  angle = Math.fround(angle);
+  const start = instance.vertexStart * 3;
+  if (geometry.dynamics[start] === x && geometry.dynamics[start + 1] === y && geometry.dynamics[start + 2] === angle)
+    return false;
+  for (let vertex = instance.vertexStart; vertex < instance.vertexStart + instance.vertexCount; vertex++) {
+    const offset = vertex * 3;
+    geometry.dynamics[offset] = x;
+    geometry.dynamics[offset + 1] = y;
+    geometry.dynamics[offset + 2] = angle;
+  }
+  return true;
+}
+
 function symbolBox(
   geometry: SymbolPrimitiveGeometry,
   view: PlacementView,
   instanceIndex: number,
   projections: SymbolProjectionContext,
   alwaysShow: boolean,
+  translation: SymbolTranslation,
+  variableShift?: { x: number; y: number; rotateWithMap: boolean },
 ): Box | undefined {
   const m = view.viewProjection;
   const { width, height, pixelRatio } = view;
-  const { positions, offsets, pxoffsets, minfontscales, sizes, sizesMax, sizeZooms, dynamics, instances } = geometry;
+  const { positions, offsets, pxoffsets, minfontscales, sizes, dynamics, instances } = geometry;
   // a_size packs (size * 128) << 2 | isSdf << 1 | isText: text offsets are in
   // 24px-glyph-em pixels (scale size / 24) while icon offsets are already in
   // sprite pixels (scale size directly) — the same split the vertex shader
   // uses. A batch carries one kind, so the first vertex decides for all.
   const isText = instances.length > 0 && Math.floor(sizes[instances[0].vertexStart]) % 2 === 1;
 
-  const project = (wx: number, wy: number, wz: number): { sx: number; sy: number } | undefined =>
-    projectToScreen(m, width, height, wx, wy, wz, view.projectPosition, view.viewport);
+  const project = (wx: number, wy: number, wz: number, labelPlane?: { x: number; y: number }): { sx: number; sy: number } | undefined =>
+    projectToScreen(m, width, height, wx, wy, wz, view.projectPosition, view.viewport, labelPlane);
 
   const instance = instances[instanceIndex];
   const anchorBase = instance.vertexStart * 3;
-  if (view.isPointVisible && !view.isPointVisible(positions[anchorBase], positions[anchorBase + 1], positions[anchorBase + 2])) {
+  const metres = projections.translation(view, translation);
+  const translatedAnchorWorld = translatedSymbolPosition(positions[anchorBase], positions[anchorBase + 1], positions[anchorBase + 2], metres);
+  if (!translatedAnchorWorld || (view.isPointVisible && !view.isPointVisible(translatedAnchorWorld.x, translatedAnchorWorld.y, translatedAnchorWorld.z))) {
     return undefined;
   }
-  const linePlacement = instance.line ? projections.line(geometry, instanceIndex, view) : undefined;
+  const linePlacement = instance.line ? projections.line(geometry, instanceIndex, view, translation) : undefined;
   if (instance.line && !linePlacement) {
     return undefined;
   }
-  const packed = sizes[instance.vertexStart];
-  // Composite sizes interpolate between the two packed zoom stops; every
-  // other size kind stores one value twice and lands on the same size.
-  const size = interpolatedSymbolSize(
-    packed,
-    sizesMax[instance.vertexStart],
-    sizeZooms[instance.vertexStart * 2],
-    sizeZooms[instance.vertexStart * 2 + 1],
-    view.cameraZoom,
-  );
+  const size = evaluateSymbolSize(geometry, instance.vertexStart, view.cameraZoom);
   let ratio = 1;
   let rawRatio = 1;
   let pointAnchor: ReturnType<typeof projectToScreen>;
   if (geometry.viewportPerspective || geometry.mapPitch) {
-    const anchor = linePlacement ? linePlacement.anchor : projectToScreen(m, width, height, positions[anchorBase], positions[anchorBase + 1], positions[anchorBase + 2], view.projectPosition, view.viewport);
-    const perspective = linePlacement ? linePlacement.perspective : anchor && symbolPerspectiveRatio(view.cameraToCenterDistance, anchor.clipW, view.orthographic);
+    const anchor = linePlacement ? instance.collisionCircles ? linePlacement.anchor : linePlacement.translatedAnchor : projectToScreen(m, width, height, translatedAnchorWorld.x, translatedAnchorWorld.y, translatedAnchorWorld.z, view.projectPosition, view.viewport, translatedAnchorWorld.labelPlane);
+    const perspective = linePlacement && instance.collisionCircles ? linePlacement.perspective : anchor && symbolPerspectiveRatio(view.cameraToCenterDistance, anchor.clipW, view.orthographic);
     if (perspective === undefined || (!alwaysShow && perspective < 0.6)) {
       return undefined;
     }
     rawRatio = perspective;
-    ratio = geometry.mapPitch ? symbolMapPerspectiveRatio(view.cameraToCenterDistance, anchor!.clipW, view.orthographic)! : perspective;
+    ratio = geometry.mapPitch ? variableShift ? 1 : symbolMapPerspectiveRatio(view.cameraToCenterDistance, anchor!.clipW, view.orthographic)! : perspective;
     if (!instance.line && !geometry.mapPitch) {
       pointAnchor = anchor;
     }
@@ -920,15 +1280,14 @@ function symbolBox(
   };
   if (instance.line && instance.collisionBox) {
     const box = instance.collisionBox;
-    const anchor = linePlacement!.anchor;
+    const anchor = linePlacement!.translatedAnchor;
     const plane = linePlane(instance.line);
     if (!anchor || !plane)
       return undefined;
-    const sizeScale = box.layoutSize > 0 ? size / box.layoutSize : 1;
     let angle = 0;
     if (!geometry.mapPitch) {
-      const worldEast = symbolGroundPosition(plane.anchor.x + 1, plane.anchor.y);
-      const east = project(worldEast.x, worldEast.y, worldEast.z);
+      const worldEast = symbolGroundPosition(plane.anchor.x + metres.x + 1, plane.anchor.y + metres.y);
+      const east = project(worldEast.x, worldEast.y, worldEast.z, translatedAnchorWorld.labelPlane ? { x: plane.anchor.x + metres.x + 1, y: plane.anchor.y + metres.y } : undefined);
       if (!east)
         return undefined;
       angle = Math.atan2(east.sy - anchor.sy, east.sx - anchor.sx);
@@ -936,55 +1295,31 @@ function symbolBox(
     const points: Array<{ sx: number; sy: number }> = [];
     for (const [x, y] of [[box.x1, box.y1], [box.x2, box.y1], [box.x1, box.y2], [box.x2, box.y2]]) {
       if (geometry.mapPitch) {
-        const scale = sizeScale * ratio * symbolMetersPerPixel(view.cameraZoom);
-        const world = symbolGroundPosition(plane.anchor.x + x * scale, plane.anchor.y + y * scale);
-        const corner = project(world.x, world.y, world.z);
+        const scale = ratio * symbolMetersPerPixel(view.cameraZoom);
+        const world = symbolGroundPosition(plane.anchor.x + metres.x + x * scale, plane.anchor.y + metres.y + y * scale);
+        const corner = project(world.x, world.y, world.z, translatedAnchorWorld.labelPlane ? { x: plane.anchor.x + metres.x + x * scale, y: plane.anchor.y + metres.y + y * scale } : undefined);
         if (!corner)
           return undefined;
         points.push(corner);
       }
       else {
-        const corner = rotateOffsetYDown(x * sizeScale * ratio * pixelRatio, y * sizeScale * ratio * pixelRatio, angle);
+        const corner = rotateOffsetYDown(x * ratio * pixelRatio, y * ratio * pixelRatio, angle);
         points.push({ sx: anchor.sx + corner.x, sy: anchor.sy + corner.y });
       }
     }
     return { x1: Math.min(...points.map(point => point.sx)), y1: Math.min(...points.map(point => point.sy)), x2: Math.max(...points.map(point => point.sx)), y2: Math.max(...points.map(point => point.sy)) };
   }
   if (geometry.mapPitch && !instance.line) {
-    const anchor = symbolMercatorPosition(positions[anchorBase], positions[anchorBase + 1], positions[anchorBase + 2]);
+    const anchor = translatedAnchorWorld.labelPlane ?? symbolMercatorPosition(translatedAnchorWorld.x, translatedAnchorWorld.y, translatedAnchorWorld.z);
     if (!anchor)
       return undefined;
-    let axes = { east: { x: 1, y: 0 }, south: { x: 0, y: 1 } };
-    if (geometry.pointMapRotation === 'viewport') {
-      const world = symbolGroundPosition(anchor.x, anchor.y);
-      const origin = view.projectPosition ? view.projectPosition(world.x, world.y, world.z) : [world.x, world.y, world.z];
-      if (!origin)
-        return undefined;
-      const groundAxis = (x: number, y: number) => {
-        const world = symbolGroundPosition(x, y);
-        const point = view.projectPosition ? view.projectPosition(world.x, world.y, world.z) : [world.x, world.y, world.z];
-        if (!point)
-          return undefined;
-        const dx = point[0] - origin[0];
-        const dy = point[1] - origin[1];
-        const dz = point[2] - origin[2];
-        // Use undivided clip XY. Dividing by W would add the off-axis
-        // perspective derivative, which is absent from the label plane.
-        return {
-          x: (m[0] * dx + m[4] * dy + m[8] * dz) * (view.viewport?.width ?? width),
-          y: -(m[1] * dx + m[5] * dy + m[9] * dz) * (view.viewport?.height ?? height),
-        };
-      };
-      const east = groundAxis(anchor.x + 1, anchor.y);
-      const south = groundAxis(anchor.x, anchor.y + 1);
-      if (!east || !south)
-        return undefined;
-      axes = symbolViewportGroundAxes(east, south);
-    }
+    const axes = geometry.pointMapRotation === 'viewport' ? pointGroundAxes(translatedAnchorWorld, view) : { east: { x: 1, y: 0 }, south: { x: 0, y: 1 } };
+    if (!axes)
+      return undefined;
     const corners = instance.collisionBox
       ? (() => {
           const box = instance.collisionBox!;
-          const scale = (box.layoutSize > 0 ? size / box.layoutSize : 1) * ratio;
+          const scale = ratio;
           return [[box.x1, box.y1], [box.x2, box.y1], [box.x1, box.y2], [box.x2, box.y2]].map(([x, y]) => ({ x: x * scale, y: y * scale }));
         })()
       : Array.from({ length: instance.vertexCount }, (_, index) => {
@@ -995,10 +1330,12 @@ function symbolBox(
     const scale = symbolMetersPerPixel(view.cameraZoom);
     const points: Array<{ sx: number; sy: number }> = [];
     for (const corner of corners) {
-      const x = (axes.east.x * corner.x + axes.south.x * corner.y) * scale;
-      const y = (axes.east.y * corner.x + axes.south.y * corner.y) * scale;
+      const offsetX = corner.x + (variableShift?.x ?? 0);
+      const offsetY = corner.y + (variableShift?.y ?? 0);
+      const x = (axes.east.x * offsetX + axes.south.x * offsetY) * scale;
+      const y = (axes.east.y * offsetX + axes.south.y * offsetY) * scale;
       const world = symbolGroundPosition(anchor.x + x, anchor.y + y);
-      const point = project(world.x, world.y, world.z);
+      const point = project(world.x, world.y, world.z, translatedAnchorWorld.labelPlane ? { x: anchor.x + x, y: anchor.y + y } : undefined);
       if (!point)
         return undefined;
       points.push(point);
@@ -1007,24 +1344,43 @@ function symbolBox(
   }
   // Line-placed symbols rotate per quad: union the rotated quad boxes.
   // Point symbols share one anchor and zero angles (fast path).
-  const rotated = !!instance.line || hasRotation(dynamics, instance.vertexStart, instance.vertexCount);
+  const rotated = !!instance.line || (!variableShift && hasRotation(dynamics, instance.vertexStart, instance.vertexCount));
   if (!rotated) {
-    const base = instance.vertexStart * 3;
-    const projected = pointAnchor ?? project(positions[base], positions[base + 1], positions[base + 2]);
-    if (!projected
-      || projected.sx <= -CELL_PX * 4 || projected.sx >= width + CELL_PX * 4
-      || projected.sy <= -CELL_PX * 4 || projected.sy >= height + CELL_PX * 4) {
+    const projected = pointAnchor ?? project(translatedAnchorWorld.x, translatedAnchorWorld.y, translatedAnchorWorld.z, translatedAnchorWorld.labelPlane);
+    if (!projected) {
       return undefined;
     }
     if (instance.collisionBox) {
       const box = instance.collisionBox;
-      const scale = box.layoutSize > 0 ? size / box.layoutSize * pixelRatio * ratio : pixelRatio * ratio;
-      return {
-        x1: projected.sx + box.x1 * scale,
-        y1: projected.sy + box.y1 * scale,
-        x2: projected.sx + box.x2 * scale,
-        y2: projected.sy + box.y2 * scale,
-      };
+      const scale = pixelRatio * ratio;
+      let projectedBox: Box;
+      if (variableShift?.rotateWithMap) {
+        const angle = pointMapAngle(translatedAnchorWorld, view);
+        if (angle === undefined)
+          return undefined;
+        const corners = [[box.x1, box.y1], [box.x2, box.y1], [box.x1, box.y2], [box.x2, box.y2]].map(([x, y]) => rotateOffsetYDown((x + variableShift.x) * scale, (y + variableShift.y) * scale, angle));
+        projectedBox = { x1: projected.sx + Math.min(...corners.map(point => point.x)), y1: projected.sy + Math.min(...corners.map(point => point.y)), x2: projected.sx + Math.max(...corners.map(point => point.x)), y2: projected.sy + Math.max(...corners.map(point => point.y)) };
+      }
+      else {
+        const x = projected.sx + (variableShift?.x ?? 0) * scale;
+        const y = projected.sy + (variableShift?.y ?? 0) * scale;
+        projectedBox = { x1: x + box.x1 * scale, y1: y + box.y1 * scale, x2: x + box.x2 * scale, y2: y + box.y2 * scale };
+      }
+      // MapLibre draws an allow-overlap half even when its worker collision
+      // box cannot be placed in the grid. Visibility still requires a valid
+      // front-side anchor; a grid box is not a viewport visibility test.
+      if (alwaysShow)
+        return projectedBox;
+      // A large icon can cover the viewport even when its anchor is beyond
+      // collision padding. Clip its worker layout box, rather than the anchor.
+      return projectedBox.x2 <= -CELL_PX * 4 || projectedBox.x1 >= width + CELL_PX * 4
+        || projectedBox.y2 <= -CELL_PX * 4 || projectedBox.y1 >= height + CELL_PX * 4
+        ? undefined
+        : projectedBox;
+    }
+    if (!alwaysShow && (projected.sx <= -CELL_PX * 4 || projected.sx >= width + CELL_PX * 4
+      || projected.sy <= -CELL_PX * 4 || projected.sy >= height + CELL_PX * 4)) {
+      return undefined;
     }
     let minX = Infinity;
     let minY = Infinity;
@@ -1049,17 +1405,12 @@ function symbolBox(
   let x2 = -Infinity;
   let y2 = -Infinity;
   for (let q = 0; q < instance.vertexCount; q += 4) {
-    const anchorBase = (instance.vertexStart + q) * 3;
     const projected = linePlacement
       ? linePlacement.baked(q / 4)
-      : project(
-          positions[anchorBase],
-          positions[anchorBase + 1],
-          positions[anchorBase + 2],
-        );
+      : project(translatedAnchorWorld.x, translatedAnchorWorld.y, translatedAnchorWorld.z, translatedAnchorWorld.labelPlane);
     if (!projected
-      || projected.sx < -CELL_PX * 4 || projected.sx > width + CELL_PX * 4
-      || projected.sy < -CELL_PX * 4 || projected.sy > height + CELL_PX * 4) {
+      || (!alwaysShow && (projected.sx < -CELL_PX * 4 || projected.sx > width + CELL_PX * 4
+        || projected.sy < -CELL_PX * 4 || projected.sy > height + CELL_PX * 4))) {
       continue;
     }
     const dynamic = (instance.vertexStart + q) * 3;
@@ -1078,7 +1429,7 @@ function symbolBox(
         const label = linePlacement.labelPoints[glyph];
         const scale = symbolMetersPerPixel(view.cameraZoom) / pixelRatio;
         const world = symbolGroundPosition(label.x + rotatedPoint.x * scale, label.y + rotatedPoint.y * scale);
-        const projectedCorner = project(world.x, world.y, world.z);
+        const projectedCorner = project(world.x, world.y, world.z, translatedAnchorWorld.labelPlane ? { x: label.x + rotatedPoint.x * scale, y: label.y + rotatedPoint.y * scale } : undefined);
         if (!projectedCorner)
           return undefined;
         sx = projectedCorner.sx;
