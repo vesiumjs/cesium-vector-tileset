@@ -7,17 +7,11 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import { cameraZoom } from '../../packages/cesium-vector-tileset/src/render/scene/covering';
 import { drawBatchForOwner, linePaintForOwner } from '../../packages/cesium-vector-tileset/src/render/scene/draw-batch';
 import { loadTileJson } from '../../packages/cesium-vector-tileset/src/source/load-tilejson';
-import { installCircleVisibility } from './circle-visibility-fixture';
-import { cityDiagnostics } from './city-diagnostics';
-import { createMapCityMotion, installNativeCityMotion } from './city-motion-adapter';
-import { cityReadiness } from './city-readiness';
-import { installFillVisibility } from './fill-visibility-fixture';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 async function createValidation() {
   const query = new URLSearchParams(location.search);
-  const observeDiagnostics = !query.has('cityPerf') || query.has('cityStages');
   const publishedUrl = query.get('publishedUrl') ?? `${import.meta.env.BASE_URL}packages/cesium-vector-tileset/dist/index.mjs`;
   const { CesiumVectorTileset } = query.has('published')
     ? await import(/* @vite-ignore */ publishedUrl) as typeof import('../../packages/cesium-vector-tileset/index')
@@ -58,7 +52,7 @@ async function createValidation() {
       ? SceneMode.SCENE2D
       : query.get('mode') === 'cv' ? SceneMode.COLUMBUS_VIEW : SceneMode.SCENE3D,
   }) as unknown as TestViewer;
-  viewer.scene.debugShowFramesPerSecond = !query.has('cityPerf');
+  viewer.scene.debugShowFramesPerSecond = true;
   const viewRectangle = Rectangle.fromDegrees(
     center[0] - 0.0375 * scale,
     center[1] - 0.01575 * scale,
@@ -81,24 +75,10 @@ async function createValidation() {
   viewer.scene.renderError.addEventListener((_scene, error: Error) => renderErrors.push(error.stack ?? error.message));
 
   const styleUrl = query.get('style') ?? 'https://tiles.openfreemap.org/styles/liberty';
-  if (query.has('motionBaseline')) {
-    // Motion measurements start from a settled native terrain selection.
-    // Do not mix Cesium's initial world-to-city terrain refinement into them.
-    let previous = '';
-    let stable = 0;
-    for (let frame = 0; frame < 120 && stable < 10; frame++) {
-      await new Promise(resolve => requestAnimationFrame(resolve));
-      const selection = viewer.scene.globe._surface._tilesToRender.map(tile => `${tile.level}/${tile.x}/${tile.y}`).sort().join(',');
-      stable = selection && selection === previous && viewer.scene.globe.tilesLoaded ? stable + 1 : 0;
-      previous = selection;
-    }
-  }
-  const cityMotion = query.has('cityPerf') ? installNativeCityMotion(viewer) : undefined;
   const tileset = await CesiumVectorTileset.fromUrl(styleUrl, {
     heightReference: query.has('drape') ? HeightReference.CLAMP_TO_GROUND : HeightReference.NONE,
   }) as unknown as TestTileset;
   viewer.scene.primitives.add(tileset);
-  cityMotion?.attach(tileset);
   let reference: MapLibre | undefined;
   const referenceErrors: string[] = [];
   if (query.has('compare')) {
@@ -173,92 +153,90 @@ async function createValidation() {
     rebuildMs: [] as number[],
     frames: [] as Array<{ zoom: number; tiles: number; commands: number; surfaces: number; pending: number }>,
   };
-  if (observeDiagnostics) {
-    function measureMethod(owner: object, method: string, timings: number[]) {
-      const target = owner as Record<string, (...args: unknown[]) => unknown>;
-      const original = target[method];
-      target[method] = function (...args) {
-        const start = performance.now();
-        const result = original.apply(this, args);
-        timings.push(performance.now() - start);
-        return result;
-      };
-    }
-    const work = tileset as unknown as {
-      _renderer: {
-        publishQueue: object;
-        vector: object;
-        evaluation: object;
-        pattern: object;
-        _backgroundRenderer: object;
-        residency: object;
-        sourceSync: object;
-      };
-    };
-    measureMethod(work._renderer.publishQueue, 'drain', measurements.buildMs);
-    measureMethod(work._renderer.vector, 'updatePaint', measurements.paintMs);
-    measureMethod(work._renderer.sourceSync, 'updateSource', measurements.sourceMs);
-    measureMethod(work._renderer.evaluation, 'evaluate', measurements.styleMs);
-    measureMethod(work._renderer.pattern, 'update', measurements.patternMs);
-    measureMethod(work._renderer._backgroundRenderer, 'update', measurements.backgroundMs);
-    for (const method of ['syncRetiredCapacity', 'syncHeldTileVisibility', 'syncMemoryBudget', 'releaseReplacedFeatureIndices'])
-      measureMethod(work._renderer.residency, method, measurements.residencyMs);
-    for (const method of ['_publishVisibleLayers', '_buildRasterLayers', '_buildPatternLayers'])
-      measureMethod(tileset._renderer, method, measurements.rebuildMs);
-    const begin = internals._renderer.vector.beginTileBuild;
-    internals._renderer.vector.beginTileBuild = function (...args) {
-      measurements.builds++;
-      return begin.apply(this, args);
-    };
-    const measuredPyramids = new WeakSet<object>();
-    function measurePyramids() {
-      for (const pyramid of Object.values(internals._renderer.style.tilePyramids)) {
-        if (measuredPyramids.has(pyramid))
-          continue;
-        measuredPyramids.add(pyramid);
-        const update = pyramid._updateRetainedTiles;
-        pyramid._updateRetainedTiles = function (...args) {
-          measurements.pyramidWalks++;
-          return update.apply(this, args);
-        };
-      }
-    }
-    const placement = internals._renderer.symbol.update;
-    internals._renderer.symbol.update = function (...args) {
+  function measureMethod(owner: object, method: string, timings: number[]) {
+    const target = owner as Record<string, (...args: unknown[]) => unknown>;
+    const original = target[method];
+    target[method] = function (...args) {
       const start = performance.now();
-      const result = placement.apply(this, args);
-      measurements.placementMs.push(performance.now() - start);
+      const result = original.apply(this, args);
+      timings.push(performance.now() - start);
       return result;
     };
-    const update = tileset.update;
-    tileset.update = function (...args) {
-      measurePyramids();
-      const start = performance.now();
-      update.apply(this, args);
-      measurements.updateMs.push(performance.now() - start);
+  }
+  const work = tileset as unknown as {
+    _renderer: {
+      publishQueue: object;
+      vector: object;
+      evaluation: object;
+      pattern: object;
+      _backgroundRenderer: object;
+      residency: object;
+      sourceSync: object;
     };
-    const sceneCollections = (tileset as unknown as {
-      _renderer: {
-        collections: {
-          pumpFirstUpdates: (...args: unknown[]) => unknown;
-          updateChildren: (...args: unknown[]) => unknown;
-          flushRemovals: (...args: unknown[]) => unknown;
-        };
-      };
-    })._renderer.collections;
-    measureMethod(sceneCollections, 'flushRemovals', measurements.releaseMs);
-    for (const [method, timings] of [
-      ['pumpFirstUpdates', measurements.uploadMs],
-      ['updateChildren', measurements.childrenMs],
-    ] as const) {
-      const original = sceneCollections[method];
-      sceneCollections[method] = function (...args) {
-        const start = performance.now();
-        const result = original.apply(this, args);
-        timings.push(performance.now() - start);
-        return result;
+  };
+  measureMethod(work._renderer.publishQueue, 'drain', measurements.buildMs);
+  measureMethod(work._renderer.vector, 'updatePaint', measurements.paintMs);
+  measureMethod(work._renderer.sourceSync, 'updateSource', measurements.sourceMs);
+  measureMethod(work._renderer.evaluation, 'evaluate', measurements.styleMs);
+  measureMethod(work._renderer.pattern, 'update', measurements.patternMs);
+  measureMethod(work._renderer._backgroundRenderer, 'update', measurements.backgroundMs);
+  for (const method of ['syncRetiredCapacity', 'syncHeldTileVisibility', 'syncMemoryBudget', 'releaseReplacedFeatureIndices'])
+    measureMethod(work._renderer.residency, method, measurements.residencyMs);
+  for (const method of ['_publishVisibleLayers', '_buildRasterLayers', '_buildPatternLayers'])
+    measureMethod(tileset._renderer, method, measurements.rebuildMs);
+  const begin = internals._renderer.vector.beginTileBuild;
+  internals._renderer.vector.beginTileBuild = function (...args) {
+    measurements.builds++;
+    return begin.apply(this, args);
+  };
+  const measuredPyramids = new WeakSet<object>();
+  function measurePyramids() {
+    for (const pyramid of Object.values(internals._renderer.style.tilePyramids)) {
+      if (measuredPyramids.has(pyramid))
+        continue;
+      measuredPyramids.add(pyramid);
+      const update = pyramid._updateRetainedTiles;
+      pyramid._updateRetainedTiles = function (...args) {
+        measurements.pyramidWalks++;
+        return update.apply(this, args);
       };
     }
+  }
+  const placement = internals._renderer.symbol.update;
+  internals._renderer.symbol.update = function (...args) {
+    const start = performance.now();
+    const result = placement.apply(this, args);
+    measurements.placementMs.push(performance.now() - start);
+    return result;
+  };
+  const update = tileset.update;
+  tileset.update = function (...args) {
+    measurePyramids();
+    const start = performance.now();
+    update.apply(this, args);
+    measurements.updateMs.push(performance.now() - start);
+  };
+  const sceneCollections = (tileset as unknown as {
+    _renderer: {
+      collections: {
+        pumpFirstUpdates: (...args: unknown[]) => unknown;
+        updateChildren: (...args: unknown[]) => unknown;
+        flushRemovals: (...args: unknown[]) => unknown;
+      };
+    };
+  })._renderer.collections;
+  measureMethod(sceneCollections, 'flushRemovals', measurements.releaseMs);
+  for (const [method, timings] of [
+    ['pumpFirstUpdates', measurements.uploadMs],
+    ['updateChildren', measurements.childrenMs],
+  ] as const) {
+    const original = sceneCollections[method];
+    sceneCollections[method] = function (...args) {
+      const start = performance.now();
+      const result = original.apply(this, args);
+      timings.push(performance.now() - start);
+      return result;
+    };
   }
   const coverage: number[] = [];
   let coverageStarted = false;
@@ -273,13 +251,18 @@ async function createValidation() {
       height: 1,
     }));
   }
-  function readCoverage(color: number[] = [51, 102, 170]) {
+  function readCoverage(color: number[] = [51, 102, 170], transitionColor?: number[]) {
     if (sampledRows.length === 0)
       return [0, 0, 0];
+    const difference = transitionColor?.map((channel, index) => channel - color[index]);
+    const lengthSquared = difference?.reduce((sum, channel) => sum + channel * channel, 0) ?? 0;
     return sampledRows.map((pixels) => {
       let filled = 0;
       for (let pixel = 0; pixel < pixels.length; pixel += 4) {
-        if (color.every((channel, index) => Math.abs(pixels[pixel + index] - channel) < 5))
+        const progress = difference && lengthSquared
+          ? Math.max(0, Math.min(1, difference.reduce((sum, channel, index) => sum + (pixels[pixel + index] - color[index]) * channel, 0) / lengthSquared))
+          : 0;
+        if (color.every((channel, index) => Math.abs(pixels[pixel + index] - channel - (difference?.[index] ?? 0) * progress) < 5))
           filled++;
       }
       return filled / (pixels.length / 4);
@@ -336,26 +319,24 @@ async function createValidation() {
     renderedFrames++;
     // Chromium discards the default framebuffer after compositing. Sample at
     // postRender and retain those bytes so polling tests inspect the last frame.
-    if ((observeDiagnostics && query.get('readback') !== '0') || query.get('readback') === '1')
+    if (query.get('readback') !== '0')
       sampleFramebuffer();
     if (tileset.isDestroyed())
       return;
-    if (observeDiagnostics) {
-      const stats = tileset.stats();
-      const frame = (viewer.scene as unknown as { _frameState: { commandList: Array<{ owner?: object }> } })._frameState;
-      const surfaces = frame.commandList.filter((command) => {
-        const batch = drawBatchForOwner(command) ?? drawBatchForOwner(command.owner);
-        return batch && ['fill', 'extrusion', 'pattern', 'raster'].includes(batch.kind);
-      }).length;
-      measurements.frames.push({
-        zoom: internals._renderer.evaluation.zoom,
-        tiles: stats.bucket.tiles,
-        commands: stats.submittedCommands,
-        surfaces,
-        pending: stats.pendingPublishes,
-      });
-      coverageStarted ||= stats.bucket.tiles > 0;
-    }
+    const stats = tileset.stats();
+    const frame = (viewer.scene as unknown as { _frameState: { commandList: Array<{ owner?: object }> } })._frameState;
+    const surfaces = frame.commandList.filter((command) => {
+      const batch = drawBatchForOwner(command) ?? drawBatchForOwner(command.owner);
+      return batch && ['fill', 'extrusion', 'pattern', 'raster'].includes(batch.kind);
+    }).length;
+    measurements.frames.push({
+      zoom: internals._renderer.evaluation.zoom,
+      tiles: stats.bucket.tiles,
+      commands: stats.submittedCommands,
+      surfaces,
+      pending: stats.pendingPublishes,
+    });
+    coverageStarted ||= stats.bucket.tiles > 0;
     if (query.has('synthetic')) {
       coverageStarted ||= tileset.stats().bucket.tiles > 0;
       if (!coverageStarted)
@@ -394,13 +375,7 @@ async function createValidation() {
         }
       : undefined,
     drawBatch: drawBatchForOwner,
-    cityCommands: () => viewer.scene._frameState.commandList.map((command) => {
-      const batch = drawBatchForOwner(command) ?? drawBatchForOwner(command.owner);
-      const paint = linePaintForOwner(command.owner);
-      return { kind: batch?.kind ?? 'native', layerId: batch?.layerId, tileId: batch?.tileId, width: paint?.width, alpha: paint?.color.alpha };
-    }),
-    cityDiagnostics: () => cityDiagnostics(viewer, tileset, internals._renderer.evaluation.zoom),
-    cityReadiness: () => cityReadiness(tileset as unknown as TestTileset, viewer),
+    linePaint: linePaintForOwner,
     measurements,
     coverage,
     readCoverage,
@@ -526,18 +501,10 @@ async function createValidation() {
     },
   };
   window.renderValidation = validation;
-  if (query.has('circleVisibility'))
-    window.circleVisibility = installCircleVisibility(viewer, tileset);
-  if (query.has('fillVisibility'))
-    window.fillVisibility = installFillVisibility(viewer, tileset);
   return validation;
 }
 
 declare global {
   interface Window { renderValidation: Awaited<ReturnType<typeof createValidation>> }
 }
-const query = new URLSearchParams(location.search);
-if (query.get('renderer') === 'maplibre')
-  createMapCityMotion(JSON.parse(query.get('initial')!));
-else
-  void createValidation();
+void createValidation();

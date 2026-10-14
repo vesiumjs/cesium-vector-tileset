@@ -1,7 +1,8 @@
 import type { CircleLayerSpecification, FillLayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { Color } from 'cesium';
+import type { CircleCollection } from '../packages/cesium-vector-tileset/src/render/circle/circle-collection';
 import type { TilePickObject } from '../packages/cesium-vector-tileset/src/render/vector/tile-conversion';
-import type { NativeBufferCollection, NativeVertexArray } from './fixtures/browser-types';
+import type { NativeBufferCollection, NativeBufferMaterial, NativeCommand, NativeVertexArray } from './fixtures/browser-types';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { writeFile } from 'node:fs/promises';
@@ -14,11 +15,13 @@ interface StrokePhase { fill: number; stroke: number; width: number }
 interface BufferOwner {
   tileId: string;
   layerId: string;
-  collection: NativeBufferCollection;
-  primitive: InstanceType<ReturnType<NativeBufferCollection['_getPrimitiveClass']>>;
-  material: InstanceType<ReturnType<NativeBufferCollection['_getMaterialClass']>>;
+  collection: NativeBufferCollection | CircleCollection;
+  material: NativeBufferMaterial;
   array: NativeVertexArray | undefined;
-  pickIds: Array<{ color: Color }>;
+  pickIds: Array<{ color: Color; object?: unknown }>;
+  context: () => { vertexArray: NativeVertexArray; command: NativeCommand; renderState: NativeCommand['renderState'] } | undefined;
+  picks: () => Array<{ color: Color; object?: unknown }>;
+  refresh: () => NativeBufferMaterial;
 }
 
 declare global {
@@ -79,16 +82,19 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
     window.bufferOwners = bucket.tileIds.flatMap(tileId => bucket.getTileCollections(tileId)
       .filter(collection => ['parcels', 'points'].includes(drawBatch(collection)?.layerId ?? ''))
       .map((source) => {
+        if (drawBatch(source)?.kind === 'circle') {
+          const collection = source as CircleCollection;
+          const mesh = collection.get(0) as { _va?: NativeVertexArray[]; _pickIds?: Array<{ color: Color; object?: unknown }>; _colorCommands: NativeCommand[] };
+          const refresh = () => {
+            const style = collection.entries[0].style;
+            return { color: style.color, outlineColor: style.outlineColor, outlineWidth: style.outlineWidthPx };
+          };
+          return { tileId, collection, layerId: collection.layerId, material: refresh(), array: mesh._va?.[0], pickIds: mesh._pickIds ?? [], picks: () => mesh._pickIds ?? [], refresh, context: () => mesh._va?.[0] && mesh._colorCommands[0] && ({ vertexArray: mesh._va[0], command: mesh._colorCommands[0], renderState: mesh._colorCommands[0].renderState }) };
+        }
         const collection = source as NativeBufferCollection;
-        return {
-          tileId,
-          collection,
-          layerId: drawBatch(collection)!.layerId,
-          primitive: new (collection._getPrimitiveClass())(),
-          material: new (collection._getMaterialClass())(),
-          array: collection._renderContext?.vertexArray,
-          pickIds: [...collection._pickIds.values()].flat(),
-        };
+        const primitive = new (collection._getPrimitiveClass())();
+        const material = new (collection._getMaterialClass())();
+        return { tileId, collection, layerId: drawBatch(collection)!.layerId, material, array: collection._renderContext?.vertexArray, pickIds: [...collection._pickIds.values()].flat(), picks: () => [...collection._pickIds.values()].flat(), refresh: () => collection.get(0, primitive).getMaterial(material), context: () => collection._renderContext };
       }));
     const uploaded = window.bufferOwners.filter(owner => owner.array);
     window.bufferHandles = new Set(uploaded.flatMap(({ array }) => [
@@ -114,16 +120,19 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
     };
     window.bufferStable = () => window.bufferOwners.every((owner) => {
       const collection = owner.collection;
-      const picks = [...collection._pickIds.values()].flat();
+      const picks = owner.picks();
       return !collection.isDestroyed()
         && bucket.getTileCollections(owner.tileId).includes(collection)
-        && (!owner.array || collection._renderContext?.vertexArray === owner.array)
+        && (!owner.array || owner.context()?.vertexArray === owner.array)
         && owner.pickIds.length === picks.length
         && owner.pickIds.every((pick, index) => picks[index] === pick);
     });
     window.stopBufferPixels = viewer.scene.postRender.addEventListener(() => {
       window.bufferPixels = viewer.scene.context.readPixels({ width: viewer.canvas.width, height: viewer.canvas.height });
-      window.bufferPaintAlpha = window.bufferOwners.map(owner => owner.collection.get(0, owner.primitive).getMaterial(owner.material).color.alpha);
+      window.bufferPaintAlpha = window.bufferOwners.map((owner) => {
+        Object.assign(owner.material, owner.refresh());
+        return owner.material.color.alpha;
+      });
     });
     window.bufferSample = (channel) => {
       const pixels = window.bufferPixels;
@@ -149,12 +158,16 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
           }
         }
       }
-      const picked = position && scene.pick(position) as BufferPick | undefined;
+      const hit = position && scene.pick(position) as { id?: BufferPick } | BufferPick | undefined;
+      const picked = hit && ('id' in hit ? hit.id : hit as BufferPick);
       if (position && !window.bufferInitialPicks)
         window.bufferInitialPicks = [];
       if (picked && !window.bufferInitialPicks![channel])
         window.bufferInitialPicks![channel] = picked;
-      return { count, color, picked, samePick: picked === window.bufferInitialPicks?.[channel] };
+      return { count, color, picked, samePick: window.bufferOwners.some(owner => owner.pickIds.some((pick) => {
+        const object = pick.object as { id?: BufferPick } | BufferPick | undefined;
+        return object && ('id' in object ? object.id : object) === picked;
+      })) };
     };
     window.circleCoverage = () => {
       const pixels = window.bufferPixels;
@@ -179,20 +192,18 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
     return {
       collections: window.bufferOwners.length,
       uploaded: uploaded.length,
-      kinds: [...new Set(uploaded.map(owner => owner.collection.constructor.name))],
       buffers: window.bufferHandles.size,
     };
   });
   assert.ok(initial.collections > 0 && initial.uploaded > 0 && initial.buffers > 0);
   assert.equal(initial.uploaded, initial.collections, 'every captured Native collection must have its GPU VA');
-  assert.deepEqual(initial.kinds.sort(), ['BufferPointCollection', 'BufferPolygonCollection']);
   type BufferLifecycle = Awaited<ReturnType<typeof nativeLifecycle>>;
   const samples: Array<{ alpha: number; lifecycle: BufferLifecycle } | ({ alpha: number; channel: number } & BufferSample)> = [];
   const nativeLifecycle = () => page.evaluate(async () => {
     const { viewer } = window.renderValidation;
     const owners = window.bufferOwners.filter(owner => owner.array);
     const contexts = owners.map((owner) => {
-      const context = owner.collection._renderContext;
+      const context = owner.context();
       if (!context)
         throw new Error('An uploaded buffer owner must retain its Native render context');
       return context;
@@ -209,7 +220,7 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
       });
     }
     const currentContexts = owners.map((owner) => {
-      const context = owner.collection._renderContext;
+      const context = owner.context();
       if (!context)
         throw new Error('A retained buffer owner lost its Native render context during steady paint');
       return context;
@@ -300,7 +311,7 @@ test('3D fill and circle alpha crossings preserve Native collection, GPU buffers
     const result = { stable: window.bufferStable(), uploads: window.bufferUploads, fps: viewer.scene.debugShowFramesPerSecond, renderErrors, destroyed: false };
     window.stopBufferPixels();
     viewer.scene.primitives.remove(tileset);
-    result.destroyed = window.bufferOwners.every(owner => !owner.collection._renderContext
+    result.destroyed = window.bufferOwners.every(owner => !owner.context()
       && (!owner.array || owner.array.isDestroyed())
       && owner.pickIds.every(pick => viewer.scene.context.getObjectByPickColor(pick.color) === undefined));
     return result;

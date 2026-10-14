@@ -4,6 +4,7 @@ import type { TestScene } from './fixtures/browser-types';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { writeFile } from 'node:fs/promises';
+import process from 'node:process';
 import { validateStyleMin } from '@maplibre/maplibre-gl-style-spec';
 import { expect } from 'playwright/test';
 import { fromGeojsonVt, test } from './fixtures';
@@ -170,6 +171,49 @@ test('zoom replacement keeps framebuffer coverage', async ({ page, renderUrl }, 
   assert.deepEqual(errors, []);
 });
 
+// A current background keeps rendering while old source geometry is held.
+// Reusing its ID in another pending style must still apply its new paint order.
+test('rapid source handoffs apply the current order of a reused background', async ({ page, renderUrl }, testInfo) => {
+  test.skip(process.env.E2E_GPU !== 'hardware', 'Source handoff ordering requires actual framebuffer draws');
+  const initial = style(renderUrl);
+  initial.transition = { duration: 0, delay: 0 };
+  initial.layers.unshift({ id: 'original-background', type: 'background', paint: { 'background-color': '#000000' } });
+  const { errors } = await open(page, renderUrl, { initialStyle: initial });
+  let release: (() => void) | undefined;
+  const held = new Promise<void>(resolve => release = resolve);
+  const requested = new Set<string>();
+  for (const source of ['b', 'c']) {
+    await page.route(`**/lifecycle/${source}/**`, async (route) => {
+      requested.add(source);
+      await held;
+      await route.fulfill({ body: Buffer.from(tile), contentType: 'application/x-protobuf' });
+    });
+  }
+  const pendingStyle = (name: string, route: string, backgroundLast: boolean): StyleSpecification => {
+    const next = style(renderUrl, '#3366aa', route);
+    const land = { ...next.layers[0], id: `${name}-land`, source: name };
+    const background: StyleSpecification['layers'][number] = { id: 'shared-background', type: 'background', paint: { 'background-color': backgroundLast ? '#ffffff' : '#000000' } };
+    return { ...next, transition: { duration: 0, delay: 0 }, sources: { [name]: next.sources.land }, layers: backgroundLast
+      ? [land, { id: 'spacer', type: 'background', paint: { 'background-opacity': 0 } }, background]
+      : [background, land] };
+  };
+  try {
+    await page.evaluate(json => window.renderValidation.tileset.setStyle(JSON.parse(json)), JSON.stringify(pendingStyle('city', 'b', false)));
+    await expect.poll(() => requested.has('b')).toBe(true);
+    await expect.poll(() => page.evaluate(color => Math.min(...window.renderValidation.readCoverage(color)), blue)).toBeGreaterThanOrEqual(0.98);
+    const before = await page.evaluate(() => window.renderValidation.renderedFrames);
+    await page.evaluate(json => window.renderValidation.tileset.setStyle(JSON.parse(json)), JSON.stringify(pendingStyle('region', 'c', true)));
+    await expect.poll(() => requested.has('c')).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.renderValidation.renderedFrames)).toBeGreaterThan(before);
+    const pixels = await page.evaluate(() => ({ loaded: window.renderValidation.tileset.tilesLoaded, coverage: window.renderValidation.readCoverage([255, 255, 255]) }));
+    await writeFile(testInfo.outputPath('rapid-source-background-order.json'), JSON.stringify(pixels, null, 2));
+    assert.equal(pixels.loaded, false, 'The replacement source must remain blocked while current style order is measured');
+    assert.ok(pixels.coverage.every(value => value >= 0.98), `Current background moved after the retained geometry but did not cover it: ${JSON.stringify(pixels)}`);
+  }
+  finally { release!(); }
+  assert.deepEqual(errors, []);
+});
+
 test('public style and source switches draw the new pixels without empty frames', async ({ page, renderUrl }, testInfo) => {
   const { errors, requests } = await open(page, renderUrl);
   await expect.poll(() => page.evaluate(async () => {
@@ -184,9 +228,9 @@ test('public style and source switches draw the new pixels without empty frames'
       const validation = window.renderValidation;
       window.switchCoverage = [];
       window.stopSwitchCoverage = validation.viewer.scene.postRender.addEventListener(() => {
-        const previous = validation.readCoverage(blue);
-        const current = validation.readCoverage(green);
-        window.switchCoverage.push(previous.map((ratio, index) => ratio + current[index]));
+        // Opaque paint transitions draw intermediate colors. Count the full
+        // color segment; endpoint-only matching mistakes those pixels for holes.
+        window.switchCoverage.push(validation.readCoverage(blue, green));
       });
       const next: StyleSpecification = JSON.parse(serializedStyle);
       validation.tileset.setStyle(next);

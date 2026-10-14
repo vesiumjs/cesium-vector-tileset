@@ -1,6 +1,6 @@
 import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { PerspectiveFrustum } from 'cesium';
-import type { FeatureCollection, LineString } from 'geojson';
+import type { FeatureCollection, LineString, Polygon } from 'geojson';
 import type { TestViewer } from './browser-types';
 import { Cartesian3, Color, SceneMode, SceneTransforms, Viewer, WebMercatorProjection } from 'cesium';
 import { Map as MapLibre, setWorkerUrl } from 'maplibre-gl';
@@ -13,6 +13,7 @@ const radius = 6378137;
 const zoom = 14;
 const fov = 45;
 const width = 10;
+const outline = new URLSearchParams(location.search).has('outline');
 const coordinate = (x: number, y: number): [number, number] => [x / radius * 180 / Math.PI, Math.atan(Math.sinh(y / radius)) * 180 / Math.PI];
 const lines = [-1500, 0, 1500].flatMap((y, depth) => [
   { id: `east-${depth}`, direction: 'east', depth, center: coordinate(-450, y), coordinates: [coordinate(-750, y), coordinate(-150, y)] },
@@ -20,9 +21,20 @@ const lines = [-1500, 0, 1500].flatMap((y, depth) => [
 ]);
 // Every camera view uses this same finite GeoJSON. No MVT fixture duplicates
 // roads across tiles, and the reference draws through MapLibre's real worker.
-const data: FeatureCollection<LineString> = {
+const data: FeatureCollection<LineString | Polygon> = {
   type: 'FeatureCollection',
-  features: lines.map(line => ({ type: 'Feature', properties: { id: line.id }, geometry: { type: 'LineString', coordinates: line.coordinates } })),
+  features: lines.map((line) => {
+    let geometry: LineString | Polygon = { type: 'LineString', coordinates: line.coordinates };
+    if (outline) {
+      const [start, end] = line.coordinates;
+      const shifted = ([longitude, latitude]: [number, number]) => coordinate(
+        longitude * Math.PI / 180 * radius + (line.direction === 'north' ? 800 : 0),
+        Math.log(Math.tan(Math.PI / 4 + latitude * Math.PI / 360)) * radius + (line.direction === 'east' ? 800 : 0),
+      );
+      geometry = { type: 'Polygon', coordinates: [[start, end, shifted(end), shifted(start), start]] };
+    }
+    return { type: 'Feature', properties: { id: line.id }, geometry };
+  }),
 };
 const style: StyleSpecification = {
   version: 8,
@@ -30,7 +42,9 @@ const style: StyleSpecification = {
   sources: { roads: { type: 'geojson', data } },
   layers: [
     { id: 'background', type: 'background', paint: { 'background-color': '#000000' } },
-    { id: 'roads', type: 'line', source: 'roads', layout: { 'line-cap': 'butt', 'line-join': 'miter' }, paint: { 'line-color': '#ff0000', 'line-width': width, 'line-gap-width': 0, 'line-offset': 0, 'line-blur': 0 } },
+    outline
+      ? { id: 'roads', type: 'fill', source: 'roads', paint: { 'fill-color': '#000000', 'fill-outline-color': '#ff0000' } }
+      : { id: 'roads', type: 'line', source: 'roads', layout: { 'line-cap': 'butt', 'line-join': 'miter' }, paint: { 'line-color': '#ff0000', 'line-width': width, 'line-gap-width': 0, 'line-offset': 0, 'line-blur': 0 } },
   ],
 };
 
@@ -142,6 +156,17 @@ async function createPerspective() {
   setPitch(0);
   return {
     setPitch,
+    setLinePaint(paint: { gap: number; offset: number; blur: number }) {
+      const layer = style.layers[1];
+      if (layer.type !== 'line')
+        throw new Error('Line paint comparison requires a line layer');
+      layer.paint = { ...layer.paint, 'line-gap-width': paint.gap, 'line-offset': paint.offset, 'line-blur': paint.blur };
+      tileset.setStyle(structuredClone(style));
+      reference.setStyle(structuredClone(style));
+      nativePixels = referencePixels = undefined;
+      nativeFrames = referenceFrames = 0;
+      viewer.scene.requestRender();
+    },
     ready: () => tileset.tilesLoaded && reference.loaded() && !!nativePixels && !!referencePixels && nativeFrames > 2 && referenceFrames > 0,
     capture() {
       const nativeFov = (viewer.camera.frustum as PerspectiveFrustum).fovy;

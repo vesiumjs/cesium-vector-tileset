@@ -1,9 +1,10 @@
-import type { Camera, Cartesian2, Color, ComponentDatatype, Geometry, Globe, Material, Primitive, Rectangle, Scene, Viewer } from 'cesium';
+import type { BufferPolygonCollection, Camera, Cartesian2, Color, ComponentDatatype, Geometry, Globe, Material, Primitive, Rectangle, Scene, Viewer } from 'cesium';
 import type { CesiumVectorTileset } from '../../packages/cesium-vector-tileset/src/cesium-vector-tileset';
 import type { GeometryPrimitive } from '../../packages/cesium-vector-tileset/src/render/geometry/geometry-primitive';
 import type { DashMaterial } from '../../packages/cesium-vector-tileset/src/render/line/dash-material';
 import type { PatternTileRenderer } from '../../packages/cesium-vector-tileset/src/render/pattern/pattern-renderer';
 import type { RasterTileRenderer } from '../../packages/cesium-vector-tileset/src/render/raster/raster-renderer';
+import type { DrapedSurfacePass } from '../../packages/cesium-vector-tileset/src/render/scene/draped-surface-pass';
 import type { FramePreparation } from '../../packages/cesium-vector-tileset/src/render/scene/frame-preparation';
 import type { RenderFrameState } from '../../packages/cesium-vector-tileset/src/render/scene/render-frame';
 import type { SceneCollections } from '../../packages/cesium-vector-tileset/src/render/scene/scene-collections';
@@ -14,7 +15,7 @@ import type { TileResidency } from '../../packages/cesium-vector-tileset/src/ren
 import type { TilesetRenderer } from '../../packages/cesium-vector-tileset/src/render/scene/tileset-renderer';
 import type { SymbolPlacementPass } from '../../packages/cesium-vector-tileset/src/render/symbol/symbol-placement-pass';
 import type { SymbolTileRenderer } from '../../packages/cesium-vector-tileset/src/render/symbol/symbol-renderer';
-import type { BufferCollection, VectorTileRecord, VectorTileRenderer } from '../../packages/cesium-vector-tileset/src/render/vector/vector-tile-renderer';
+import type { VectorTileRecord, VectorTileRenderer } from '../../packages/cesium-vector-tileset/src/render/vector/vector-tile-renderer';
 
 // Native runtime fields omitted by Cesium.d.ts, inspected only by browser tests.
 export interface NativeBuffer {
@@ -38,6 +39,7 @@ export interface NativeVertexArray {
   isDestroyed: () => boolean;
 }
 export interface NativeTexture {
+  pixelFormat: number;
   width: number;
   height: number;
   sizeInBytes: number;
@@ -45,12 +47,14 @@ export interface NativeTexture {
   isDestroyed: () => boolean;
 }
 export interface NativeShaderProgram {
+  allUniforms: Record<string, { value: unknown }>;
   fragmentShaderSource: { sources: string[]; defines: string[] };
   vertexShaderSource: { sources: string[]; defines: string[] };
   _cachedShader: { count: number };
   isDestroyed: () => boolean;
 }
 export interface NativeCommand {
+  count?: number;
   owner: object;
   pass: number;
   vertexArray: NativeVertexArray;
@@ -81,7 +85,7 @@ export type NativePrimitive = Primitive & {
 };
 export interface NativeBufferMaterial { color: Color; outlineColor?: Color; outlineWidth?: number }
 export interface NativeBufferPrimitive { getMaterial: (result: NativeBufferMaterial) => NativeBufferMaterial }
-export type NativeBufferCollection = BufferCollection & {
+export type NativeBufferCollection = BufferPolygonCollection & {
   _getPrimitiveClass: () => new () => NativeBufferPrimitive;
   _getMaterialClass: () => new () => NativeBufferMaterial;
   get: (index: number, result: NativeBufferPrimitive) => NativeBufferPrimitive;
@@ -116,7 +120,8 @@ type TestPlacementScope = Omit<Public<PlacementScope>, 'job'> & {
   _view: PlacementScope['_view'];
   _lastCommitMs: PlacementScope['_lastCommitMs'];
 };
-export type TestTilesetRenderer = Omit<Public<TilesetRenderer>, 'covering' | 'vector' | 'raster' | 'pattern' | 'symbol' | 'publishQueue' | 'collections' | 'sourceSync' | 'residency' | 'preparation'> & {
+export type TestTilesetRenderer = Omit<Public<TilesetRenderer>, 'covering' | 'vector' | 'raster' | 'pattern' | 'symbol' | 'publishQueue' | 'collections' | 'sourceSync' | 'residency' | 'preparation' | 'draped'> & {
+  draped: Public<DrapedSurfacePass> & { _runs: DrapedSurfacePass['_runs'] };
   _lastSubmittedCommands: TilesetRenderer['_lastSubmittedCommands'];
   covering: Public<SceneTileCovering> & { _cameraPose: SceneTileCovering['_cameraPose']; _observedCamera: SceneTileCovering['_observedCamera']; _globeCoverings: SceneTileCovering['_globeCoverings'] };
   vector: Omit<Public<VectorTileRenderer>, 'dashMaterial'> & {
