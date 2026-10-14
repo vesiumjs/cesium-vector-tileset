@@ -6,7 +6,7 @@ import { compareTileId } from './tile-id';
 
 /** Tiles retained by a pyramid for loading, fallback coverage or fading, excluding its cache. */
 export class ActiveTiles {
-  private _tiles: Record<string, Tile> = {};
+  private _tiles = new Map<string, Tile>();
 
   private _allTilesCache?: Tile[];
 
@@ -30,45 +30,48 @@ export class ActiveTiles {
   }
 
   public handleWrapJump(wrapDelta: number): void {
-    const tiles: Record<string, Tile> = {};
-    for (const id in this._tiles) {
-      const tile = this._tiles[id];
-      if (!tile) {
-        continue;
-      }
+    const tiles = new Map<string, Tile>();
+    for (const tile of this._tiles.values()) {
       tile.tileID = tile.tileID.unwrapTo(tile.tileID.wrap + wrapDelta);
-      tiles[tile.tileID.key] = tile;
+      tiles.set(tile.tileID.key, tile);
     }
     this._tiles = tiles;
     this._invalidateCaches();
   }
 
   public setFeatureState(featuresChanged: LayerFeatureStates, style: Style, revision: number): void {
-    for (const id in this._tiles) {
-      const tile = this._tiles[id];
-      tile?.setFeatureState(featuresChanged, style, revision);
+    for (const tile of this._tiles.values()) {
+      tile.setFeatureState(featuresChanged, style, revision);
     }
   }
 
   public getAllTiles(): Tile[] {
-    return this._allTilesCache ??= Object.values(this._tiles);
+    return this._allTilesCache ??= Array.from(this._tiles.values());
+  }
+
+  public loaded(): boolean {
+    for (const tile of this._tiles.values()) {
+      if (tile.state !== 'loaded' && tile.state !== 'errored')
+        return false;
+    }
+    return true;
   }
 
   public getAllIds(): string[] {
-    return Object.keys(this._tiles);
+    return Array.from(this._tiles.keys());
   }
 
   public getTileById(key: string): Tile | undefined {
-    return this._tiles[key];
+    return this._tiles.get(key);
   }
 
   public setTile(key: string, tile: Tile): void {
-    this._tiles[key] = tile;
+    this._tiles.set(key, tile);
     this._invalidateCaches();
   }
 
   public deleteTileById(key: string): void {
-    delete this._tiles[key];
+    this._tiles.delete(key);
     this._invalidateCaches();
   }
 
@@ -93,12 +96,9 @@ export class ActiveTiles {
     const cached = this._renderableCache;
     if (cached) {
       let unchanged = true;
-      let tileCount = 0;
-      for (const id in this._tiles) {
-        tileCount++;
-        const tile = this._tiles[id];
+      for (const [id, tile] of this._tiles) {
         const snapshot = cached.snapshots.get(id);
-        if (!tile || !snapshot
+        if (!snapshot
           || snapshot.tileID !== tile.tileID.key
           || snapshot.state !== tile.state
           || snapshot.fadeEndTime !== tile.fadeEndTime
@@ -108,7 +108,7 @@ export class ActiveTiles {
           break;
         }
       }
-      if (unchanged && cached.snapshots.size === tileCount) {
+      if (unchanged && cached.snapshots.size === this._tiles.size) {
         // ActiveTiles is an internal collection; returning the stable array
         // avoids a per-frame sort/allocation in every Cesium render pass.
         return cached.ids;
@@ -123,8 +123,7 @@ export class ActiveTiles {
       fadeOpacity: number;
       symbolFadeHoldUntil?: number;
     }>();
-    for (const id in this._tiles) {
-      const tile = this._tiles[id];
+    for (const [id, tile] of this._tiles) {
       snapshots.set(id, {
         tileID: tile.tileID.key,
         state: tile.state,
@@ -132,7 +131,7 @@ export class ActiveTiles {
         fadeOpacity: tile.fadeOpacity,
         symbolFadeHoldUntil: tile.symbolFadeHoldUntil,
       });
-      if (tile && tile.isRenderable(false)) {
+      if (tile.isRenderable(false)) {
         renderables.push(tile);
       }
     }

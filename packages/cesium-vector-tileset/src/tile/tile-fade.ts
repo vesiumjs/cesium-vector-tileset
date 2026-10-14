@@ -8,7 +8,7 @@ import { FadingDirections, FadingRoles } from './tile';
  * ancestor (zooming in), loaded descendents (zooming out) or an edge self-
  * fade (panning) so the outgoing tiles fade out while the incoming tile
  * fades in instead of popping. The animated opacity itself is a pure
- * function of time — see TilePyramid#getRasterFadeOpacity.
+ * function of time — see TilePyramid#getRasterFade.
  */
 
 /**
@@ -99,7 +99,7 @@ function updateFadingChildren(
   sourceMaxZoom: number,
   rasterFadeDuration: number,
 ): boolean {
-  if (childIDs.length === 0 || childIDs[0].overscaledZ >= sourceMaxZoom)
+  if (childIDs.length === 0 || childIDs[0].overscaledZ > sourceMaxZoom)
     return false;
   let foundFader = false;
 
@@ -109,6 +109,11 @@ function updateFadingChildren(
       continue;
 
     const { fadingRole, fadingDirection, fadingParentID } = childTile;
+    // A completed pairing must not retain or restart this departing child.
+    if (fadingRole === FadingRoles.Base && fadingDirection === FadingDirections.Departing
+      && fadingParentID?.key === idealTile.tileID.key && childTile.fadeEndTime <= currentTime) {
+      continue;
+    }
     if (fadingRole !== FadingRoles.Base || fadingDirection !== FadingDirections.Departing || !fadingParentID) {
       childTile.setCrossFadeLogic({
         fadingRole: FadingRoles.Base,
@@ -165,8 +170,8 @@ export function updateFadingTiles(
   sourceMinZoom: number,
   sourceMaxZoom: number,
   rasterFadeDuration: number,
+  currentTime: number,
 ): void {
-  const currentTime = performance.now();
   const edgeTileIDs = getEdgeTiles(idealTileIDs);
 
   for (const idealID of idealTileIDs) {
@@ -177,6 +182,14 @@ export function updateFadingTiles(
     // A tile that was departing is now ideal again: it stops fading out.
     if (idealTile.fadingDirection === FadingDirections.Departing || idealTile.fadeOpacity === 0) {
       idealTile.resetFadeLogic();
+    }
+
+    // Keep the completed role as the pairing history until this tile leaves
+    // or changes direction. Resetting it here would rediscover the same
+    // fallback parent and start another transition on a later data update.
+    if (idealTile.hasData() && idealTile.fadeEndTime > 0 && idealTile.fadeEndTime <= currentTime
+      && (idealTile.fadingDirection === FadingDirections.Incoming || idealTile.selfFading)) {
+      continue;
     }
 
     const parentIsFader = updateFadingAncestor(activeTiles, idealTile, retain, currentTime, maxFadingAncestorLevels, sourceMinZoom, rasterFadeDuration);
@@ -193,23 +206,6 @@ export function updateFadingTiles(
 
     idealTile.resetFadeLogic();
   }
-}
-
-/**
- * Whether any active tile is mid-fade: the tileset must keep requesting frames
- * until every fade completes.
- */
-export function hasRasterTransition(activeTiles: ActiveTiles, rasterFadeDuration: number): boolean {
-  if (rasterFadeDuration <= 0) {
-    return false;
-  }
-  const currentTime = performance.now();
-  for (const tile of activeTiles.getAllTiles()) {
-    if (tile.fadeEndTime >= currentTime) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**

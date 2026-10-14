@@ -133,7 +133,7 @@ export class Tile {
     this.uid = nextTileUid++;
     this.uses = 0;
     this.tileSize = size;
-    this.buckets = {};
+    this.buckets = Object.create(null);
     this.queryPadding = 0;
     this.hasSymbolBuckets = false;
     this.dependencies = {};
@@ -258,7 +258,7 @@ export class Tile {
    * Release any data referenced by this tile.
    */
   unloadVectorData(): void {
-    this.buckets = {};
+    this.buckets = Object.create(null);
 
     this.imageAtlas = undefined;
     this.dashPositions = undefined;

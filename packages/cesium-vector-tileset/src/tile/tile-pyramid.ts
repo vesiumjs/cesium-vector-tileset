@@ -17,8 +17,16 @@ import { SourceDataEvent } from '../util/events';
 import { ActiveTiles } from './active-tiles';
 import { FadingDirections, Tile } from './tile';
 import { TileCache } from './tile-cache';
-import { hasRasterTransition, updateFadingTiles } from './tile-fade';
+import { updateFadingTiles } from './tile-fade';
 import { OverscaledTileID } from './tile-id';
+
+/** Whole-draw opacity is independent of a base tile's parent color weight. */
+export interface RasterFade {
+  opacity: number;
+  mix: number;
+  parent?: OverscaledTileID;
+  tileOpacity: number;
+}
 
 /**
  * The tile-covering input computed from the Cesium camera by the tileset. Replaces
@@ -98,6 +106,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     paused: boolean;
     tileSetRevision: number;
     covering: TileCovering;
+    rasterFadeEndTime?: number;
   };
 
   private _removed = false;
@@ -140,9 +149,11 @@ export class TilePyramid extends Evented<SourceEventType> {
       this._sourceErrored = false;
     });
 
-    this.on('error', () => {
-      // Only set _sourceErrored if the source does not have pending loads.
-      this._sourceErrored = this._source.loaded();
+    this.on('error', (event) => {
+      // A failed tile settles only itself; other active tiles may still load.
+      // Source metadata failures must also settle a source that cannot update.
+      if (!('tile' in event))
+        this._sourceErrored = this._source.loaded();
     });
 
     this._source = createSource(id, options, dispatcher, this);
@@ -213,11 +224,7 @@ export class TilePyramid extends Evented<SourceEventType> {
       return false;
     }
 
-    for (const tile of this._activeTiles.getAllTiles()) {
-      if (tile.state !== 'loaded' && tile.state !== 'errored')
-        return false;
-    }
-    return true;
+    return this._activeTiles.loaded();
   }
 
   getSource(): Source {
@@ -250,6 +257,7 @@ export class TilePyramid extends Evented<SourceEventType> {
   private async _loadTile(tile: Tile, _id: string, state: TileState): Promise<void> {
     const dispatchKey = tile.tileID.key;
     this._dispatchedLoads.add(dispatchKey);
+    let unmodified = false;
     try {
       const result = await this._source.loadTile(tile);
       // A source may finish an aborted request after the tile left the
@@ -262,6 +270,7 @@ export class TilePyramid extends Evented<SourceEventType> {
         return;
       }
       this._tileLoaded(tile, tile.tileID.key, state, result ?? {});
+      unmodified = result?.unmodified === true;
     }
     catch (err) {
       if (!this._isTileActive(tile)) {
@@ -291,6 +300,10 @@ export class TilePyramid extends Evented<SourceEventType> {
       // Keys can change on wrap jumps; drop both the dispatch key and current.
       this._dispatchedLoads.delete(dispatchKey);
       this._dispatchedLoads.delete(tile.tileID.key);
+      // Unchanged responses publish no data event to wake another frame.
+      // Use their freed slot now, after removing the dispatched request.
+      if (unmodified && !this._paused)
+        this._drainDeferredLoads();
     }
   }
 
@@ -426,6 +439,11 @@ export class TilePyramid extends Evented<SourceEventType> {
 
     this._loadedTileRevision++;
 
+    // Every completion frees a load slot, including unchanged responses.
+    // Re-walk a settled camera's covering so deferred ideals can dispatch and
+    // loaded children can replace retained parents.
+    this._tileSetRevision++;
+
     if (result && result.unmodified)
       return;
 
@@ -433,14 +451,6 @@ export class TilePyramid extends Evented<SourceEventType> {
     // feature state to the tile's new bucket data after a reload.
     tile.featureStateRevision = -1;
     this._state.initializeTileState(tile, this.style as Style);
-
-    // A load completion changes which tiles are renderable, and with it the
-    // retained parent/substitute set. The revision is compared before the
-    // covering-identity shortcut, so the next update() re-walks the pyramid
-    // and drops retained parents once their children are ready. Without the
-    // bump, a settled camera would keep the stale coarse tiles in the render
-    // set indefinitely (the covering stays identical while the camera rests).
-    this._tileSetRevision++;
 
     if (!tile.aborted) {
       this._source.fire(new SourceDataEvent('data', { tile, coord: tile.tileID }));
@@ -712,6 +722,7 @@ export class TilePyramid extends Evented<SourceEventType> {
     // parent or child tiles that are *already* loaded.
     const retain: Record<string, OverscaledTileID> = this._updateRetainedTiles(idealTileIDs);
 
+    const fadeTime = performance.now();
     // Raster crossfade: pair the ideal tiles with fading ancestors or
     // descendents and retain the counterparts for the transition duration.
     if (this._rasterFadeDuration > 0 && this._source.type !== 'vector' && this._source.type !== 'geojson') {
@@ -723,6 +734,7 @@ export class TilePyramid extends Evented<SourceEventType> {
         this._source.minzoom ?? 0,
         this._source.maxzoom ?? 22,
         this._rasterFadeDuration,
+        fadeTime,
       );
     }
 
@@ -734,12 +746,22 @@ export class TilePyramid extends Evented<SourceEventType> {
     // addTile/removeTile may change the revision while retaining tiles. Save
     // the post-update state so a static frame does not perform one redundant
     // pyramid walk on the next Cesium render.
+    let rasterFadeEndTime: number | undefined;
+    if (this._rasterFadeDuration > 0) {
+      for (const tile of this._activeTiles.getAllTiles()) {
+        // A pair retained at fadeTime still needs acknowledgment even if
+        // this walk finishes after its deadline. Past pairing history does not.
+        if (tile.fadeEndTime > fadeTime && (rasterFadeEndTime === undefined || tile.fadeEndTime < rasterFadeEndTime))
+          rasterFadeEndTime = tile.fadeEndTime;
+      }
+    }
     this._lastUpdate = {
       used: this.used,
       sourceLoaded: this._sourceLoaded,
       paused: this._paused,
       tileSetRevision: this._tileSetRevision,
       covering,
+      rasterFadeEndTime,
     };
   }
 
@@ -752,7 +774,8 @@ export class TilePyramid extends Evented<SourceEventType> {
       || previous.used !== this.used
       || previous.sourceLoaded !== this._sourceLoaded
       || previous.paused !== this._paused
-      || previous.tileSetRevision !== this._tileSetRevision) {
+      || previous.tileSetRevision !== this._tileSetRevision
+      || (previous.rasterFadeEndTime !== undefined && previous.rasterFadeEndTime <= performance.now())) {
       return false;
     }
     // The CesiumVectorTileset keeps a source covering object stable while the camera
@@ -1160,15 +1183,20 @@ export class TilePyramid extends Evented<SourceEventType> {
    * the crossfade when the ideal zoom set changes. Zero disables fading.
    */
   setRasterFadeDuration(fadeDuration: number): void {
-    this._rasterFadeDuration = Math.max(0, fadeDuration);
+    const duration = Math.max(0, fadeDuration);
+    if (duration === this._rasterFadeDuration)
+      return;
+    this._rasterFadeDuration = duration;
+    this._lastUpdate = undefined;
   }
 
   /**
-   * Whether any active raster tile is mid-fade: the tileset must keep frames
-   * coming until every fade completes.
+   * Raster work remains pending until a pyramid walk acknowledges its next
+   * fade deadline, including a deadline already crossed during that walk.
    */
   hasRasterTransition(): boolean {
-    return hasRasterTransition(this._activeTiles, this._rasterFadeDuration);
+    return this._rasterFadeDuration > 0 && !this._paused && !this._removed
+      && this._lastUpdate?.rasterFadeEndTime !== undefined;
   }
 
   /**
@@ -1177,26 +1205,29 @@ export class TilePyramid extends Evented<SourceEventType> {
    * fade out, over `raster-fade-duration` from the moment their role was
    * assigned (the role assignment resets timeAdded).
    */
-  getRasterFadeOpacity(tileKey: string): number | undefined {
+  getRasterFade(tileKey: string): RasterFade | undefined {
     if (this._rasterFadeDuration <= 0) {
       return undefined;
     }
     const tile = this._activeTiles.getTileById(tileKey);
-    if (!tile || (!tile.fadingDirection && !tile.selfFading) || !tile.fadeEndTime) {
+    if (!tile || (tile.fadingDirection === undefined && !tile.selfFading) || !tile.fadeEndTime) {
       return undefined;
     }
     const elapsed = (performance.now() - tile.timeAdded) / this._rasterFadeDuration;
     const clamped = Math.max(0, Math.min(1, elapsed));
-    if (tile.fadingDirection === FadingDirections.Incoming) {
-      return clamped;
-    }
-    if (tile.fadingDirection === FadingDirections.Departing) {
-      return 1 - clamped;
+    if (tile.fadingParentID) {
+      const parent = this._activeTiles.getLoadedTile(tile.fadingParentID);
+      if (!parent)
+        return { opacity: 1, mix: 0, tileOpacity: 1 };
+      const parentElapsed = Math.max(0, Math.min(1, (performance.now() - parent.timeAdded) / this._rasterFadeDuration));
+      const tileOpacity = tile.fadingDirection === FadingDirections.Incoming ? clamped : 1 - parentElapsed;
+      return { opacity: 1, mix: 1 - tileOpacity, parent: parent.tileID, tileOpacity };
     }
     if (tile.selfFading) {
-      return clamped;
+      return { opacity: clamped, mix: 0, tileOpacity: clamped };
     }
-    return undefined;
+    const tileOpacity = tile.fadingDirection === FadingDirections.Incoming ? clamped : 1 - clamped;
+    return { opacity: 1, mix: 0, tileOpacity };
   }
 
   /**
