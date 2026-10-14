@@ -1,3 +1,4 @@
+import type { LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
 import type { FeatureCollection } from 'geojson';
 import type { GeoJSONWorkerSource } from '../../source/geojson-worker-source';
 import type { VectorTileWorkerSource } from '../../source/vector-tile-worker-source';
@@ -5,9 +6,9 @@ import type { WorkerTileParameters } from '../../source/worker-source';
 import type { TileWorkerScope } from '../scope';
 import type { WorkerEndpoint } from '../worker-channel';
 import { GeoJSONVT } from '@maplibre/geojson-vt';
-import { fromGeojsonVt } from '@maplibre/vt-pbf';
+import { fromGeojsonVt, fromVectorTileJs, GeoJSONWrapper } from '@maplibre/vt-pbf';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OverscaledTileID } from '../../tile/tile-id';
+import { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import { getArrayBuffer } from '../../util/ajax';
 import { RGBAImage } from '../../util/image';
 import { MessageType } from '../messages';
@@ -28,7 +29,8 @@ const bytes = fromGeojsonVt({ points: new GeoJSONVT(point).getTile(0, 0, 0)! }, 
 const vectorData = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 const fixtures: Array<{ client: WorkerChannel; worker: TileWorker }> = [];
 
-async function fixture(type: 'vector' | 'geojson') {
+async function fixture(type: 'vector' | 'geojson', options: { source?: string; layers?: LayerSpecification[]; updateLayers?: boolean } = {}) {
+  const sourceId = options.source ?? 'source';
   class Endpoint extends EventTarget {
     peer!: Endpoint;
 
@@ -46,18 +48,18 @@ async function fixture(type: 'vector' | 'geojson') {
   const worker = new TileWorker(workerEndpoint as unknown as TileWorkerScope & WorkerEndpoint, prepare);
   fixtures.push({ client, worker });
   await client.sendAsync({ type: MessageType.setImages, data: ['marker'] });
-  await client.sendAsync({
-    type: MessageType.setLayers,
-    data: [{
-      id: 'icons',
-      type: 'symbol',
-      source: 'source',
-      ...(type === 'vector' ? { 'source-layer': 'points' } : {}),
-      layout: { 'icon-image': 'marker' },
-    }],
-  });
+  const layers: LayerSpecification[] = options.layers ?? [{
+    id: 'icons',
+    type: 'symbol',
+    source: sourceId,
+    ...(type === 'vector' ? { 'source-layer': 'points' } : {}),
+    layout: { 'icon-image': 'marker' },
+  }];
+  await client.sendAsync(options.updateLayers
+    ? { type: MessageType.updateLayers, data: { layers, removedIds: [] } }
+    : { type: MessageType.setLayers, data: layers });
   if (type === 'geojson') {
-    await client.sendAsync({ type: MessageType.loadData, data: { type, source: 'source', data: point, geojsonVtOptions: {} } });
+    await client.sendAsync({ type: MessageType.loadData, data: { type, source: sourceId, data: point, geojsonVtOptions: {} } });
   }
   const dependencies: Array<{ controller: AbortController; resolve: () => void }> = [];
   client.registerMessageHandler(MessageType.getImages, (_map, _params, controller) => new Promise((resolve) => {
@@ -68,7 +70,7 @@ async function fixture(type: 'vector' | 'geojson') {
   }));
   const params: WorkerTileParameters = {
     type,
-    source: 'source',
+    source: sourceId,
     uid: 'tile',
     tileID: new OverscaledTileID(0, 0, 0, 0, 0),
     zoom: 0,
@@ -140,10 +142,65 @@ describe.each(['vector', 'geojson'] as const)('%s worker tile cancellation', (ty
     dependencies[0].resolve();
     expect(worker.workerSources.map?.[type]?.source).toBeUndefined();
     expect(prepare).not.toHaveBeenCalled();
+    await client.sendAsync({ type: MessageType.removeTile, data: params });
+    await client.sendAsync({ type: MessageType.abortTile, data: params });
+    expect(worker.workerSources.map?.[type]?.source, 'late cleanup must not recreate a removed source').toBeUndefined();
   });
 });
 
 describe('vector worker network cancellation', () => {
+  it('preserves prototype-named MVT source layers and shared families through overzoom and source cache removal', async () => {
+    const radius = (value: number) => {
+      const data: FeatureCollection = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: { radius: value }, geometry: { type: 'Point', coordinates: [-90, 45] } }] };
+      const tile = new GeoJSONVT(data).getTile(0, 0, 0)!;
+      // fromGeojsonVt's wrapper dictionary itself loses __proto__. Use the
+      // public raw encoder so the network bytes contain both literal names.
+      const encoded = fromVectorTileJs({ layers: Object.fromEntries(['__proto__', 'constructor'].map((name) => {
+        const layer = new GeoJSONWrapper(tile.features as ConstructorParameters<typeof GeoJSONWrapper>[0], { version: 2, extent: 4096 });
+        layer.name = name;
+        return [name, layer];
+      })) });
+      return encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength) as ArrayBuffer;
+    };
+    vi.mocked(getArrayBuffer).mockResolvedValue({ data: radius(13), cacheControl: 'max-age=3600' });
+    const { client, worker, params } = await fixture('vector', {
+      source: '__proto__',
+      updateLayers: true,
+      layers: [
+        { 'id': '__proto__', 'type': 'circle', 'source': '__proto__', 'source-layer': '__proto__', 'paint': { 'circle-radius': ['get', 'radius'] } },
+        { 'id': 'constructor', 'type': 'circle', 'source': '__proto__', 'source-layer': '__proto__', 'paint': { 'circle-radius': 3 } },
+        { 'id': 'valueOf', 'type': 'circle', 'source': '__proto__', 'source-layer': 'constructor', 'paint': { 'circle-radius': 5 } },
+      ],
+    });
+    const assertTile = (result: Awaited<ReturnType<typeof client.sendAsync>>, expected: number) => {
+      if (!result || !('buckets' in result))
+        throw new Error('The actual parser must produce vector buckets');
+      expect(result.buckets).toHaveLength(2);
+      expect(result.buckets.map(bucket => bucket.layerIds)).toEqual([['__proto__', 'constructor'], ['valueOf']]);
+      expect(result.buckets.every(bucket => !bucket.isEmpty())).toBe(true);
+      expect(result.featureIndex.sourceLayerIds).toEqual(['__proto__', 'constructor']);
+      expect(result.featureIndex.features.getFeature('__proto__', 0)?.properties).toEqual({ radius: expected });
+    };
+    assertTile(await client.sendAsync({ type: MessageType.loadTile, data: params }), 13);
+    const child = {
+      ...params,
+      uid: 'overzoom-child',
+      tileID: new OverscaledTileID(1, 0, 1, 0, 0),
+      zoom: 1,
+      overzoomParameters: { maxZoomTileID: new CanonicalTileID(0, 0, 0), overzoomRequest: params.request },
+    };
+    assertTile(await client.sendAsync({ type: MessageType.loadTile, data: child }), 13);
+    const old = worker.workerSources.map.vector[params.source];
+    await client.sendAsync({ type: MessageType.removeSource, data: { type: 'vector', source: '__proto__' } });
+    expect(Object.hasOwn(worker.workerSources.map.vector, '__proto__')).toBe(false);
+    await client.sendAsync({ type: MessageType.abortTile, data: params });
+    await client.sendAsync({ type: MessageType.removeTile, data: params });
+    expect(Object.hasOwn(worker.workerSources.map.vector, '__proto__')).toBe(false);
+    vi.mocked(getArrayBuffer).mockResolvedValue({ data: radius(37), cacheControl: 'max-age=3600' });
+    assertTile(await client.sendAsync({ type: MessageType.loadTile, data: child }), 37);
+    expect(worker.workerSources.map.vector[params.source]).not.toBe(old);
+  });
+
   it('does not let a late canceled download delete a newer same-uid loading owner', async () => {
     const { client, worker, prepare, dependencies, params } = await fixture('vector');
     const downloads: Array<() => void> = [];

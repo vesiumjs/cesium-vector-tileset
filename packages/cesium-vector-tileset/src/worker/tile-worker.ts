@@ -59,10 +59,10 @@ export class TileWorker {
     this._prepareTile = prepareTile;
     this.channel = new WorkerChannel(self);
 
-    this.layerIndexes = {};
-    this.availableImages = {};
+    this.layerIndexes = Object.create(null);
+    this.availableImages = Object.create(null);
 
-    this.workerSources = {};
+    this.workerSources = Object.create(null);
 
     this.globalStates = new Map<string | number, Record<string, any>>();
 
@@ -88,11 +88,11 @@ export class TileWorker {
     });
 
     this.channel.registerMessageHandler(MessageType.abortTile, (mapId, params: TileParameters) => {
-      return this._getWorkerSource(mapId, params.type, params.source).abortTile(params);
+      return this.workerSources[mapId]?.[params.type]?.[params.source]?.abortTile(params);
     });
 
     this.channel.registerMessageHandler(MessageType.removeTile, (mapId, params: TileParameters) => {
-      return this._getWorkerSource(mapId, params.type, params.source).removeTile(params);
+      return this.workerSources[mapId]?.[params.type]?.[params.source]?.removeTile(params);
     });
 
     this.channel.registerMessageHandler(MessageType.removeSource, async (mapId, params: RemoveSourceParams) => {
@@ -225,8 +225,8 @@ export class TileWorker {
    * @internal
    */
   private _getWorkerSource(mapId: string | number, sourceType: string, sourceName: string): WorkerSource {
-    this.workerSources[mapId] ||= {};
-    this.workerSources[mapId][sourceType] ||= {};
+    this.workerSources[mapId] ||= Object.create(null);
+    this.workerSources[mapId][sourceType] ||= Object.create(null);
 
     if (!this.workerSources[mapId][sourceType][sourceName]) {
       // use a wrapped channel so that we can attach a target mapId param

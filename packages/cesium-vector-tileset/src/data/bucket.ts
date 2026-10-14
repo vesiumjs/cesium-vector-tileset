@@ -78,7 +78,7 @@ export interface Bucket {
 }
 
 export function deserialize(input: Bucket[], style: Style): { [_: string]: Bucket } {
-  const output: Record<string, Bucket> = {};
+  const output: Record<string, Bucket> = Object.create(null);
 
   for (const bucket of input) {
     const layers = bucket.layerIds

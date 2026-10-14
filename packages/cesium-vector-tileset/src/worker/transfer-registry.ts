@@ -63,8 +63,11 @@ export class TransferRegistry {
    * @internal
    */
   private registrationFor(input: object): Registration | undefined {
+    const prototype = Object.getPrototypeOf(input);
+    if (prototype === null)
+      return this.constructors.get(Object);
     // Generated aliases inherit a layout codec; preserve its wire identity.
-    let constructor: object | null = input.constructor;
+    let constructor: object | null = prototype.constructor;
     while (constructor) {
       const registration = this.constructors.get(constructor);
       if (registration) {
@@ -78,11 +81,10 @@ export class TransferRegistry {
   /**
    * @internal
    */
-  private isBuiltin(input: unknown): boolean {
+  private isBuiltin(input: unknown, registration?: Registration): boolean {
     if (input === null || input === undefined || typeof input !== 'object') {
       return typeof input !== 'function' && typeof input !== 'symbol' && typeof input !== 'bigint';
     }
-    const registration = this.registrationFor(input);
     if (registration && registration.name !== 'Object') {
       return false;
     }
@@ -97,7 +99,8 @@ export class TransferRegistry {
     if (Array.isArray(input)) {
       return input.map(value => this.serialize(value, transferables));
     }
-    if (this.isBuiltin(input)) {
+    const registration = input !== null && typeof input === 'object' ? this.registrationFor(input) : undefined;
+    if (this.isBuiltin(input, registration)) {
       if (isArrayBuffer(input) || isImageBitmap(input)) {
         addTransferable(transferables, input);
       }
@@ -112,9 +115,8 @@ export class TransferRegistry {
     if (input === null || typeof input !== 'object') {
       throw new TypeError(`can't serialize object of type ${typeof input}`);
     }
-    const registration = this.registrationFor(input);
     if (!registration) {
-      throw new Error(`can't serialize object of unregistered class ${input.constructor.name}`);
+      throw new Error(`can't serialize object of unregistered class ${Object.getPrototypeOf(input)?.constructor?.name}`);
     }
     const properties = registration.constructor.serialize?.(input, transferables) ?? {};
     if (!registration.constructor.serialize) {
@@ -125,18 +127,23 @@ export class TransferRegistry {
         }
         const value = inputProperties[key];
         if (value !== undefined && !registration.omit.includes(key)) {
-          properties[key] = registration.shallow.includes(key) ? value as Serialized : this.serialize(value, transferables);
+          const serialized = registration.shallow.includes(key) ? value as Serialized : this.serialize(value, transferables);
+          if (key === '__proto__') {
+            Object.defineProperty(properties, key, { value: serialized, enumerable: true, configurable: true, writable: true });
+          }
+          else {
+            properties[key] = serialized;
+          }
         }
       }
       if (input instanceof Error) {
         properties.message = input.message;
       }
     }
-    if (Object.hasOwn(properties, '$name')) {
-      throw new Error('$name property is reserved for worker serialization logic.');
-    }
-    if (registration.name !== 'Object') {
-      properties.$name = registration.name;
+    // Plain data stays compact. Classes and data with a literal tag share one
+    // envelope, keeping codec metadata separate from every user property.
+    if (registration.name !== 'Object' || Object.hasOwn(properties, '$name')) {
+      return { $name: registration.name, $properties: properties };
     }
     return properties;
   }
@@ -161,21 +168,21 @@ export class TransferRegistry {
     if (input === null || typeof input !== 'object') {
       throw new TypeError(`can't deserialize object of type ${typeof input}`);
     }
-    const name = (input as SerializedObject).$name ?? 'Object';
+    const tagged = Object.hasOwn(input, '$name');
+    const name = tagged ? (input as SerializedObject).$name : 'Object';
     const registration = typeof name === 'string' ? this.registrations.get(name) : undefined;
     if (!registration) {
       throw new Error(`can't deserialize unregistered class ${name}`);
     }
+    const properties = (tagged ? (input as SerializedObject).$properties : input) as Record<string, unknown>;
     if (registration.constructor.deserialize) {
-      return registration.constructor.deserialize(input);
+      return registration.constructor.deserialize(properties);
     }
-    const properties = input as Record<string, unknown>;
     for (const key in properties) {
-      if (Object.hasOwn(properties, key) && key !== '$name' && !registration.shallow.includes(key)) {
+      if (Object.hasOwn(properties, key) && !registration.shallow.includes(key)) {
         properties[key] = this.deserialize(properties[key] as Serialized);
       }
     }
-    delete properties.$name;
     if (registration.name !== 'Object') {
       Object.setPrototypeOf(properties, registration.constructor.prototype);
     }
