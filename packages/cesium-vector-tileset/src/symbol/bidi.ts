@@ -6,21 +6,20 @@ let segmenter: Intl.Segmenter | undefined;
 
 const bidi = bidiFactory();
 
+/** Shared segmentation keeps line breaks and bidi reordering on the same writing units. */
+export function segmentGraphemes(text: string): Intl.Segments {
+  segmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  return segmenter.segment(text);
+}
+
 /**
- * Glyph lookup precedes bidi layout. Request each character and its possible mirror, because
- * paragraph direction can come from another formatted section and wrapping can change its level.
+ * Request the chosen drawing unit and its possible mirror before bidi layout.
+ * A section boundary can split a grapheme; keep that fragment intact rather
+ * than segmenting it again without the context that selected its boundaries.
  */
-export function getBidiGlyphDependencies(text: string): Set<number> {
-  const codePoints = new Set<number>();
-  for (const character of text) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined)
-      codePoints.add(codePoint);
-    const mirrored = bidi.getMirroredCharacter(character)?.codePointAt(0);
-    if (mirrored !== undefined)
-      codePoints.add(mirrored);
-  }
-  return codePoints;
+export function getBidiGlyphDependencies(glyph: string): Set<string> {
+  const mirrored = Array.from(glyph, character => bidi.getMirroredCharacter(character) ?? character).join('');
+  return new Set([glyph, mirrored]);
 }
 
 /**
@@ -60,8 +59,7 @@ interface Cluster {
 function toClusters(text: string, levels: Uint8Array, start: number, end: number): Cluster[] {
   const clusters: Cluster[] = [];
   let index = start;
-  segmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  for (const { segment: cluster } of segmenter.segment(text.slice(start, end))) {
+  for (const { segment: cluster } of segmentGraphemes(text.slice(start, end))) {
     clusters.push({ index, text: cluster, level: levels[index] });
     index += cluster.length;
   }
@@ -185,7 +183,10 @@ function reorderLine(
  * paragraph already ends should be one line rather than an empty one and a full one.
  */
 function lineRanges(text: string, breakPoints: number[]): Array<[number, number]> {
-  const inside = breakPoints.filter(point => point > 0 && point < text.length);
+  // The bidi paragraph list treats CR and LF separately; a CRLF is one
+  // requested newline and cannot introduce an empty paragraph between them.
+  const inside = breakPoints.filter(point => point > 0 && point < text.length
+    && !(text[point - 1] === '\r' && text[point] === '\n'));
   const bounds = [...new Set([0, ...inside, text.length])].sort((a, b) => a - b);
 
   const ranges: Array<[number, number]> = [];

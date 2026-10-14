@@ -22,6 +22,7 @@ import { mergeLines } from '../../symbol/merge-lines';
 import { allowsVerticalWritingMode } from '../../symbol/script-detection';
 import { WritingMode } from '../../symbol/shaping';
 import { getSizeData, MAX_PACKED_SIZE } from '../../symbol/symbol-size';
+import { TaggedString } from '../../symbol/tagged-string';
 import { transformText } from '../../symbol/transform-text';
 import { verticalizedCharacterMap } from '../../symbol/verticalize-punctuation';
 import { GlyphOffsetArray, SymbolInstanceArray, SymbolLineVertexArray, TextAnchorOffsetArray } from '../array-types.g';
@@ -198,23 +199,17 @@ export class SymbolBucket extends SymbolBucketRuntime {
   }
 
   private calculateGlyphDependencies(
-    text: string,
-    stack: { [_: number]: boolean },
+    glyph: string,
+    stack: { [_: string]: boolean },
     textAlongLine: boolean,
     allowVerticalPlacement: boolean,
     doesAllowVerticalWritingMode: boolean,
   ): void {
-    for (const codePoint of getBidiGlyphDependencies(text)) {
-      stack[codePoint] = true;
-    }
-    for (const char of text) {
+    for (const dependency of getBidiGlyphDependencies(glyph)) {
+      stack[dependency] = true;
       if ((textAlongLine || allowVerticalPlacement) && doesAllowVerticalWritingMode) {
-        const verticalChar = verticalizedCharacterMap[char];
-        if (verticalChar) {
-          const verticalCodePoint = verticalChar.codePointAt(0);
-          if (verticalCodePoint !== undefined)
-            stack[verticalCodePoint] = true;
-        }
+        const verticalGlyph = Array.from(dependency, char => verticalizedCharacterMap[char] ?? char).join('');
+        stack[verticalGlyph] = true;
       }
     }
   }
@@ -312,16 +307,17 @@ export class SymbolBucket extends SymbolBucketRuntime {
         const fontStack = textFont.evaluate(evaluationFeature, {}, canonical).join(',');
         const textAlongLine = layout.get('text-rotation-alignment') !== 'viewport' && layout.get('symbol-placement') !== 'point';
         this.allowVerticalPlacement = this.writingModes?.includes(WritingMode.vertical);
-        for (const section of text.sections) {
-          if (!section.image) {
-            const doesAllowVerticalWritingMode = allowsVerticalWritingMode(text.toString());
-            const sectionFont = section.fontStack || fontStack;
-            stacks[sectionFont] ||= {};
-            this.calculateGlyphDependencies(section.text, stacks[sectionFont], textAlongLine, this.allowVerticalPlacement, doesAllowVerticalWritingMode);
+        const taggedText = TaggedString.fromFeature(text, fontStack);
+        const doesAllowVerticalWritingMode = allowsVerticalWritingMode(taggedText.text);
+        for (const glyph of taggedText.getGlyphs()) {
+          const section = taggedText.getSection(glyph.index);
+          if ('fontStack' in section) {
+            stacks[section.fontStack] ||= {};
+            this.calculateGlyphDependencies(glyph.text, stacks[section.fontStack], textAlongLine, this.allowVerticalPlacement, doesAllowVerticalWritingMode);
           }
           else {
             // Add section image to the list of dependencies.
-            icons[section.image.name] = true;
+            icons[section.imageName] = true;
           }
         }
       }

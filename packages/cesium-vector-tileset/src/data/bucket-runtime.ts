@@ -6,7 +6,7 @@ import type { LineStyleLayer } from '../style/style-layer/line-style-layer';
 import type { SymbolStyleLayer } from '../style/style-layer/symbol-style-layer';
 import type { SizeData } from '../symbol/symbol-size';
 import type { TransferRegistry } from '../worker/transfer-registry';
-import type { FillExtrusionLayoutArray, FillLayoutArray, GlyphOffsetArray, PosArray, SymbolInstanceArray, SymbolLineVertexArray } from './array-types.g';
+import type { FillExtrusionLayoutArray, FillLayoutArray, GlyphOffsetArray, PosArray, SymbolInstanceArray, SymbolLineVertexArray, TextAnchorOffsetArray } from './array-types.g';
 import type { Bucket } from './bucket';
 import type { PackedLinePaths } from './line-path-transfer';
 import type { FeatureLookup, PaintOptions, ProgramConfigurationSet } from './program-configuration';
@@ -199,6 +199,7 @@ export class SymbolBucket implements Bucket {
   declare glyphOffsetArray: GlyphOffsetArray;
   declare lineVertexArray: SymbolLineVertexArray;
   declare symbolInstances: SymbolInstanceArray;
+  declare textAnchorOffsets: TextAnchorOffsetArray;
   declare tilePixelRatio: number;
 
   declare text: SymbolBuffers;

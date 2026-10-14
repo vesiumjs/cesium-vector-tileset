@@ -29,7 +29,7 @@ export interface GlyphPosition {
  * The glyphs' positions
  */
 export interface GlyphPositions {
-  [stack: string]: Record<number, GlyphPosition>;
+  [stack: string]: Record<string, GlyphPosition>;
 }
 
 export class GlyphAtlas {
@@ -42,11 +42,11 @@ export class GlyphAtlas {
 
     for (const stack in stacks) {
       const glyphs = stacks[stack];
-      const stackPositions: Record<number, GlyphPosition> = {};
+      const stackPositions: Record<string, GlyphPosition> = {};
       positions[stack] = stackPositions;
 
       for (const id in glyphs) {
-        const src = glyphs[+id];
+        const src = glyphs[id];
         if (!src || src.bitmap.width === 0 || src.bitmap.height === 0)
           continue;
 
@@ -68,7 +68,7 @@ export class GlyphAtlas {
       const glyphs = stacks[stack];
 
       for (const id in glyphs) {
-        const src = glyphs[+id];
+        const src = glyphs[id];
         if (!src || src.bitmap.width === 0 || src.bitmap.height === 0)
           continue;
         const bin = positions[stack][id].rect;

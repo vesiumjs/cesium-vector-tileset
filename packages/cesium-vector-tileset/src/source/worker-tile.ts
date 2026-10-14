@@ -113,7 +113,7 @@ export class WorkerTile {
     featureIndex.bucketLayerIDs = [];
     featureIndex.sourceLayerIds = sourceLayerIds;
 
-    const buckets: { [_: string]: WorkerBucket } = {};
+    const buckets: { [_: string]: WorkerBucket } = Object.create(null);
     const sourceFeatures = new Map<string, IndexedFeature[]>();
 
     const options: PopulateParameters = {
@@ -173,9 +173,9 @@ export class WorkerTile {
       }
     }
 
-    // options.glyphDependencies looks like: {"SomeFontName":{"10":true,"32":true}}
+    // Glyph dependencies are keyed by the graphemes drawn for each font stack.
     // this line makes an object like: {"SomeFontName":[10,32]}
-    const stacks: { [_: string]: number[] } = mapObject(options.glyphDependencies, glyphs => Object.keys(glyphs).map(Number));
+    const stacks: { [_: string]: string[] } = mapObject(options.glyphDependencies, glyphs => Object.keys(glyphs));
 
     throwIfAborted(controller.signal);
 

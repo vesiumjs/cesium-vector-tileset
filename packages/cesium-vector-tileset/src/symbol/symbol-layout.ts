@@ -66,12 +66,12 @@ export function performSymbolLayout(args: {
   bucket: SymbolBucket;
   glyphMap: {
     [_: string]: {
-      [x: number]: StyleGlyph;
+      [x: string]: StyleGlyph;
     };
   };
   glyphPositions: {
     [_: string]: {
-      [x: number]: GlyphPosition;
+      [x: string]: GlyphPosition;
     };
   };
   imageMap: { [_: string]: StyleImage };

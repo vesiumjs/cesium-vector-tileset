@@ -10,13 +10,14 @@ import { TextFit } from '../style/style-image';
 import {
   codePointHasUprightVerticalOrientation,
 } from '../util/unicode-properties.g';
-import { processStyledBidirectionalText } from './bidi';
+import { processStyledBidirectionalText, segmentGraphemes } from './bidi';
 import ONE_EM from './one-em';
 import {
   charInComplexShapingScript,
   charIsWhitespace,
 } from './script-detection';
 import { TaggedString } from './tagged-string';
+import { verticalizedCharacterMap } from './verticalize-punctuation';
 
 export const WritingMode = {
   none: 0,
@@ -30,7 +31,7 @@ const SHAPING_DEFAULT_OFFSET = -17;
 
 // The position of a glyph relative to the text's anchor point.
 export interface PositionedGlyph {
-  glyph: number;
+  glyph: string;
   imageName: string | null;
   x: number;
   y: number;
@@ -88,12 +89,12 @@ function shapeText(
   text: Formatted,
   glyphMap: {
     [_: string]: {
-      [_: number]: StyleGlyph;
+      [_: string]: StyleGlyph;
     };
   },
   glyphPositions: {
     [_: string]: {
-      [_: number]: GlyphPosition;
+      [_: string]: GlyphPosition;
     };
   },
   imagePositions: { [_: string]: ImagePosition },
@@ -221,18 +222,18 @@ function getRectAndMetrics(
   glyphPosition: GlyphPosition | undefined,
   glyphMap: {
     [_: string]: {
-      [_: number]: StyleGlyph;
+      [_: string]: StyleGlyph;
     };
   },
   section: TextSectionOptions,
-  codePoint: number,
+  glyphKey: string,
 ): Pick<PositionedGlyph, 'rect' | 'metrics'> | null {
   if (glyphPosition?.rect) {
     return glyphPosition;
   }
 
   const glyphs = glyphMap[section.fontStack];
-  const glyph = glyphs?.[codePoint];
+  const glyph = glyphs?.[glyphKey];
   if (!glyph)
     return null;
 
@@ -253,13 +254,73 @@ function isLineVertical(
     || (allowVerticalPlacement && (charIsWhitespace(codePoint) || charInComplexShapingScript(codePoint))));
 }
 
+/** Numbers and short uppercase codes stay upright; longer words follow the line. */
+function runIsUpright(run: number[]): boolean {
+  const isDigit = (codePoint: number) => /\p{Nd}/u.test(String.fromCodePoint(codePoint));
+  const isNumber = run.some(isDigit)
+    && run.every(codePoint => isDigit(codePoint) || /[\p{P}\p{S}]/u.test(String.fromCodePoint(codePoint)));
+  const isShortCode = run.length <= 3
+    && run.every(codePoint => isDigit(codePoint) || /\p{Lu}/u.test(String.fromCodePoint(codePoint)));
+  return isNumber || isShortCode;
+}
+
+/** Return one orientation per code point, retaining each one's independent section style. */
+function determineLineVerticals(line: TaggedString): boolean[] {
+  const graphemes = Array.from(segmentGraphemes(line.text), value => value.segment);
+  const codePoints = graphemes.map(grapheme => grapheme.codePointAt(0)!);
+  const verticals = codePoints.map(codePointHasUprightVerticalOrientation);
+  let sectionIndex = 0;
+  const sectionIndices = graphemes.map((grapheme) => {
+    const start = sectionIndex;
+    sectionIndex += [...grapheme].length;
+    return start;
+  });
+  const isRunCharacter = (index: number) => !verticals[index]
+    && !charIsWhitespace(codePoints[index]) && !('imageName' in line.getSection(sectionIndices[index]));
+  for (let start = 0; start < codePoints.length; start++) {
+    if (!isRunCharacter(start))
+      continue;
+    let end = start;
+    while (end + 1 < codePoints.length && isRunCharacter(end + 1)) end++;
+    if (runIsUpright(codePoints.slice(start, end + 1))) {
+      for (let index = start; index <= end; index++) {
+        verticals[index] = /[\p{Nd}\p{Lu}]/u.test(String.fromCodePoint(codePoints[index]))
+          && !charInComplexShapingScript(codePoints[index]);
+      }
+    }
+    start = end;
+  }
+
+  let replaced = false;
+  for (let index = 0; index < graphemes.length; index++) {
+    if (verticals[index])
+      continue;
+    const replacement = verticalizedCharacterMap[graphemes[index]];
+    if (replacement && (index === 0 || verticals[index - 1])
+      && (index === graphemes.length - 1 || verticals[index + 1])) {
+      graphemes[index] = replacement;
+      verticals[index] = true;
+      replaced = true;
+    }
+  }
+  if (replaced)
+    line.text = graphemes.join('');
+
+  const orientations: boolean[] = [];
+  for (const [index, grapheme] of graphemes.entries()) {
+    for (const _character of grapheme)
+      orientations.push(verticals[index]);
+  }
+  return orientations;
+}
+
 function shapeLines(shaping: Shaping, glyphMap: {
   [_: string]: {
-    [_: number]: StyleGlyph;
+    [_: string]: StyleGlyph;
   };
 }, glyphPositions: {
   [_: string]: {
-    [_: number]: GlyphPosition;
+    [_: string]: GlyphPosition;
   };
 }, imagePositions: { [_: string]: ImagePosition }, lines: TaggedString[], lineHeight: number, textAnchor: SymbolAnchor, textJustify: TextJustify, writingMode: typeof WritingMode.horizontal | typeof WritingMode.vertical, spacing: number, allowVerticalPlacement: boolean, layoutTextSizeThisZoom: number) {
   let x = 0;
@@ -291,20 +352,21 @@ function shapeLines(shaping: Shaping, glyphMap: {
     }
 
     const lineShapingSize = calculateLineContentSize(imagePositions, line, layoutTextSizeFactor);
+    const lineVerticals = writingMode === WritingMode.vertical && !allowVerticalPlacement
+      ? determineLineVerticals(line)
+      : undefined;
 
-    let i = 0;
-    for (const char of line.text) {
+    for (const { text: glyph, index: i } of line.getGlyphs()) {
       const section = line.getSection(i);
-      // String iteration yields a nonempty Unicode code point.
-      const codePoint = char.codePointAt(0)!;
-      const vertical = isLineVertical(writingMode, allowVerticalPlacement, codePoint);
+      // Orientation follows the first code point of the writing unit.
+      const codePoint = glyph.codePointAt(0)!;
+      const vertical = lineVerticals ? lineVerticals[i] : isLineVertical(writingMode, allowVerticalPlacement, codePoint);
       const sectionIndex = line.getSectionIndex(i);
-      i++;
       let imageName: string | null = null;
       let fontStack = '';
       let sectionAttributes: ShapingSectionAttributes;
       if ('fontStack' in section) {
-        const attributes = shapeTextSection(section, codePoint, vertical, lineShapingSize, glyphMap, glyphPositions);
+        const attributes = shapeTextSection(section, glyph, vertical, lineShapingSize, glyphMap, glyphPositions);
         if (!attributes)
           continue;
         sectionAttributes = attributes;
@@ -324,7 +386,7 @@ function shapeLines(shaping: Shaping, glyphMap: {
 
       const { rect, metrics, baselineOffset } = sectionAttributes;
       positionedGlyphs.push({
-        glyph: codePoint,
+        glyph,
         imageName,
         x,
         y: y + SHAPING_DEFAULT_OFFSET + baselineOffset,
@@ -376,24 +438,24 @@ function shapeLines(shaping: Shaping, glyphMap: {
 
 function shapeTextSection(
   section: TextSectionOptions,
-  codePoint: number,
+  glyph: string,
   vertical: boolean,
   lineShapingSize: LineShapingSize,
   glyphMap: {
     [_: string]: {
-      [_: number]: StyleGlyph;
+      [_: string]: StyleGlyph;
     };
   },
   glyphPositions: {
     [_: string]: {
-      [_: number]: GlyphPosition;
+      [_: string]: GlyphPosition;
     };
   },
 ): ShapingSectionAttributes | null {
   const positions = glyphPositions[section.fontStack];
-  const glyphPosition = positions?.[codePoint];
+  const glyphPosition = positions?.[glyph];
 
-  const rectAndMetrics = getRectAndMetrics(glyphPosition, glyphMap, section, codePoint);
+  const rectAndMetrics = getRectAndMetrics(glyphPosition, glyphMap, section, glyph);
 
   if (rectAndMetrics === null)
     return null;

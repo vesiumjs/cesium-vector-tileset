@@ -4,6 +4,7 @@ import type { ImagePosition } from '../assets/image-atlas';
 import type { StyleGlyph } from '../style/style-glyph';
 import { warnOnce } from '../util/errors';
 import { codePointAllowsIdeographicBreaking } from '../util/unicode-properties.g';
+import { segmentGraphemes } from './bidi';
 import ONE_EM from './one-em';
 import { charIsWhitespace } from './script-detection';
 import { verticalizePunctuation } from './verticalize-punctuation';
@@ -41,6 +42,7 @@ const breakable: {
   [_: number]: boolean;
 } = {
   [0x0A]: true, // newline
+  [0x0D]: true, // carriage return; a CRLF remains one grapheme
   [0x20]: true, // space
   [0x26]: true, // ampersand
   [0x29]: true, // right parenthesis
@@ -65,11 +67,11 @@ const breakableBefore: {
 };
 
 function getGlyphAdvance(
-  codePoint: number,
+  glyph: string,
   section: SectionOptions,
   glyphMap: {
     [_: string]: {
-      [_: number]: StyleGlyph;
+      [_: string]: StyleGlyph;
     };
   },
   imagePositions: { [_: string]: ImagePosition },
@@ -78,10 +80,10 @@ function getGlyphAdvance(
 ): number {
   if ('fontStack' in section) {
     const positions = glyphMap[section.fontStack];
-    const glyph = positions?.[codePoint];
-    if (!glyph)
+    const styleGlyph = positions?.[glyph];
+    if (!styleGlyph)
       return 0;
-    return glyph.metrics.advance * section.scale + spacing;
+    return styleGlyph.metrics.advance * section.scale + spacing;
   }
   else {
     const imagePosition = imagePositions[section.imageName];
@@ -109,7 +111,7 @@ function calculateBadness(lineWidth: number, targetWidth: number, penalty: numbe
 function calculatePenalty(codePoint: number, nextCodePoint: number, penalizableIdeographicBreak: boolean) {
   let penalty = 0;
   // Force break on newline
-  if (codePoint === 0x0A) {
+  if (codePoint === 0x0A || codePoint === 0x0D) {
     penalty -= 10000;
   }
   // Penalize breaks between characters that allow ideographic breaking because
@@ -208,6 +210,28 @@ export class TaggedString {
 
   getSectionIndex(index: number): number {
     return this.sectionIndex[index];
+  }
+
+  /** A font draws a whole grapheme, while formatted sections retain independent styles. */
+  * getGlyphs(): Generator<{ text: string; index: number }> {
+    let index = 0;
+    for (const { segment } of segmentGraphemes(this.text)) {
+      let text = '';
+      let start = index;
+      let sectionIndex = this.getSectionIndex(index);
+      for (const character of segment) {
+        const nextSectionIndex = this.getSectionIndex(index);
+        if (nextSectionIndex !== sectionIndex) {
+          yield { text, index: start };
+          text = '';
+          start = index;
+          sectionIndex = nextSectionIndex;
+        }
+        text += character;
+        index++;
+      }
+      yield { text, index: start };
+    }
   }
 
   verticalizePunctuation(): void {
@@ -324,7 +348,7 @@ export class TaggedString {
     maxWidth: number,
     glyphMap: {
       [_: string]: {
-        [_: number]: StyleGlyph;
+        [_: string]: StyleGlyph;
       };
     },
     imagePositions: { [_: string]: ImagePosition },
@@ -334,36 +358,34 @@ export class TaggedString {
     const targetWidth = this.determineAverageLineWidth(spacing, maxWidth, glyphMap, imagePositions, layoutTextSize);
 
     const hasZeroWidthSpaces = this.hasZeroWidthSpaces();
+    const graphemes = Array.from(segmentGraphemes(this.text), value => value.segment);
+    const glyphs = Array.from(this.getGlyphs());
+    let glyphIndex = 0;
 
     let currentX = 0;
 
-    let i = 0;
-    const chars = this.text[Symbol.iterator]();
-    let char = chars.next();
-    const nextChars = this.text[Symbol.iterator]();
-    nextChars.next();
-    let nextChar = nextChars.next();
-    const nextNextChars = this.text[Symbol.iterator]();
-    nextNextChars.next();
-    nextNextChars.next();
-    let nextNextChar = nextNextChars.next();
-
-    while (!char.done) {
-      const section = this.getSection(i);
-      // A non-done string iterator result always contains a code point.
-      const codePoint = char.value.codePointAt(0)!;
-      if (!charIsWhitespace(codePoint))
-        currentX += getGlyphAdvance(codePoint, section, glyphMap, imagePositions, spacing, layoutTextSize);
+    let codePointIndex = 0;
+    for (const [index, grapheme] of graphemes.entries()) {
+      const section = this.getSection(codePointIndex);
+      const codePoint = grapheme.codePointAt(0)!;
+      const end = codePointIndex + [...grapheme].length;
+      while (glyphIndex < glyphs.length && glyphs[glyphIndex].index < end) {
+        const glyph = glyphs[glyphIndex++];
+        if (!charIsWhitespace(glyph.text.codePointAt(0)!))
+          currentX += getGlyphAdvance(glyph.text, this.getSection(glyph.index), glyphMap, imagePositions, spacing, layoutTextSize);
+      }
+      codePointIndex = end;
 
       // Ideographic characters, spaces, and word-breaking punctuation that often appear without
       // surrounding spaces.
-      if (!nextChar.done) {
+      const next = graphemes[index + 1];
+      if (next !== undefined) {
         const ideographicBreak = codePointAllowsIdeographicBreaking(codePoint);
-        const nextCodePoint = nextChar.value.codePointAt(0)!;
-        if (breakable[codePoint] || ideographicBreak || 'imageName' in section || (!nextNextChar.done && breakableBefore[nextCodePoint])) {
+        const nextCodePoint = next.codePointAt(0)!;
+        if (breakable[codePoint] || ideographicBreak || 'imageName' in section || (graphemes[index + 2] !== undefined && breakableBefore[nextCodePoint])) {
           potentialLineBreaks.push(
             evaluateBreak(
-              i + 1,
+              codePointIndex,
               currentX,
               targetWidth,
               potentialLineBreaks,
@@ -373,15 +395,11 @@ export class TaggedString {
           );
         }
       }
-      i++;
-      char = chars.next();
-      nextChar = nextChars.next();
-      nextNextChar = nextNextChars.next();
     }
 
     return leastBadBreaks(
       evaluateBreak(
-        this.length(),
+        codePointIndex,
         currentX,
         targetWidth,
         potentialLineBreaks,
@@ -396,7 +414,7 @@ export class TaggedString {
     maxWidth: number,
     glyphMap: {
       [_: string]: {
-        [_: number]: StyleGlyph;
+        [_: string]: StyleGlyph;
       };
     },
     imagePositions: { [_: string]: ImagePosition },
@@ -404,12 +422,9 @@ export class TaggedString {
   ): number {
     let totalWidth = 0;
 
-    let index = 0;
-    for (const char of this.text) {
-      const section = this.getSection(index);
-      // String iteration cannot yield an empty character.
-      totalWidth += getGlyphAdvance(char.codePointAt(0)!, section, glyphMap, imagePositions, spacing, layoutTextSize);
-      index++;
+    for (const glyph of this.getGlyphs()) {
+      const section = this.getSection(glyph.index);
+      totalWidth += getGlyphAdvance(glyph.text, section, glyphMap, imagePositions, spacing, layoutTextSize);
     }
 
     const lineCount = Math.max(1, Math.ceil(totalWidth / maxWidth));

@@ -47,7 +47,7 @@ export interface GetImagesParameters {
  */
 export interface GetGlyphsParameters {
   type: string;
-  stacks: { [_: string]: number[] };
+  stacks: { [_: string]: string[] };
   source: string;
   tileID: OverscaledTileID;
 }
@@ -57,7 +57,7 @@ export interface GetGlyphsParameters {
  */
 export interface GetGlyphsResponse {
   [stack: string]: {
-    [id: number]: StyleGlyph;
+    [id: string]: StyleGlyph;
   };
 }
 

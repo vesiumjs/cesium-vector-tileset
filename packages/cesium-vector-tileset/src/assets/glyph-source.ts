@@ -12,17 +12,19 @@ import { AlphaImage } from '../util/image';
 import { codePointUsesLocalIdeographFontFamily } from '../util/unicode-properties.g';
 
 interface Entry {
-  glyphs: Record<number, StyleGlyph>;
+  glyphs: Record<string, StyleGlyph>;
   requests: Record<number, Promise<Record<number, StyleGlyph>>>;
   ranges: Record<number, boolean>;
-  localRequests?: Record<number, Promise<StyleGlyph>>;
+  localRequests?: Record<string, Promise<StyleGlyph>>;
   tinySDF?: Promise<TinySDF>;
   ideographTinySDF?: Promise<TinySDF>;
+  clusterTinySDF?: Promise<TinySDF>;
+  ideographClusterTinySDF?: Promise<TinySDF>;
 }
 
 interface GlyphResult {
   stack: string;
-  id: number;
+  id: string;
   glyph?: StyleGlyph;
 }
 
@@ -64,7 +66,7 @@ export class GlyphSource {
     this.url = url ?? undefined;
   }
 
-  async getGlyphs(glyphs: { [stack: string]: number[] }): Promise<GetGlyphsResponse> {
+  async getGlyphs(glyphs: { [stack: string]: string[] }): Promise<GetGlyphsResponse> {
     const glyphsPromises: Array<Promise<GlyphResult>> = [];
 
     for (const stack in glyphs) {
@@ -92,20 +94,20 @@ export class GlyphSource {
     return result;
   }
 
-  async loadGlyph(stack: string, id: number): Promise<GlyphResult> {
+  async loadGlyph(stack: string, id: string): Promise<GlyphResult> {
     // Create an entry for this fontstack if it doesn’t already exist.
     this.entries[stack] ??= { glyphs: {}, requests: {}, ranges: {} };
     const entry = this.entries[stack];
 
-    // Try to get the glyph from the cache of client-side glyphs by codepoint.
+    // Try to get the glyph from the cache of glyphs by grapheme.
     let glyph = entry.glyphs[id];
     if (glyph !== undefined) {
       return { stack, id, glyph };
     }
 
-    // If the style hasn’t opted into server-side fonts or this codepoint is CJK, draw the glyph locally and cache it.
+    // A PBF serves individual codepoints; clusters use browser font shaping.
     const url = this.url;
-    if (!url || this._charUsesLocalIdeographFontFamily(id)) {
+    if (!url || [...id].length > 1 || this._charUsesLocalIdeographFontFamily(id.codePointAt(0)!)) {
       glyph = await this._loadLocalGlyph(entry, stack, id);
       return { stack, id, glyph };
     }
@@ -116,10 +118,11 @@ export class GlyphSource {
   /**
    * @internal
    */
-  private async _downloadAndCacheRangePromise(stack: string, id: number, url: string): Promise<GlyphResult> {
+  private async _downloadAndCacheRangePromise(stack: string, id: string, url: string): Promise<GlyphResult> {
     // Try to get the glyph from the cache of server-side glyphs by PBF range.
     const entry = this.entries[stack];
-    const range = Math.floor(id / 256);
+    const codePoint = id.codePointAt(0)!;
+    const range = Math.floor(codePoint / 256);
     if (entry.ranges[range]) {
       return { stack, id };
     }
@@ -140,10 +143,10 @@ export class GlyphSource {
       // Get the response and cache the glyphs from it.
       const response = await entry.requests[range];
       for (const id in response) {
-        entry.glyphs[+id] = response[+id];
+        entry.glyphs[String.fromCodePoint(+id)] = response[+id];
       }
       entry.ranges[range] = true;
-      const glyph = response[id];
+      const glyph = response[codePoint];
       return glyph ? { stack, id, glyph } : { stack, id };
     }
     catch (e) {
@@ -152,7 +155,7 @@ export class GlyphSource {
       // re-issues it, so one transient failure forces local TinySDF rendering
       // for all 256 glyphs in the range for the rest of the session.
       delete entry.requests[range];
-      this._warnOnMissingGlyphRange(range, id, ensureError(e));
+      this._warnOnMissingGlyphRange(range, codePoint, ensureError(e));
       // Fall back to drawing the glyph locally and caching it.
       const glyph = await this._loadLocalGlyph(entry, stack, id);
       return { stack, id, glyph };
@@ -163,7 +166,7 @@ export class GlyphSource {
    * Tiles share a font's pending draw while retaining independent response bitmaps.
    * @internal
    */
-  private _loadLocalGlyph(entry: Entry, stack: string, id: number): Promise<StyleGlyph> {
+  private _loadLocalGlyph(entry: Entry, stack: string, id: string): Promise<StyleGlyph> {
     const glyph = entry.glyphs[id];
     if (glyph)
       return Promise.resolve(glyph);
@@ -198,15 +201,18 @@ export class GlyphSource {
    * Draws a glyph offscreen using TinySDF, creating a TinySDF instance lazily.
    * @internal
    */
-  private async _drawGlyph(entry: Entry, stack: string, id: number): Promise<StyleGlyph> {
+  private async _drawGlyph(entry: Entry, stack: string, id: string): Promise<StyleGlyph> {
     // The CJK fallback font specified by the developer takes precedence over the last resort fontstack in the style specification.
-    const usesLocalIdeographFontFamily = stack === defaultStack && this.localIdeographFontFamily !== '' && this._charUsesLocalIdeographFontFamily(id);
+    const usesLocalIdeographFontFamily = stack === defaultStack && this.localIdeographFontFamily !== '' && this._charUsesLocalIdeographFontFamily(id.codePointAt(0)!);
 
     // Keep a separate TinySDF instance for when we need to apply the localIdeographFontFamily fallback to keep the font selection from bleeding into non-CJK text.
-    const tinySDFKey = usesLocalIdeographFontFamily ? 'ideographTinySDF' : 'tinySDF';
-    entry[tinySDFKey] ||= this._createTinySDF(usesLocalIdeographFontFamily ? this.localIdeographFontFamily : stack);
+    const cluster = [...id].length > 1;
+    const tinySDFKey = cluster
+      ? (usesLocalIdeographFontFamily ? 'ideographClusterTinySDF' : 'clusterTinySDF')
+      : (usesLocalIdeographFontFamily ? 'ideographTinySDF' : 'tinySDF');
+    entry[tinySDFKey] ||= this._createTinySDF(usesLocalIdeographFontFamily ? this.localIdeographFontFamily : stack, cluster ? 3 : 1);
     const tinySDF = await entry[tinySDFKey];
-    const char = tinySDF.draw(String.fromCodePoint(id));
+    const char = tinySDF.draw(id);
 
     /**
      * TinySDF's "top" is the distance from the alphabetic baseline to the top of the glyph.
@@ -224,10 +230,10 @@ export class GlyphSource {
     const leftAdjustment = 0.5;
 
     // By definition, control characters are invisible and nonspacing.
-    const isControl = /^\p{gc=Cf}+$/u.test(String.fromCodePoint(id));
+    const isControl = /^\p{gc=Cf}+$/u.test(id);
 
     return {
-      id,
+      id: id.codePointAt(0)!,
       bitmap: new AlphaImage({ width: char.width || 30 * textureScale, height: char.height || 30 * textureScale }, char.data),
       metrics: {
         width: isControl ? 0 : (char.glyphWidth / textureScale || 24),
@@ -243,7 +249,7 @@ export class GlyphSource {
   /**
    * @internal
    */
-  private async _createTinySDF(stack: string | false): Promise<TinySDF> {
+  private async _createTinySDF(stack: string | false, emsWide: number = 1): Promise<TinySDF> {
     // Escape and quote the font family list for use in CSS.
     const fontFamilies = stack ? stack.split(',') : [];
     fontFamilies.push(defaultGenericFontFamily);
@@ -265,16 +271,21 @@ export class GlyphSource {
       }
     }
 
-    return new GlyphSource.TinySDF({
+    const padding = 3 * textureScale;
+    const tinySDF = new GlyphSource.TinySDF({
       fontSize,
-      buffer: 3 * textureScale,
+      buffer: Math.max(padding, Math.ceil(fontSize * (emsWide - 1) / 4)),
       radius: 8 * textureScale,
       cutoff: 0.25,
       fontFamily,
       fontWeight,
       fontStyle,
       lang: this.lang,
-    });
+    }) as TinySDF & { buffer: number };
+    // TinySDF uses constructor buffer to size its canvas, and draw-time buffer
+    // for bitmap padding. Wider clusters still use the atlas's 3px SDF border.
+    tinySDF.buffer = padding;
+    return tinySDF;
   }
 
   /**

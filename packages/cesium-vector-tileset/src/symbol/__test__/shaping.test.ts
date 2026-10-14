@@ -10,24 +10,32 @@ import { EvaluationParameters } from '../../style/evaluation-parameters';
 import { SymbolStyleLayer } from '../../style/style-layer/symbol-style-layer';
 import { CanonicalTileID } from '../../tile/tile-id';
 import { AlphaImage } from '../../util/image';
+import { getBidiGlyphDependencies, segmentGraphemes } from '../bidi';
+import { getGlyphQuads } from '../quads';
 import { shapeText, WritingMode } from '../shaping';
 import { performSymbolLayout } from '../symbol-layout';
 import { transformText } from '../transform-text';
 
-function shape(text: Formatted, availableText = text.toString(), maxWidth = Infinity): Shaping {
-  const glyphs: Record<number, StyleGlyph> = {};
-  for (const char of availableText) {
+function shape(text: Formatted, availableText = text.toString(), maxWidth = Infinity, writingMode: Shaping['writingMode'] = WritingMode.horizontal): Shaping {
+  const glyphs: Record<string, StyleGlyph> = {};
+  const availableGlyphs = new Set(availableText);
+  for (const { segment } of segmentGraphemes(availableText)) {
+    for (const glyph of getBidiGlyphDependencies(segment))
+      availableGlyphs.add(glyph);
+  }
+  for (const char of availableGlyphs) {
     const id = char.codePointAt(0)!;
-    glyphs[id] = { id, bitmap: new AlphaImage({ width: 0, height: 0 }), metrics: { width: 10, height: 18, left: 0, top: 18, advance: 12 } };
+    glyphs[char] = { id, bitmap: new AlphaImage({ width: 16, height: 24 }), metrics: { width: 10, height: 18, left: 0, top: 18, advance: /^\p{M}+$/u.test(char) ? 0 : 12 } };
   }
   const glyphMap = { Test: glyphs, Emphasis: glyphs };
-  const shaping = shapeText(text, glyphMap, {}, {}, 'Test', maxWidth, 24, 'center', 'center', 0, [0, 0], WritingMode.horizontal, false, 24, 24);
+  const atlas = new GlyphAtlas(glyphMap);
+  const shaping = shapeText(text, glyphMap, atlas.positions, {}, 'Test', maxWidth, 24, 'center', 'center', 0, [0, 0], writingMode, false, 24, 24);
   expect(shaping).toBeTruthy();
   return shaping as Shaping;
 }
 
 function drawn(shaping: Shaping): string[] {
-  return shaping.positionedLines.map(line => line.positionedGlyphs.map(glyph => String.fromCodePoint(glyph.glyph)).join(''));
+  return shaping.positionedLines.map(line => line.positionedGlyphs.map(glyph => glyph.glyph).join(''));
 }
 
 describe('default bidirectional label layout', () => {
@@ -56,7 +64,7 @@ describe('default bidirectional label layout', () => {
     ]);
     const shaping = shape(text);
     expect(drawn(shaping)).toEqual(['😀 בא\u05B7']);
-    expect(shaping.positionedLines[0].positionedGlyphs.at(-1)).toMatchObject({ glyph: 0x05B7, fontStack: 'Emphasis', scale: 2 });
+    expect(shaping.positionedLines[0].positionedGlyphs.at(-1)).toMatchObject({ glyph: '\u05B7', fontStack: 'Emphasis', scale: 2 });
   });
 
   it('uses bidi isolates to place English text without drawing the directional controls', () => {
@@ -69,8 +77,70 @@ describe('default bidirectional label layout', () => {
       new FormattedSection(' 😀', null, 2, 'Emphasis', null, null),
     ]);
     const shaping = shape(text, ' אב');
-    expect(shaping.positionedLines[0].positionedGlyphs.map(glyph => [String.fromCodePoint(glyph.glyph), glyph.fontStack, glyph.scale]))
+    expect(shaping.positionedLines[0].positionedGlyphs.map(glyph => [glyph.glyph, glyph.fontStack, glyph.scale]))
       .toEqual([[' ', 'Emphasis', 2], ['ב', 'Test', 1], ['א', 'Test', 1]]);
+  });
+});
+
+describe('text line boundaries and vertical mixed-script geometry', () => {
+  // Line labels must rotate qualifying digits/codes back upright; the actual
+  // atlas-backed quads distinguish a flag-only fix from correct rendered geometry.
+  it('keeps numbers and short codes upright while long uppercase words follow the line', () => {
+    const layer = new SymbolStyleLayer({ id: 'labels', type: 'symbol', source: 'places' }, {});
+    layer.recalculate(new EvaluationParameters(0), []);
+    for (const [text, upright] of [
+      ['반포대로21길', ['2', '1']],
+      ['国道A1号', ['A', '1']],
+      ['国道ISHIKAWA号', []],
+    ] as const) {
+      const shaped = shape(Formatted.fromString(text), text, Infinity, WritingMode.vertical);
+      const glyphs = shaped.positionedLines.flatMap(line => line.positionedGlyphs);
+      const quads = getGlyphQuads(shaped, [0, 0], layer, true, { type: 1, properties: {} }, {}, false);
+      for (const [index, glyph] of glyphs.entries()) {
+        const char = glyph.glyph;
+        if (!/[A-Z0-9]/.test(char))
+          continue;
+        const vertical = (upright as readonly string[]).includes(char);
+        expect(glyph.vertical, `${text}/${char}`).toBe(vertical);
+        const corners = [quads[index].tl, quads[index].tr, quads[index].br, quads[index].bl];
+        const width = Math.max(...corners.map(point => point.x)) - Math.min(...corners.map(point => point.x));
+        const height = Math.max(...corners.map(point => point.y)) - Math.min(...corners.map(point => point.y));
+        expect(width).toBeCloseTo(vertical ? 26 : 18);
+        expect(height).toBeCloseTo(vertical ? 18 : 26);
+      }
+    }
+  });
+
+  it('draws the requested vertical punctuation inside an upright number run', () => {
+    const shaped = shape(Formatted.fromString('国道1-2号'), '国道1-2号︲', Infinity, WritingMode.vertical);
+    expect(drawn(shaped)).toEqual(['国道1︲2号']);
+    expect(shaped.positionedLines[0].positionedGlyphs.every(glyph => glyph.vertical)).toBe(true);
+  });
+
+  // A CRLF represents one requested newline, including its bounds/collision height.
+  it('keeps CRLF to two lines with one line-height of separation', () => {
+    const shaped = shape(Formatted.fromString('AB\r\nCD'));
+    expect(drawn(shaped)).toEqual(['AB', 'CD']);
+    expect(shaped.bottom - shaped.top).toBe(48);
+    expect(shaped.positionedLines[1].positionedGlyphs[0].y - shaped.positionedLines[0].positionedGlyphs[0].y).toBe(24);
+    expect(drawn(shape(Formatted.fromString('AB\nCD')))).toEqual(['AB', 'CD']);
+  });
+
+  // Wrapping cannot orphan a combining mark, while the project's independent
+  // formatting section for that mark must survive the stronger line boundary.
+  it('wraps after the whole grapheme and preserves each code point’s formatting', () => {
+    const text = new Formatted([
+      new FormattedSection('文', null, 1, 'Test', null, null),
+      new FormattedSection('\u0301', null, 2, 'Emphasis', null, null),
+      new FormattedSection('字', null, 1, 'Test', null, null),
+    ]);
+    const shaped = shape(text, undefined, 12);
+    expect(drawn(shaped)).toEqual(['文\u0301', '字']);
+    expect(shaped.positionedLines[0].positionedGlyphs[1]).toMatchObject({ glyph: '\u0301', fontStack: 'Emphasis', scale: 2 });
+    const sameSection = shape(Formatted.fromString('文\u0301字'), undefined, 12);
+    expect(drawn(sameSection)).toEqual(['文\u0301', '字']);
+    expect(sameSection.positionedLines[0].positionedGlyphs).toHaveLength(1);
+    expect(sameSection.positionedLines[0].positionedGlyphs[0].glyph).toBe('文\u0301');
   });
 });
 
@@ -107,9 +177,10 @@ describe('variable text-anchor layout', () => {
       text: Formatted.fromString('AB'),
       icon: new ResolvedImage({ name: '', available: false }),
     }];
-    const glyphs: Record<number, StyleGlyph> = {};
-    for (const id of [65, 66]) {
-      glyphs[id] = { id, bitmap: new AlphaImage({ width: 10, height: 18 }), metrics: { width: 10, height: 18, left: 0, top: 18, advance: 12 } };
+    const glyphs: Record<string, StyleGlyph> = {};
+    for (const char of ['A', 'B']) {
+      const id = char.codePointAt(0)!;
+      glyphs[char] = { id, bitmap: new AlphaImage({ width: 10, height: 18 }), metrics: { width: 10, height: 18, left: 0, top: 18, advance: 12 } };
     }
     const glyphMap = { Test: glyphs };
     const atlas = new GlyphAtlas(glyphMap);
