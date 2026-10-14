@@ -22,6 +22,7 @@ export class VideoSource extends ImageSource {
   declare options: VideoSourceSpecification;
   urls: string[];
   video?: HTMLVideoElement;
+  private _loadGeneration = 0;
 
   /**
    * @internal
@@ -38,18 +39,31 @@ export class VideoSource extends ImageSource {
   }
 
   async load(): Promise<void> {
+    const generation = ++this._loadGeneration;
     this._loaded = false;
     const options = this.options;
 
-    this.urls = [];
-    for (const url of options.urls) {
-      this.urls.push((await transformRequest(url, ResourceType.Source, this.style?.transformRequest)).url);
-    }
     try {
-      const video = await getVideo(this.urls);
+      const urls: string[] = [];
+      for (const url of options.urls) {
+        const request = await transformRequest(url, ResourceType.Source, this.style?.transformRequest);
+        if (generation !== this._loadGeneration)
+          return;
+        urls.push(request.url);
+      }
+      this.urls = urls;
+      const video = await getVideo(urls);
+      if (generation !== this._loadGeneration) {
+        video?.pause();
+        return;
+      }
       this._loaded = true;
       if (!video) {
         return;
+      }
+      if (this.video) {
+        this.video.removeEventListener('playing', this._onPlayingHandler);
+        this.video.pause();
       }
       this.video = video;
       this.video.loop = true;
@@ -58,11 +72,14 @@ export class VideoSource extends ImageSource {
       // true to trigger additional frames as long as the videos continues playing.
       this.video.addEventListener('playing', this._onPlayingHandler);
 
-      this.video.play();
-
       this.finishLoading();
+      if (generation !== this._loadGeneration)
+        return;
+      this.play();
     }
     catch (err) {
+      if (generation !== this._loadGeneration)
+        return;
       this.fire(new ErrorEvent(ensureError(err)));
     }
   }
@@ -80,9 +97,14 @@ export class VideoSource extends ImageSource {
    * Plays the video.
    */
   play(): void {
-    if (this.video) {
-      this.video.play();
-    }
+    const video = this.video;
+    if (!video)
+      return;
+    const generation = this._loadGeneration;
+    void video.play().catch((err) => {
+      if (generation === this._loadGeneration)
+        this.fire(new ErrorEvent(ensureError(err)));
+    });
   }
 
   /**
@@ -111,13 +133,10 @@ export class VideoSource extends ImageSource {
 
   onAdd(): void {
     this.load();
-    if (this.video) {
-      this.video.play();
-      this.setCoordinates(this.coordinates);
-    }
   }
 
   onRemove(): void {
+    this._loadGeneration++;
     super.onRemove();
     if (this.video) {
       this.video.removeEventListener('playing', this._onPlayingHandler);

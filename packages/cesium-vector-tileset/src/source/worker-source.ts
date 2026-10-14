@@ -38,6 +38,8 @@ export type WorkerTileParameters = TileParameters & {
    */
   overzoomParameters?: OverzoomParameters;
   etag?: string;
+  /** The main-thread tile retains an already published result during refresh. */
+  hasData?: boolean;
 };
 
 /**

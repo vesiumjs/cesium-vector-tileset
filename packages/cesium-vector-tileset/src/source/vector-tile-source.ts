@@ -5,6 +5,7 @@ import type { Tile } from '../tile/tile';
 import type { OverscaledTileID } from '../tile/tile-id';
 import type { SourceEventType } from '../util/events';
 import type { WorkerDispatcher } from '../worker/dispatcher';
+import type { WorkerChannel } from '../worker/worker-channel';
 import type { Source } from './source';
 import type { OverzoomParameters, TileEncoding, WorkerTileParameters, WorkerTileResult } from './worker-source';
 
@@ -29,6 +30,11 @@ export interface LoadTileResult {
    * Indicates that the tile requested was not modified.
    */
   unmodified?: boolean;
+}
+
+interface VectorTileLoadRequest extends TileLoadRequest<LoadTileResult | void> {
+  /** The active request may use a different worker from the retained bytes. */
+  channel?: WorkerChannel;
 }
 
 /**
@@ -61,7 +67,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
 
   private _removed = false;
 
-  private readonly _tileLoads = new Map<Tile, TileLoadRequest<LoadTileResult | void>>();
+  private readonly _tileLoads = new Map<Tile, VectorTileLoadRequest>();
 
   constructor(id: string, options: VectorTileSourceOptions, dispatcher: WorkerDispatcher, eventedParent: Evented) {
     super();
@@ -147,7 +153,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
     this.load();
   }
 
-  onRemove(): void {
+  async onRemove(): Promise<void> {
     this._removed = true;
     for (const request of this._tileLoads.values())
       request.controller.abort();
@@ -155,6 +161,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
       this._tileJSONRequest.abort();
       this._tileJSONRequest = undefined;
     }
+    await this.dispatcher.broadcast(MessageType.removeSource, { type: this.type, source: this.id }).catch(() => {});
   }
 
   serialize(): VectorSourceSpecification {
@@ -189,7 +196,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   /**
    * @internal
    */
-  private async _loadTile(tile: Tile, request: TileLoadRequest<LoadTileResult | void>): Promise<LoadTileResult | void> {
+  private async _loadTile(tile: Tile, request: VectorTileLoadRequest): Promise<LoadTileResult | void> {
     while (!this._removed && !tile.aborted && !request.controller.signal.aborted) {
       const version = request.version;
       const style = this.style;
@@ -214,6 +221,7 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
           encoding: this.encoding,
           overzoomParameters: await request.wait(this._getOverzoomParameters(tile)),
           etag: tile.etag,
+          hasData: tile.hasData(),
         };
         if (params.request) {
           params.request.collectResourceTiming = this._collectResourceTiming;
@@ -225,20 +233,26 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
         if (superseded())
           continue;
         let messageType: typeof MessageType.loadTile | typeof MessageType.reloadTile = MessageType.reloadTile;
+        let channel = tile.channel;
         if (!tile.channel || tile.state === 'expired') {
-          tile.channel = this.dispatcher.getReadyChannel();
+          channel = this.dispatcher.getReadyChannel();
           messageType = MessageType.loadTile;
         }
-        const channel = tile.channel;
         if (!channel) {
           throw new Error(`No channel is available for tile ${tile.uid}.`);
         }
+        request.channel = channel;
+        // A pending refresh owns its cancellation channel, while tile.channel
+        // continues to identify the worker that can reparse retained data.
+        tile.channel ??= channel;
         const data = await request.wait(channel.sendAsync({ type: messageType, data: params }, request.controller));
         if (this._removed || tile.aborted || request.controller.signal.aborted) {
           return;
         }
         if (superseded())
           continue;
+        if (!data?.etagUnmodified)
+          tile.channel = channel;
         this._afterTileLoadWorkerResponse(tile, data);
 
         const result: LoadTileResult = {};
@@ -252,6 +266,10 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
         }
         if (superseded())
           continue;
+        // A first 304 published nothing and left no decoded worker result.
+        // Its next attempt must download, rather than reparse an empty cache.
+        if (hasHttpStatus(err) && err.status === 304 && !tile.hasData())
+          tile.channel = undefined;
         if (err && (!hasHttpStatus(err) || err.status !== 404)) {
           throw err;
         }
@@ -303,13 +321,14 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   }
 
   async abortTile(tile: Tile): Promise<void> {
+    const channel = this._tileLoads.get(tile)?.channel ?? tile.channel;
     tile.aborted = true;
     if (tile.abortController) {
       tile.abortController.abort();
       delete tile.abortController;
     }
-    if (tile.channel) {
-      await tile.channel.sendAsync({
+    if (channel) {
+      await channel.sendAsync({
         type: MessageType.abortTile,
         data: { uid: tile.uid, type: this.type, source: this.id },
       });
@@ -317,17 +336,18 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
   }
 
   async unloadTile(tile: Tile): Promise<void> {
+    const request = this._tileLoads.get(tile);
+    const channels = new Set([tile.channel, request?.channel]);
+    request?.controller.abort();
     tile.unloadVectorData();
-    if (tile.channel) {
-      await tile.channel.sendAsync({
-        type: MessageType.removeTile,
-        data: {
-          uid: tile.uid,
-          type: this.type,
-          source: this.id,
-        },
-      });
-    }
+    await Promise.all([...channels].filter((channel): channel is WorkerChannel => channel !== undefined).map(channel => channel.sendAsync({
+      type: MessageType.removeTile,
+      data: {
+        uid: tile.uid,
+        type: this.type,
+        source: this.id,
+      },
+    })));
   }
 
   hasTransition() {

@@ -8,7 +8,7 @@ import type {
 import type { StyleLayer } from '../style/style-layer';
 import type { StyleLayerIndex } from '../style/style-layer-index';
 import type { CanonicalTileID } from '../tile/tile-id';
-import type { ExpiryData, RequestParameters } from '../util/ajax';
+import type { ExpiryData, RequestParameters, ResourceResponse } from '../util/ajax';
 import type { RemoveSourceParams } from '../worker/messages';
 import type { WorkerMessageSender } from '../worker/worker-channel';
 import type { VectorTileData, VectorTileLayer } from './vector-tile-data';
@@ -18,7 +18,7 @@ import { VectorTile } from '@mapbox/vector-tile';
 import { PbfReader } from 'pbf';
 import { BoundedLRUCache } from '../tile/tile-cache';
 import { throwIfAborted } from '../util/abort-error';
-import { getArrayBuffer, parseCacheControl } from '../util/ajax';
+import { AJAXError, getArrayBuffer, parseCacheControl } from '../util/ajax';
 import { ensureError } from '../util/errors';
 import { RequestPerformance } from '../util/request-performance';
 import { MLTVectorTile } from './vector-tile-mlt';
@@ -31,7 +31,7 @@ export interface LoadVectorTileResult {
 }
 
 interface ParentTile {
-  response: { data: ArrayBuffer } & ExpiryData;
+  response: ResourceResponse<ArrayBuffer>;
   decoded?: LoadVectorTileResult;
   expiresAt?: number;
 }
@@ -131,6 +131,15 @@ export class VectorTileWorkerSource implements WorkerSource {
       const tileResponse = parent?.response ?? await getArrayBuffer(request, abortController);
       throwIfAborted(abortController.signal);
 
+      if (tileResponse.notModified) {
+        // Refreshes can move between pooled workers. The retained bytes belong
+        // to the main-thread tile, rather than this worker's decoded cache.
+        if (!params.hasData || !params.etag)
+          throw new AJAXError(304, 'Not Modified', request.url, new Blob());
+        this.tileState.finishLoading(uid, workerTile);
+        return this._getEtagUnmodifiedResult(tileResponse, timing);
+      }
+
       // Tile data hasn't changed (etag support) - return an unmodified result
       if (params.etag && params.etag === tileResponse.etag) {
         this.tileState.finishLoading(uid, workerTile);
@@ -168,7 +177,10 @@ export class VectorTileWorkerSource implements WorkerSource {
       this.tileState.finishLoading(uid, workerTile);
       if (workerTile.abort === abortController)
         workerTile.status = 'done';
-      if (!abortController.signal.aborted) {
+      if (err instanceof AJAXError && err.status === 304 && !params.hasData) {
+        this.tileState.removeLoaded(uid);
+      }
+      else if (!abortController.signal.aborted) {
         this.tileState.markLoaded(uid, workerTile);
       }
       throw err;
@@ -231,8 +243,10 @@ export class VectorTileWorkerSource implements WorkerSource {
     });
     try {
       const response = await Promise.race([shared.response, aborted]);
-      // A 304 response has no body to decode. The caller handles it using its
-      // own etag, preserving each child's independent reload result.
+      if (response.notModified)
+        return { response };
+      // A successful response with the retained ETag needs no replacement
+      // decode, preserving each child's independent reload result.
       if (params.etag && params.etag === response.etag) {
         return { response };
       }

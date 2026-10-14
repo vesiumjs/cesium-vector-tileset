@@ -80,6 +80,15 @@ export type GetResourceResponse<T> = ExpiryData & {
   url?: string;
 };
 
+/** A conditional response carries cache metadata, without replacement bytes. */
+export type NotModifiedResponse = ExpiryData & {
+  notModified: true;
+  data?: never;
+  url?: string;
+};
+
+export type ResourceResponse<T> = (GetResourceResponse<T> & { notModified?: false }) | NotModifiedResponse;
+
 /**
  * An error thrown when a HTTP request results in an error response.
  */
@@ -149,7 +158,7 @@ export function getReferrer(): string | undefined {
  */
 const isFileURL = (url: string): boolean => url.startsWith('file:') || (getReferrer()?.startsWith('file:') === true && !/^\w+:/.test(url));
 
-async function makeFetchRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse<unknown>> {
+async function makeFetchRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<ResourceResponse<unknown>> {
   const request = new Request(requestParameters.url, {
     method: requestParameters.method || 'GET',
     body: requestParameters.body,
@@ -184,6 +193,16 @@ async function makeFetchRequest(requestParameters: RequestParameters, abortContr
     throw new AJAXError(0, ensureError(e).message, requestParameters.url, new Blob());
   }
 
+  if (response.status === 304 && requestParameters.type === 'arrayBuffer') {
+    throwIfAborted(abortController.signal);
+    return {
+      notModified: true,
+      url: response.url,
+      cacheControl: response.headers.get('Cache-Control'),
+      expires: response.headers.get('Expires'),
+      etag: response.headers.get('ETag') ?? undefined,
+    };
+  }
   if (!response.ok) {
     const body = await response.blob();
     throw new AJAXError(response.status, response.statusText, requestParameters.url, body);
@@ -209,7 +228,7 @@ async function makeFetchRequest(requestParameters: RequestParameters, abortContr
   };
 }
 
-function makeXMLHttpRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse<unknown>> {
+function makeXMLHttpRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<ResourceResponse<unknown>> {
   return new Promise((resolve, reject) => {
     const xhr: XMLHttpRequest = new XMLHttpRequest();
 
@@ -233,6 +252,16 @@ function makeXMLHttpRequest(requestParameters: RequestParameters, abortControlle
     };
     xhr.onload = () => {
       if (abortController.signal.aborted) {
+        return;
+      }
+      if (xhr.status === 304 && requestParameters.type === 'arrayBuffer') {
+        resolve({
+          notModified: true,
+          url: xhr.responseURL || requestParameters.url,
+          cacheControl: xhr.getResponseHeader('Cache-Control'),
+          expires: xhr.getResponseHeader('Expires'),
+          etag: xhr.getResponseHeader('ETag') ?? undefined,
+        });
         return;
       }
       if (((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) && xhr.response !== null) {
@@ -276,7 +305,7 @@ function makeXMLHttpRequest(requestParameters: RequestParameters, abortControlle
  * @param abortController - The abort controller allowing to cancel the request
  * @returns a promise resolving to the response, including cache control and expiry data
  */
-export async function makeRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse<unknown>> {
+export async function makeRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<ResourceResponse<unknown>> {
   throwIfAborted(abortController.signal);
   if (requestParameters.url.includes('://') && !(/^https?:|^file:/.test(requestParameters.url))) {
     const protocolLoadFn = getProtocol(requestParameters.url);
@@ -322,11 +351,13 @@ export function getJSON<T>(requestParameters: RequestParameters, abortController
   }));
 }
 
-export function getArrayBuffer(requestParameters: RequestParameters, abortController: AbortController): Promise<{ data: ArrayBuffer } & ExpiryData> {
-  return makeRequest(Object.assign(requestParameters, { type: 'arrayBuffer' }), abortController).then(response => ({
-    ...response,
-    data: response.data as ArrayBuffer,
-  }));
+export function getArrayBuffer(requestParameters: RequestParameters, abortController: AbortController): Promise<ResourceResponse<ArrayBuffer>> {
+  return makeRequest(Object.assign(requestParameters, { type: 'arrayBuffer' }), abortController).then(response => response.notModified
+    ? response
+    : {
+        ...response,
+        data: response.data as ArrayBuffer,
+      });
 }
 
 /**

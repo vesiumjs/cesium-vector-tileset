@@ -119,10 +119,8 @@ afterEach(() => {
 });
 
 describe.each(['vector', 'geojson'] as const)('%s tile load generations', (type) => {
-  it.each([
-    ['composite', compositeRadius, compositeColor],
-  ])('renders current constant radius and color after a nonzero %s transition', async (_name, radius, color) => {
-    const { style, source, tile } = fixture(type, radius, color);
+  it('renders current constant radius and color after a nonzero composite transition', async () => {
+    const { style, source, tile } = fixture(type, compositeRadius, compositeColor);
     const published = vi.spyOn(tile, 'loadVectorData');
     const first = source.loadTile!(tile);
     let settled = false;
@@ -131,17 +129,17 @@ describe.each(['vector', 'geojson'] as const)('%s tile load generations', (type)
     style.setPaintProperty('points', 'circle-radius', 10, { validate: false });
     style.setPaintProperty('points', 'circle-color', '#00ff00', { validate: false });
     style.update(new EvaluationParameters(2, { now: 100, transition: { duration: 300 } }));
-    transport.requests[0].resolve(payload(radius, color));
+    transport.requests[0].resolve(payload(compositeRadius, compositeColor));
     await new Promise<void>(resolve => setTimeout(resolve, 0));
     expect(transport.requests).toHaveLength(1);
-    for (const now of [250, 400]) {
+    for (const now of [250, 399]) {
       expect(style.update(new EvaluationParameters(2, { now })).vector).toBe(true);
       await new Promise<void>(resolve => setTimeout(resolve, 0));
       expect(transport.requests).toHaveLength(1);
       expect(settled).toBe(false);
       expect(published).not.toHaveBeenCalled();
     }
-    style.update(new EvaluationParameters(2, { now: 401 }));
+    style.update(new EvaluationParameters(2, { now: 400 }));
     await vi.waitFor(() => expect(transport.requests).toHaveLength(2));
     transport.requests[1].resolve(payload(10, '#00ff00'));
     await first;
@@ -188,10 +186,8 @@ describe.each(['vector', 'geojson'] as const)('%s tile load generations', (type)
     expect(transport.requests).toHaveLength(1);
   });
 
-  it.each([
-    ['source to composite', sourceRadius, compositeRadius],
-  ])('publishes only the current schema and settles all callers after its real parse: %s', async (_name, previous, current) => {
-    const { style, source, tile } = fixture(type, previous);
+  it('publishes only the current composite schema and settles all callers after its real parse', async () => {
+    const { style, source, tile } = fixture(type, sourceRadius);
     const published = vi.spyOn(tile, 'loadVectorData');
     const first = source.loadTile!(tile);
     let settled = false;
@@ -201,24 +197,22 @@ describe.each(['vector', 'geojson'] as const)('%s tile load generations', (type)
       settled = true;
     });
     await vi.waitFor(() => expect(transport.requests).toHaveLength(1));
-    style.setPaintProperty('points', 'circle-radius', current as never, { validate: false });
+    style.setPaintProperty('points', 'circle-radius', compositeRadius as never, { validate: false });
     style.update(new EvaluationParameters(2));
     const second = source.loadTile!(tile);
     const third = source.loadTile!(tile);
     void second.catch(() => {});
     void third.catch(() => {});
-    transport.requests[0].resolve(payload(previous));
+    transport.requests[0].resolve(payload(sourceRadius));
     await vi.waitFor(() => expect(transport.requests).toHaveLength(2));
     expect(settled).toBe(false);
     expect(published).not.toHaveBeenCalled();
-    const newest = payload(current);
+    const newest = payload(compositeRadius);
     transport.requests[1].resolve(newest);
     await Promise.all([first, second, third]);
     expect(tile.state).toBe('loaded');
     expect(published).toHaveBeenCalledExactlyOnceWith(newest, style, ...(type === 'geojson' ? [true] : []));
-    const configuration = (tile.buckets.points as CircleBucket).programConfigurations.get('points');
-    expect(configuration.isCompositeProperty('circle-radius')).toBe(current === compositeRadius);
-    expect(configuration.getAttributeArray('circle-radius')?.length).toBe(Array.isArray(current) ? 1 : undefined);
+    expect(circleStyleForFeature(tile.buckets.points as CircleBucket, 0, 'points', 2.5).sizePx).toBe(9);
     expect(tile.loadPromise).toBeUndefined();
   });
 
@@ -246,7 +240,7 @@ describe.each(['vector', 'geojson'] as const)('%s tile load generations', (type)
     transport.requests[1].resolve(payload(10));
     await Promise.all([first, queued]);
     expect(published).toHaveBeenCalledOnce();
-    expect((tile.buckets.points as CircleBucket).programConfigurations.get('points').getAttributeArray('circle-radius')).toBeUndefined();
+    expect(circleStyleForFeature(tile.buckets.points as CircleBucket, 0).sizePx).toBe(20);
   });
 
   it('keeps all callers pending through a superseded error and rejects them together on a current error', async () => {

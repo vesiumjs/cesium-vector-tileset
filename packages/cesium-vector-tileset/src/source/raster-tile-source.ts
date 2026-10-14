@@ -192,7 +192,8 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
         if ((this.style?.refreshExpiredTiles ?? false) && (response.cacheControl || response.expires)) {
           tile.setExpiryData({ cacheControl: response.cacheControl, expires: response.expires });
         }
-        closeImageBitmap(tile.textureData);
+        // Published pixels are shared with generations and pending Native
+        // uploads. Replacing the Tile's reference does not end those readers.
         tile.textureData = response.data;
         tile.state = 'loaded';
       }
@@ -256,7 +257,8 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
   }
 
   async unloadTile(tile: Tile): Promise<void> {
-    closeImageBitmap(tile.textureData);
+    // Shared pixels become collectible after their last generation/material
+    // reference releases them; this Tile cannot close them independently.
     tile.textureData = undefined;
     tile.unloadVectorData();
   }

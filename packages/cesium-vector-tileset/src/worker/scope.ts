@@ -1,11 +1,11 @@
-import type { GetResourceResponse, RequestParameters } from '../util/ajax';
+import type { RequestParameters, ResourceResponse } from '../util/ajax';
 import type { AddProtocolAction } from '../util/config';
 import type { TileWorker } from './tile-worker';
 
 export interface TileWorkerScope {
   addProtocol: (customProtocol: string, loadFn: AddProtocolAction) => void;
   removeProtocol: (customProtocol: string) => void;
-  makeRequest: (request: RequestParameters, abortController: AbortController) => Promise<GetResourceResponse<unknown>>;
+  makeRequest: (request: RequestParameters, abortController: AbortController) => Promise<ResourceResponse<unknown>>;
   worker: TileWorker;
 }
 

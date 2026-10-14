@@ -217,6 +217,8 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
    * @internal
    */
   private async _updateWorkerData(): Promise<void> {
+    if (this._removed)
+      return;
     if (this._isUpdatingWorker)
       return this._updatePromise;
 
@@ -270,7 +272,13 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
 
     try {
       const options = await optionsPromise;
-      const result = await (await this.channelPromise).sendAsync({ type: MessageType.loadData, data: options });
+      const channel = await this.channelPromise;
+      if (this._removed) {
+        this._isUpdatingWorker = false;
+        this.fire(new SourceDataEvent('dataabort'));
+        return;
+      }
+      const result = await channel.sendAsync({ type: MessageType.loadData, data: options });
       this._isUpdatingWorker = false;
 
       if (this._removed || result.abandoned) {
@@ -292,7 +300,6 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
     }
     catch (err) {
       this._isUpdatingWorker = false;
-
       if (this._removed) {
         this.fire(new SourceDataEvent('dataabort'));
         return;
@@ -425,6 +432,7 @@ export class GeoJSONSource extends Evented<SourceEventType> implements Source {
 
   onRemove(): void {
     this._removed = true;
+    this._pendingWorkerUpdate = {};
     for (const request of this._tileLoads.values())
       request.controller.abort();
     void this.channelPromise

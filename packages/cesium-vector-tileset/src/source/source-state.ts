@@ -103,17 +103,11 @@ export class SourceFeatureState {
       }
     }
     else if (featureId !== undefined) {
-      const updateInQueue = this.stateChanges[sourceLayer]?.[feature];
-      if (updateInQueue) {
-        const featureDeletion: DeletedFeatureState = layerDeletion[feature] = {};
-        for (key in updateInQueue)
-          featureDeletion[key] = null;
-      }
-      else {
-        layerDeletion[feature] = null;
-      }
+      delete this.stateChanges[sourceLayer]?.[feature];
+      layerDeletion[feature] = null;
     }
     else {
+      delete this.stateChanges[sourceLayer];
       this.deletedStates[sourceLayer] = null;
     }
   }
@@ -185,6 +179,8 @@ export class SourceFeatureState {
             this.state[sourceLayer][feature] = {};
           }
           else {
+            if (!this.state[sourceLayer][feature])
+              continue;
             for (const key of Object.keys(featureDeletion))
               delete this.state[sourceLayer][feature][key];
           }

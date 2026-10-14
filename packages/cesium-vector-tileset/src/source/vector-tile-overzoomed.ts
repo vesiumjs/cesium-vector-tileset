@@ -56,7 +56,7 @@ class VectorTileLayerOverzoomed implements VectorTileLayer {
 }
 
 export class VectorTileOverzoomed implements VectorTileData {
-  layers: Record<string, VectorTileLayer> = {};
+  layers: Record<string, VectorTileLayer> = Object.create(null);
 
   addLayer(layer: VectorTileLayer): void {
     this.layers[layer.name] = layer;

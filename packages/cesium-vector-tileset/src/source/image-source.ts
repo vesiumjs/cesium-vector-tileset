@@ -131,14 +131,15 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
   }
 
   async load(newCoordinates?: Coordinates): Promise<void> {
-    this._loaded = false;
-    this.fire(new SourceDataEvent('dataloading'));
-
     const url = this.url;
     if (url === undefined) {
-      throw new Error(`Source "${this.id}" does not load an image URL.`);
+      this._loaded = true;
+      this.finishLoading();
+      return;
     }
 
+    this._loaded = false;
+    this.fire(new SourceDataEvent('dataloading'));
     const requestController = new AbortController();
     this._request = requestController;
     try {
@@ -235,6 +236,10 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
       this._request.abort();
       this._request = undefined;
     }
+    // Published and held generations retain their own pixel references.
+    // Release this source's references without closing borrowed/live images.
+    this.tiles = {};
+    this.image = undefined;
   }
 
   /**
@@ -313,14 +318,22 @@ export class ImageSource extends Evented<SourceEventType> implements Source {
     }
   }
 
-  serialize(): ImageSourceOptions {
-    if (this.url === undefined) {
-      throw new Error(`Source "${this.id}" does not serialize as an image source.`);
+  async unloadTile(tile: Tile): Promise<void> {
+    // A wrap jump can re-key the Tile after it was indexed. Match identity
+    // across aliases so an old release cannot remove a same-wrap successor.
+    for (const wrap in this.tiles) {
+      if (this.tiles[wrap] === tile)
+        delete this.tiles[wrap];
     }
+    tile.textureData = undefined;
+    tile.state = 'unloaded';
+  }
+
+  serialize(): ImageSourceOptions {
     return {
       type: 'image',
-      url: this.url,
       coordinates: this.coordinates,
+      ...(this.url !== undefined ? { url: this.url } : {}),
     };
   }
 

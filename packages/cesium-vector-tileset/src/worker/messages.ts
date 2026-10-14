@@ -5,7 +5,7 @@ import type { TileParameters, WorkerTileParameters, WorkerTileResult } from '../
 import type { StyleGlyph } from '../style/style-glyph';
 import type { MaterializedStyleImage } from '../style/style-image';
 import type { OverscaledTileID } from '../tile/tile-id';
-import type { GetResourceResponse, RequestParameters } from '../util/ajax';
+import type { RequestParameters, ResourceResponse } from '../util/ajax';
 
 /**
  * The result of the call to load a geojson source
@@ -124,7 +124,7 @@ export interface RequestResponseMessageMap {
   [MessageType.removeMap]: [undefined, void];
   [MessageType.removeTile]: [TileParameters, void];
   [MessageType.abortTile]: [TileParameters, void];
-  [MessageType.getResource]: [RequestParameters, GetResourceResponse<unknown>];
+  [MessageType.getResource]: [RequestParameters, ResourceResponse<unknown>];
   [MessageType.getDashes]: [GetDashesParameters, GetDashesResponse];
 }
 
