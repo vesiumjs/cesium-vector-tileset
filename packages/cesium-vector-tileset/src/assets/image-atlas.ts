@@ -166,6 +166,14 @@ export class ImageAtlas {
     if (position.version === image.version)
       return false;
 
+    // Sprite replacements can change dimensions while the worker rebuilds
+    // dependent tiles. Held generations must keep the pixels and layout
+    // their existing geometry references until the rebuilt atlas is ready.
+    if (image.data.width !== position.paddedRect.w - IMAGE_PADDING * 2
+      || image.data.height !== position.paddedRect.h - IMAGE_PADDING * 2) {
+      return false;
+    }
+
     position.version = image.version;
     // Runtime image updates may keep the bitmap dimensions but change the
     // device-pixel ratio. Pattern display size is derived from this metadata,

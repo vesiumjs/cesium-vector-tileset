@@ -40,16 +40,6 @@ function borrowedTexture(texture: SharedTexture): SharedTexture {
   }) as SharedTexture;
 }
 
-/**
- * Shared atlas textures. By default every Material mints its own GPU texture
- * from its canvas uniform (Cesium Material creates one texture per material on first render
- * and never re-uploads a mutated canvas), so one sprite atlas costs
- * tiles x layers full-size uploads. This registry collapses that to one GPU
- * texture per atlas key: materials keep their canvas uniform until
- * a GL context is available, then adopt the shared texture (which Cesium's
- * Material uses verbatim, no upload).
- */
-
 export interface AtlasRectLike {
   tlbr: readonly [number, number, number, number];
   pixelRatio: number;
@@ -69,16 +59,9 @@ export function atlasLayoutKey(positions: Record<string, AtlasRectLike>): string
 }
 
 interface SharedAtlasRecord {
-  canvas: HTMLCanvasElement | OffscreenCanvas;
+  source: AtlasUploadSource;
   width: number;
   height: number;
-  /**
-   * Typed-array upload source preferred over the canvas on adopt (zero
-   * canvas readback: single-channel glyph bytes upload as R8 instead of an
-   * expanded RGBA canvas). The canvas stays authoritative for tests and
-   * pre-adopt sampling.
-   */
-  direct?: { view: ArrayBufferView; pixelFormat: PixelFormat; width: number; height: number };
   texture?: SharedTexture;
   sampler?: SharedTexture;
   refs: number;
@@ -92,13 +75,17 @@ interface AtlasBinding {
 }
 
 type AtlasCanvas = HTMLCanvasElement | OffscreenCanvas;
+type AtlasUploadSource = { type: 'canvas'; canvas: AtlasCanvas } | {
+  type: 'bytes';
+  view: Uint8Array | Uint8ClampedArray;
+  pixelFormat: PixelFormat;
+};
 
 /**
- * One GPU texture per unique atlas content, shared by every material that
- * samples it. Canvas-first (no GL context needed at publish), texture
- * adoption happens in {@link SharedAtlasTextures.adopt} once the tileset hands
- * down its frame context - strictly before the first render of the frame, so
- * a shared material never pays the per-material upload it was created with.
+ * Own one GPU texture per retained atlas and lend it to every sampling material.
+ * Source registration needs no GL context; adopt() uploads dirty retained
+ * sources when a Native context is available. Canvas suppliers stay lazy,
+ * and typed glyph pixels never require a canvas intermediary.
  */
 export class SharedAtlasTextures {
   private readonly _options: { premultiplyAlpha: boolean };
@@ -125,32 +112,41 @@ export class SharedAtlasTextures {
   canvas(key: string, width: number, height: number, create: () => AtlasCanvas): AtlasCanvas {
     let record = this._records.get(key);
     if (!record) {
-      record = { canvas: create(), width, height, refs: 0, pending: new Set() };
+      record = { source: { type: 'canvas', canvas: create() }, width, height, refs: 0, pending: new Set() };
       this._records.set(key, record);
     }
-    return record.canvas;
+    if (record.source.type !== 'canvas')
+      throw new TypeError(`Atlas ${key} is registered as bytes`);
+    return record.source.canvas;
   }
 
   has(key: string): boolean {
     return this._records.has(key);
   }
 
-  /**
-   * Prefer a typed-array upload for `key` on adopt (see SharedAtlasRecord.direct).
-   * The canvas remains for tests and pre-adopt sampling; the GPU texture
-   * comes straight from bytes (no expansion, no readback, smaller upload).
-   */
-  setDirectUpload(
+  /** Register immutable pixels without allocating a canvas or a GPU texture. */
+  bytes(
     key: string,
-    view: ArrayBufferView,
+    view: Uint8Array | Uint8ClampedArray,
     pixelFormat: PixelFormat,
     width: number,
     height: number,
   ): void {
     const record = this._records.get(key);
     if (record) {
-      record.direct = { view, pixelFormat, width, height };
+      if (record.source.type !== 'bytes' || record.source.view !== view
+        || record.source.pixelFormat !== pixelFormat || record.width !== width || record.height !== height) {
+        throw new TypeError(`Atlas ${key} already has a different immutable source`);
+      }
+      return;
     }
+    this._records.set(key, {
+      source: { type: 'bytes', view, pixelFormat },
+      width,
+      height,
+      refs: 0,
+      pending: new Set(),
+    });
   }
 
   /** Retain the shared atlas for one tile entry (or build). */
@@ -166,7 +162,7 @@ export class SharedAtlasTextures {
 
   /**
    * Record that `material` samples `key` through `uniform`. Adoption swaps
-   * the canvas uniform for the shared texture on the next adopt() call.
+   * the image sampler uniform for the shared texture on the next adopt() call.
    */
   track(key: string, material: Material, uniform: string): void {
     const record = this._records.get(key);
@@ -193,12 +189,10 @@ export class SharedAtlasTextures {
 
   /**
    * Adopt newly tracked samplers of retained atlases. Idle frames do no
-   * record or material traversal. Runs in the tileset update with the frame context, which
-   * precedes command execution - so the per-material canvas texture Cesium
-   * would otherwise mint is never created. Records with zero refs (in-flight
-   * builds not yet committed) are skipped: their textures materialize once
-   * an entry retains them. Context-free environments (unit tests) skip
-   * adoption and keep rendering through the canvas uniforms.
+   * record or material traversal. A retained build or entry owns the texture;
+   * material destruction only releases its borrowed sampler. Records without
+   * a hold do not enter the dirty set. Context-free environments skip adoption
+   * and allocate no GPU texture.
    */
   adopt(context: { [key: string]: unknown } | undefined): void {
     if (this._dirty.size === 0 || !(context instanceof Context)) {
@@ -219,19 +213,19 @@ export class SharedAtlasTextures {
         continue;
       }
       if (!record.texture) {
-        record.texture = record.direct
+        record.texture = record.source.type === 'bytes'
           ? new Texture({
               context: context as never,
               source: {
-                arrayBufferView: record.direct.view,
-                width: record.direct.width,
-                height: record.direct.height,
+                arrayBufferView: record.source.view,
+                width: record.width,
+                height: record.height,
               } as never,
-              pixelFormat: record.direct.pixelFormat,
+              pixelFormat: record.source.pixelFormat,
             })
           : new Texture({
               context: context as never,
-              source: record.canvas as never,
+              source: record.source.canvas as never,
               preMultiplyAlpha: this._options.premultiplyAlpha,
             });
         record.sampler = borrowedTexture(record.texture);

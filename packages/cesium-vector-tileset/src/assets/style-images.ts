@@ -1,7 +1,7 @@
 import type { MaterializedStyleImage, StyleImage } from '../style/style-image';
 import type { GetImagesResponse } from '../worker/messages';
 import { renderStyleImage } from '../style/style-image';
-import { warnOnce } from '../util/errors';
+import { ensureError, warnOnce } from '../util/errors';
 import { ErrorEvent, Evented } from '../util/evented';
 
 import { StyleImageMissingEvent } from '../util/events';
@@ -181,14 +181,21 @@ export class StyleImages extends Evented {
   }
 
   updateImage(id: string, image: StyleImage, validate: boolean = true): void {
-    const oldImage = this.getImage(id);
+    // Replaced lazy sprite pixels have no consumer. Read their size metadata
+    // directly instead of materializing data that is immediately discarded.
+    const oldImage = this.images[id];
     if (!oldImage)
       throw new Error(`Image id ${id} does not exist, use addImage instead`);
     const data = hasImageData(image) ? image.data : image.spriteData;
     if (!data)
       throw new Error(`Image "${id}" has no pixel or sprite data`);
-    if (validate && (oldImage.data.width !== data.width || oldImage.data.height !== data.height)) {
-      throw new Error(`size mismatch between old image (${oldImage.data.width}x${oldImage.data.height}) and new image (${data.width}x${data.height}).`);
+    if (validate) {
+      const oldData = oldImage.data ?? oldImage.spriteData;
+      if (!oldData)
+        throw new Error(`Image "${id}" has no pixel or sprite data`);
+      if (oldData.width !== data.width || oldData.height !== data.height) {
+        throw new Error(`size mismatch between old image (${oldData.width}x${oldData.height}) and new image (${data.width}x${data.height}).`);
+      }
     }
     image.version = ++this.imageUpdateRevision;
     this.images[id] = image;
@@ -244,7 +251,15 @@ export class StyleImages extends Evented {
     const resolver = this.missingImageResolver;
 
     if (resolver) {
-      await Promise.all(Array.from(unresolvedIds, id => resolver(id)));
+      const ids = Array.from(unresolvedIds);
+      const results = await Promise.allSettled(ids.map(async (id) => {
+        await resolver(id);
+      }));
+      for (const [index, result] of results.entries()) {
+        if (result.status === 'rejected') {
+          this.fire(new ErrorEvent(ensureError(result.reason), { id: ids[index] }));
+        }
+      }
     }
 
     const response: GetImagesResponse = {};
