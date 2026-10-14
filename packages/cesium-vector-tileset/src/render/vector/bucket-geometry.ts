@@ -11,12 +11,13 @@ import { subdivideTriangles, subdivideVertexLine, surfaceGranularity, visitSubdi
 import { tileLocalToWgs84Ecef } from '../geometry/tile-to-ecef';
 import { prepareLineGeometry } from '../line/prepared-line-geometry';
 import { isPatternStyleLayer } from '../pattern/pattern-layer';
-import { MORPHING, SCENE3D } from '../scene/scene-mode';
+import { COLUMBUS_VIEW, MORPHING, SCENE3D } from '../scene/scene-mode';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
 const fillGeometryCache = new WeakMap<FillBucket, Map<string, FillPrimitiveGeometry[]>>();
 const lineGeometryCache = new WeakMap<LineBucket, Map<string, LinePrimitiveGeometry[]>>();
+const emptyTriangles = new Uint32Array();
 
 /** Project the parser's bucket-owned geometry before WorkerChannel transfer. */
 export function projectWorkerBuckets(buckets: readonly Bucket[], tileID: OverscaledTileID): void {
@@ -28,6 +29,7 @@ export function projectWorkerBuckets(buckets: readonly Bucket[], tileID: Oversca
     if (bucket instanceof FillBucket) {
       const projected = bucket.projectedGeometry ??= {};
       projected.fill = projectFillGeometry(fillBucketPrimitives(bucket, tileID, SCENE3D));
+      projected.fillPlanar = projectFillGeometry(fillBucketPrimitives(bucket, tileID, COLUMBUS_VIEW));
       // The packed owner replaces the per-polygon projection buffers.
       fillGeometryCache.delete(bucket);
     }
@@ -167,6 +169,7 @@ function outlinePointsForPolygon(
   localPositions: Array<[number, number]>,
   holes: number[],
   granularity: number,
+  clipX: boolean,
 ): Array<Array<[number, number]>> {
   const starts = [0, ...holes];
   const paths: Array<Array<[number, number]>> = [];
@@ -175,7 +178,7 @@ function outlinePointsForPolygon(
     const end = starts[ring + 1] ?? localPositions.length;
     const points = localPositions.slice(start, end);
     const sampled = subdivideVertexLine(points, granularity, true);
-    for (const current of clipPathToTileX(sampled)) {
+    for (const current of clipX ? clipPathToTileX(sampled) : [sampled]) {
       paths.push(current);
     }
   }
@@ -205,15 +208,16 @@ function projectFillOutlines(bucket: FillBucket, tileID: TileID): ProjectedGeome
   }
   const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
   projected.fillOutlines = projectOutlineTopology(bucket, canonical, surfaceGranularity('fill', canonical.z, SCENE3D));
-  projected.fillPlanarOutlines = projectOutlineTopology(bucket, canonical, 1);
+  projected.fillPlanarOutlines = projectOutlineTopology(bucket, canonical, 1, false);
   return projected.fillOutlines;
 }
 
-function projectOutlineTopology(bucket: FillBucket, tileID: CanonicalTileID, granularity: number): ProjectedGeometryList<readonly FillOutlinePath[]> {
+function projectOutlineTopology(bucket: FillBucket, tileID: CanonicalTileID, granularity: number, clipX = true): ProjectedGeometryList<readonly FillOutlinePath[]> {
   const polygons = bucket.polygons.map((polygon, polygonIndex) => outlinePointsForPolygon(
     polygonPositions(bucket, polygonIndex),
     polygon.holes,
     granularity,
+    clipX,
   ));
   let count = 0;
   for (const paths of polygons) {
@@ -252,7 +256,7 @@ function projectOutlineTopology(bucket: FillBucket, tileID: CanonicalTileID, gra
 /** Consume the bucket's original rings, shared across fill surface variants. */
 export function fillOutlinePaths(
   bucket: FillBucket,
-  primitive: FillPrimitiveGeometry,
+  polygon: Pick<FillPrimitiveGeometry, 'polygonIndex' | 'subdivision'>,
   mode?: number,
 ): readonly FillOutlinePath[] {
   const outlines = mode === undefined || mode === SCENE3D || mode === MORPHING
@@ -260,16 +264,16 @@ export function fillOutlinePaths(
     : bucket.projectedGeometry?.fillPlanarOutlines;
   if (!outlines)
     throw new TypeError('fill geometry requires projected source outlines');
-  const paths = outlines.get(primitive.polygonIndex);
-  if (primitive.subdivision !== 1)
+  const paths = outlines.get(polygon.polygonIndex);
+  if (polygon.subdivision !== 1)
     return paths;
-  const group = bucket.polygons[primitive.polygonIndex].polygonGroupId;
-  let end = primitive.polygonIndex + 1;
+  const group = bucket.polygons[polygon.polygonIndex].polygonGroupId;
+  let end = polygon.polygonIndex + 1;
   while (end < bucket.polygons.length && bucket.polygons[end].polygonGroupId === group)
     end++;
-  return end === primitive.polygonIndex + 1
+  return end === polygon.polygonIndex + 1
     ? paths
-    : Array.from({ length: end - primitive.polygonIndex }, (_, index) => outlines.get(primitive.polygonIndex + index)).flat();
+    : Array.from({ length: end - polygon.polygonIndex }, (_, index) => outlines.get(polygon.polygonIndex + index)).flat();
 }
 
 /**
@@ -288,21 +292,28 @@ export function fillBucketPrimitives(
   bucket: FillBucket,
   tileID: TileID,
   mode: number | undefined,
+  output: 'drape',
+): FillPrimitiveGeometry[];
+export function fillBucketPrimitives(
+  bucket: FillBucket,
+  tileID: TileID,
+  mode: number | undefined,
   output: 'pattern',
 ): FillPatternGeometry[];
 export function fillBucketPrimitives(
   bucket: FillBucket,
   tileID: TileID,
   mode?: number,
-  output?: 'pattern',
+  output?: 'pattern' | 'drape',
 ): FillPrimitiveGeometry[] {
   if (output !== 'pattern') {
     projectFillOutlines(bucket, tileID);
   }
   const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
-  const subdivision = mode === undefined ? 1 : surfaceGranularity('fill', canonical.z, mode);
-  const surfaceKey = geometryCacheKey(tileID, subdivision);
-  const key = output === 'pattern' ? `${surfaceKey}/pattern` : surfaceKey;
+  const subdivision = output === 'drape' || mode === undefined ? 1 : surfaceGranularity('fill', canonical.z, mode);
+  const pixelMask = mode !== undefined && mode !== SCENE3D && mode !== MORPHING && output !== 'drape';
+  const surfaceKey = `${geometryCacheKey(tileID, subdivision)}${pixelMask ? '/pixel-mask' : ''}`;
+  const key = output ? `${surfaceKey}/${output}` : surfaceKey;
   let bucketCache = fillGeometryCache.get(bucket);
   const cached = bucketCache?.get(key);
   if (cached) {
@@ -362,11 +373,40 @@ export function fillBucketPrimitives(
       continue;
     }
 
+    if (output === 'drape') {
+      // Native terrain packing consumes closed rings, never triangle indices.
+      // Recover source topology before curved subdivision; chunk vertices and
+      // clipped components cannot be interpreted as one ring in buffer order.
+      const sourcePoints = chunks.flatMap((_chunk, index) => polygonPositions(bucket, firstPolygonIndex + index));
+      const clipped = clipPlanarFill(sourcePoints, triangles, { triangulate: false });
+      const positions = new Float64Array(clipped.points.length * 3);
+      for (const [index, [x, y]] of clipped.points.entries()) {
+        const cartesian = tileLocalToWgs84Ecef(tileID, x, y);
+        positions[index * 3] = cartesian.x;
+        positions[index * 3 + 1] = cartesian.y;
+        positions[index * 3 + 2] = cartesian.z;
+      }
+      for (const component of clipped.polygons) {
+        primitives.push({
+          positions: positions.subarray(component.vertexOffset * 3, (component.vertexOffset + component.vertexCount) * 3),
+          ringVertexCount: component.vertexCount,
+          holes: component.holes,
+          triangles: emptyTriangles,
+          polygonIndex: firstPolygonIndex,
+          subdivision,
+          featureIndex: polygon.featureIndex,
+        });
+      }
+      continue;
+    }
+
     let positions: Float64Array;
     let tilePositions: Float64Array | undefined;
     let indices: Uint32Array;
     const surface = surfacePrimitives?.[primitives.length];
-    const tessellate = subdivision >= 2 || outsideTile;
+    // Planar pixel masks clip after paint translation. Retain the Worker
+    // buffer so an edge can move into its original tile without a rebuild.
+    const tessellate = subdivision >= 2 || (!pixelMask && outsideTile);
     if (!tessellate) {
       positions = surface?.positions ?? positionsToEcef(
         bucket,

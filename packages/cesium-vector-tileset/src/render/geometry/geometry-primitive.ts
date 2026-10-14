@@ -14,6 +14,7 @@ import { createGeometryPacket, geometryPacketEnd } from './geometry-packet';
 import { GeometryPrepareWorker } from './geometry-prepare-worker';
 import { LineGeometryUpload } from './line-geometry-upload';
 import { lineInputs } from './line-input';
+import { mercatorTranslationPadding } from './mercator-translation';
 import { geometryContextLimits, primitivePipeline, primitiveState } from './primitive-pipeline';
 import { packSurfacePositions } from './surface-position';
 
@@ -176,12 +177,6 @@ export class GeometryPrimitive extends RuntimePrimitive {
 
   private _linePositions?: LinePositionTexture;
 
-  private readonly _lineOffsetMeters: number;
-
-  private _lineBoundingSpheres?: WeakMap<BoundingSphere, BoundingSphere>;
-
-  private _expandedCommands?: WeakMap<object, DrawCommandReplay>;
-
   private _lineUpload?: LineGeometryUpload;
 
   private _lineUploadSteps?: Generator<void>;
@@ -208,7 +203,7 @@ export class GeometryPrimitive extends RuntimePrimitive {
 
   private readonly _appearanceForMode?: GeometryAppearanceForMode;
 
-  constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices'>, layout: GeometryLayout, lineOffsetMeters = 0, appearanceForMode?: GeometryAppearanceForMode) {
+  constructor(options: Pick<NonNullable<ConstructorParameters<typeof Primitive>[0]>, 'geometryInstances' | 'appearance' | 'vertexCacheOptimize' | 'compressVertices'>, layout: GeometryLayout, appearanceForMode?: GeometryAppearanceForMode) {
     if (layout !== 'native' && layout !== 'extrusion' && Array.isArray(options.geometryInstances) && options.geometryInstances.length > 65536) {
       throw new RangeError('geometry instance IDs exceed unsigned 16-bit range');
     }
@@ -218,7 +213,6 @@ export class GeometryPrimitive extends RuntimePrimitive {
     // expanded strip against that sphere (especially in the narrow pick view).
     super({ ...options, allowPicking: true, asynchronous: true, releaseGeometryInstances: true, cull: layout === 'native' || layout === 'extrusion' || layout === 'surface-planar' || layout === 'surface-morph' });
     this._layout = layout;
-    this._lineOffsetMeters = Math.abs(lineOffsetMeters);
     this._sourceAppearance = options.appearance;
     this._appearanceForMode = appearanceForMode;
   }
@@ -528,32 +522,6 @@ export class GeometryPrimitive extends RuntimePrimitive {
         });
       }
     }
-    // Native still partitions depth with its world sphere when cull=false.
-    // Enclose every layer's shader height without mutating Native's raw bounds
-    // or applying the model matrix's scale to a displacement in world metres.
-    if (this._lineOffsetMeters > 0 && commands) {
-      const bounds = this._lineBoundingSpheres ??= new WeakMap<BoundingSphere, BoundingSphere>();
-      const replays = this._expandedCommands ??= new WeakMap<object, DrawCommandReplay>();
-      for (let index = firstCommand; index < commands.length; index++) {
-        const command = commands[index];
-        const source = command.boundingVolume;
-        if (!source)
-          continue;
-        let sphere = bounds.get(source);
-        if (!sphere) {
-          sphere = new BoundingSphere();
-          bounds.set(source, sphere);
-        }
-        BoundingSphere.clone(source, sphere);
-        sphere.radius += this._lineOffsetMeters;
-        let replay = replays.get(command);
-        if (!replay) {
-          replay = new DrawCommandReplay(command);
-          replays.set(command, replay);
-        }
-        commands[index] = replay.update(command, sphere);
-      }
-    }
     if (this._batchTable) {
       this._inputInstances = undefined;
       this._inputAttributeCache = undefined;
@@ -814,8 +782,6 @@ export class GeometryPrimitive extends RuntimePrimitive {
     this._lineUpload = undefined;
     this._linePositions?.destroy();
     this._linePositions = undefined;
-    this._lineBoundingSpheres = undefined;
-    this._expandedCommands = undefined;
     (this as NativePrimitiveRuntime).geometryInstances = undefined;
     this._geometries = undefined;
     this._createGeometryResults = undefined;
@@ -875,6 +841,53 @@ export class GeometryPrimitive extends RuntimePrimitive {
           this._ready = true;
         return true;
       });
+    }
+  }
+}
+
+/** Solid and patterned extrusion commands share translation and depth bounds. */
+export class ExtrusionGeometryPrimitive extends GeometryPrimitive {
+  private readonly _maxHeight: number;
+  private readonly _translationAppearance: ExtrusionAppearance;
+  private readonly _bounds = new WeakMap<BoundingSphere, BoundingSphere>();
+  private readonly _commands = new WeakMap<object, DrawCommandReplay>();
+
+  constructor(options: { geometryInstances: GeometryInstance[]; appearance: ExtrusionAppearance; compressVertices?: boolean }) {
+    super(options, 'extrusion');
+    this._translationAppearance = options.appearance;
+    this._maxHeight = options.geometryInstances.reduce((height, instance) => {
+      const shape = instance.attributes.extrusionShape.value;
+      return Math.max(height, shape[0], shape[1]);
+    }, 0);
+  }
+
+  override update(frameState?: GeometryFrame): void {
+    if (frameState)
+      Object.assign(this._translationAppearance.uniforms, { u_extrusionMercator: frameState.mapProjection instanceof WebMercatorProjection });
+    const start = frameState?.commandList?.length ?? 0;
+    super.update(frameState);
+    const translate = this._translationAppearance.translation;
+    if (!frameState?.commandList || (translate.x === 0 && translate.y === 0))
+      return;
+    const padding = mercatorTranslationPadding(translate, frameState.mapProjection.ellipsoid, frameState.mode, this._maxHeight);
+    for (let index = start; index < frameState.commandList.length; index++) {
+      const command = frameState.commandList[index] as { owner?: object; boundingVolume?: BoundingSphere };
+      const source = command.boundingVolume;
+      if (command.owner !== this || !source)
+        continue;
+      let bounds = this._bounds.get(source);
+      if (!bounds) {
+        bounds = new BoundingSphere();
+        this._bounds.set(source, bounds);
+      }
+      BoundingSphere.clone(source, bounds);
+      bounds.radius += padding;
+      let replay = this._commands.get(command);
+      if (!replay) {
+        replay = new DrawCommandReplay(command);
+        this._commands.set(command, replay);
+      }
+      frameState.commandList[index] = replay.update(command, bounds);
     }
   }
 }

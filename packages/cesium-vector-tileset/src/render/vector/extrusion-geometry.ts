@@ -1,13 +1,30 @@
-import type { SceneMode } from 'cesium';
+import type { Cartesian2, SceneMode } from 'cesium';
 import type { FillExtrusionBucket } from '../../data/bucket-runtime';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
 import type { ExtrusionFeatureStyle } from './feature-attributes';
 import { latFromMercatorY, lngFromMercatorX } from '../../geo/mercator-coordinate';
+import { EvaluationParameters } from '../../style/evaluation-parameters';
+import { FillExtrusionStyleLayer } from '../../style/style-layer/fill-extrusion-style-layer';
 import { subdivideTriangles, surfaceGranularity } from '../geometry/surface-subdivision';
 import { tileLocalToMercatorFraction, WGS84_A, WGS84_F } from '../geometry/tile-to-ecef';
 import { extrusionStyleForFeature } from './feature-attributes';
 
 type TileID = CanonicalTileID | OverscaledTileID;
+
+/** Retain the committed camera tree and transition time before Style mutation. */
+export function freezeExtrusionTranslation(layer: FillExtrusionStyleLayer) {
+  const held = new FillExtrusionStyleLayer({ id: layer.id, type: 'fill-extrusion', source: layer.source! }, {});
+  held._transitioningPaint = layer._transitioningPaint.snapshot(['fill-extrusion-translate', 'fill-extrusion-translate-anchor']);
+  const now = layer.paint.get('fill-extrusion-height').parameters.now;
+  let evaluatedZoom: number | undefined;
+  return (zoom: number) => {
+    if (evaluatedZoom !== zoom) {
+      held.recalculate(new EvaluationParameters(zoom, { now }), []);
+      evaluatedZoom = zoom;
+    }
+    return { pixels: held.paint.get('fill-extrusion-translate'), viewport: held.paint.get('fill-extrusion-translate-anchor') === 'viewport' };
+  };
+}
 
 /**
  * Fill-extrusion geometry extraction.
@@ -29,7 +46,24 @@ export interface ExtrusionLighting {
   position: [number, number, number];
   color: { red: number; green: number; blue: number };
   intensity: number;
+  /** Present for viewport anchor; shared camera rotation stays live across generations. */
+  viewportRotation?: Cartesian2;
 }
+
+/** Shared MapLibre Rz(+bearing) rule; each owner retains its own anchor. */
+export const EXTRUSION_LIGHT_ROTATION_SHADER = `
+uniform vec2 u_extrusionLightRotation;
+uniform bool u_extrusionLightViewport;
+vec3 cvt_extrusionLightPosition()
+{
+    vec3 position = u_extrusionLightPosition;
+    if (u_extrusionLightViewport) {
+        vec2 rotation = u_extrusionLightRotation;
+        position.xy = mat2(rotation.x, rotation.y, -rotation.y, rotation.x) * position.xy;
+    }
+    return position;
+}
+`;
 
 interface ExtrusionGeometry {
   /** ECEF positions, 3 doubles per vertex */
@@ -38,22 +72,23 @@ interface ExtrusionGeometry {
   triangles: Uint32Array;
   vertexCount: number;
   featureIndex: number;
+  /** Source face normal with its top bit removed from x. */
+  normals: Float32Array;
+  /** Continuous source top/bottom weight after subdivision. */
+  topWeights: Float32Array;
+  style: ExtrusionFeatureStyle;
 }
 
 export interface ExtrusionPrimitiveGeometry extends ExtrusionGeometry {
   /** Tile-local positions consumed by pattern UV construction. */
   tilePositions: Float64Array;
+  /** Source layout edge distance, continuously interpolated within each face. */
+  edgeDistances: Float32Array;
   /** Rounded source lighting, with subdivision interpolation baked into bytes. */
   vertexColors?: Uint8Array;
 }
 
-interface SolidExtrusionPrimitiveGeometry extends ExtrusionGeometry {
-  /** Packed normal values in FLOAT storage, avoiding Native IDL truncation. */
-  normals: Float32Array;
-  /** Continuous interpolation of the source top bit after subdivision. */
-  topWeights: Float32Array;
-  style: ExtrusionFeatureStyle;
-}
+type SolidExtrusionPrimitiveGeometry = ExtrusionGeometry;
 
 const FACTOR = 2 ** 13;
 
@@ -65,6 +100,10 @@ const FACTOR = 2 ** 13;
  */
 function createVertexColorWriter(style: ExtrusionFeatureStyle, lighting: ExtrusionLighting): (colors: Uint8Array, offset: number, a0: number, a1: number, a2: number) => void {
   const { color, base, height, verticalGradient } = style;
+  const rotation = lighting.viewportRotation;
+  const [x, y, z] = lighting.position;
+  const lightX = rotation ? rotation.x * x - rotation.y * y : x;
+  const lightY = rotation ? rotation.y * x + rotation.x * y : y;
   const alpha = Math.round(color.alpha * 255);
   // Relative luminance of the (pre-ambient) surface color.
   const colorvalue = color.red * 0.2126 + color.green * 0.7152 + color.blue * 0.0722;
@@ -77,9 +116,9 @@ function createVertexColorWriter(style: ExtrusionFeatureStyle, lighting: Extrusi
     const nx = Math.floor(a0 / 2) / FACTOR;
     const ny = a1 / (2 * FACTOR);
     const nz = a2 / (2 * FACTOR);
-    let directional = Math.max(0, Math.min(1, nx * lighting.position[0]
-      + ny * lighting.position[1]
-      + nz * lighting.position[2]));
+    let directional = Math.max(0, Math.min(1, nx * lightX
+      + ny * lightY
+      + nz * z));
     // Intensity compression: mix(1 - intensity, max(1 - colorvalue +
     // intensity, 1), directional) - the range of highlight/shade values
     // narrows with lower light intensity and brighter surface colors.
@@ -256,6 +295,7 @@ export function* iterateExtrusionBucketPrimitives(
     let primitiveColors: Uint8Array | undefined;
     let primitiveNormals: Float32Array | undefined;
     let primitiveTopWeights: Float32Array | undefined;
+    let primitiveEdgeDistances: Float32Array | undefined;
     if (subdivision > 1) {
       const localPoints: Array<[number, number]> = [];
       const sourceColors = writeColor ? new Uint8Array(vertexCount * 4) : undefined;
@@ -281,8 +321,9 @@ export function* iterateExtrusionBucketPrimitives(
       primitivePositions = new Float64Array(subdividedVertexCount * 3);
       primitiveTilePositions = output === 'surface' ? new Float64Array(subdividedVertexCount * 2) : undefined;
       primitiveColors = writeColor ? new Uint8Array(subdividedVertexCount * 4) : undefined;
-      primitiveNormals = output === 'solid' ? new Float32Array(subdividedVertexCount * 3) : undefined;
-      primitiveTopWeights = output === 'solid' ? new Float32Array(subdividedVertexCount) : undefined;
+      primitiveNormals = new Float32Array(subdividedVertexCount * 3);
+      primitiveTopWeights = new Float32Array(subdividedVertexCount);
+      primitiveEdgeDistances = output === 'surface' ? new Float32Array(subdividedVertexCount) : undefined;
       primitiveTriangles = new Uint32Array(subdivided.indices);
       for (let i = 0; i < subdividedVertexCount; i++) {
         const vertex = subdivided.vertices[i];
@@ -305,6 +346,12 @@ export function* iterateExtrusionBucketPrimitives(
             top += (int16[(range.start + vertex.sourceIndices[source]) * 6 + 2] & 1) * vertex.weights[source];
           }
           primitiveTopWeights[i] = top;
+          if (primitiveEdgeDistances) {
+            let distance = 0;
+            for (let source = 0; source < 3; source++)
+              distance += int16[(range.start + vertex.sourceIndices[source]) * 6 + 5] * vertex.weights[source];
+            primitiveEdgeDistances[i] = distance;
+          }
         }
         if (primitiveTilePositions) {
           primitiveTilePositions[i * 2] = vertex.x;
@@ -330,8 +377,9 @@ export function* iterateExtrusionBucketPrimitives(
       primitivePositions = new Float64Array(vertexCount * 3);
       primitiveTilePositions = output === 'surface' ? new Float64Array(vertexCount * 2) : undefined;
       primitiveColors = writeColor ? new Uint8Array(vertexCount * 4) : undefined;
-      primitiveNormals = output === 'solid' ? new Float32Array(vertexCount * 3) : undefined;
-      primitiveTopWeights = output === 'solid' ? new Float32Array(vertexCount) : undefined;
+      primitiveNormals = new Float32Array(vertexCount * 3);
+      primitiveTopWeights = new Float32Array(vertexCount);
+      primitiveEdgeDistances = output === 'surface' ? new Float32Array(vertexCount) : undefined;
       primitiveTriangles = new Uint32Array(triangleValues);
       for (let i = 0; i < vertexCount; i++) {
         const sourceOffset = (range.start + i) * 6;
@@ -344,6 +392,8 @@ export function* iterateExtrusionBucketPrimitives(
           primitiveNormals[i * 3 + 1] = int16[sourceOffset + 3];
           primitiveNormals[i * 3 + 2] = int16[sourceOffset + 4];
           primitiveTopWeights[i] = a0 & 1;
+          if (primitiveEdgeDistances)
+            primitiveEdgeDistances[i] = int16[sourceOffset + 5];
         }
         if (primitiveTilePositions) {
           primitiveTilePositions[i * 2] = x;
@@ -373,6 +423,10 @@ export function* iterateExtrusionBucketPrimitives(
       yield {
         positions: primitivePositions,
         tilePositions: primitiveTilePositions!,
+        normals: primitiveNormals!,
+        topWeights: primitiveTopWeights!,
+        edgeDistances: primitiveEdgeDistances!,
+        style,
         triangles: primitiveTriangles,
         vertexColors: primitiveColors,
         vertexCount: primitivePositions.length / 3,

@@ -1,6 +1,6 @@
 import type { Rectangle } from 'cesium';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
-import { BoundingSphere, Ellipsoid, WebMercatorTilingScheme } from 'cesium';
+import { BoundingSphere, Cartesian3, Ellipsoid, WebMercatorTilingScheme } from 'cesium';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
@@ -28,6 +28,13 @@ export function tileRectangle(tileID: TileID): Rectangle {
  */
 export function tileBoundingSphere(tileID: TileID): BoundingSphere {
   const sphere = BoundingSphere.fromRectangle3D(tileRectangle(tileID), Ellipsoid.WGS84, 0);
+  const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
+  // Globe tile meshes include their polar cap. Keep tileRectangle finite
+  // because projected CV bounds use its Mercator footprint independently.
+  if (canonical.y === 0)
+    BoundingSphere.expand(sphere, new Cartesian3(0, 0, Ellipsoid.WGS84.radii.z), sphere);
+  if (canonical.y === 2 ** canonical.z - 1)
+    BoundingSphere.expand(sphere, new Cartesian3(0, 0, -Ellipsoid.WGS84.radii.z), sphere);
   sphere.radius = sphere.radius * 1.001 + 1;
   return sphere;
 }

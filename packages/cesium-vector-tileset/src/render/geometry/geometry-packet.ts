@@ -125,6 +125,12 @@ function indexDatatype(indices: GeometryIndices): ComponentDatatype {
 }
 
 function* copyValues(source: GeometryAttribute['values'], target: GeometryValues, copying: { remaining: number }): Generator<void> {
+  const bytes = source.length * target.BYTES_PER_ELEMENT;
+  if (bytes <= copying.remaining) {
+    target.set(source);
+    copying.remaining -= bytes;
+    return;
+  }
   let offset = 0;
   while (offset < source.length) {
     const quantum = Math.floor(copying.remaining / target.BYTES_PER_ELEMENT);

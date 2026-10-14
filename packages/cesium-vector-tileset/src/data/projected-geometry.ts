@@ -58,6 +58,8 @@ export interface ProjectedGeometryList<T> extends Iterable<T> {
 
 export interface ProjectedBucketGeometry {
   fill?: ProjectedGeometryList<FillPrimitiveGeometry>;
+  /** Full planar buffer; fixed tile pixels are clipped after paint translation. */
+  fillPlanar?: ProjectedGeometryList<FillPrimitiveGeometry>;
   /** Polygon-indexed subdivided rings shared by globe/morph family layers. */
   fillOutlines?: ProjectedGeometryList<readonly FillOutlinePath[]>;
   /** Original unsampled rings shared by planar family layers. */

@@ -202,25 +202,14 @@ function vertexKey(point: SubdividedVertex): string {
   return `${point.x}:${point.y}`;
 }
 
-function edgePointAt(
-  from: SubdividedVertex,
-  to: SubdividedVertex,
-  point: TilePoint,
-): SubdividedVertex {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const t = Math.abs(dx) >= Math.abs(dy)
-    ? (Math.abs(dx) < 1e-12 ? 0 : (point[0] - from.x) / dx)
-    : (Math.abs(dy) < 1e-12 ? 0 : (point[1] - from.y) / dy);
-  return interpolate(from, to, Math.max(0, Math.min(1, t)));
-}
-
 /**
  * Extrusion side faces are triangles in 3D but collapse to a line in tile
  * coordinates: two vertices often share x/y while their heights differ. A
  * polygon clipper quite correctly calls that triangle degenerate, but dropping
- * it would remove the entire wall. Split its longest tile-space edge instead,
- * preserving the triangle's 3D barycentric interpolation.
+ * it would remove the entire wall. Clip all three edges to successive grid
+ * strips, preserving distinct barycentric vertices at the same tile position.
+ * A fan to the original opposite vertex leaves curved roof and wall seams:
+ * neighboring triangles must split their shared diagonal at the same height.
  */
 function subdivideDegenerateTriangle(
   triangle: [SubdividedVertex, SubdividedVertex, SubdividedVertex],
@@ -228,33 +217,58 @@ function subdivideDegenerateTriangle(
   addVertex: (point: SubdividedVertex) => number,
   dropOutsideTileX: boolean,
 ): number[] {
-  const edges: Array<[
-    SubdividedVertex,
-    SubdividedVertex,
-    SubdividedVertex,
-  ]> = [
-    [triangle[0], triangle[1], triangle[2]],
-    [triangle[1], triangle[2], triangle[0]],
-    [triangle[2], triangle[0], triangle[1]],
+  const edges: Array<[SubdividedVertex, SubdividedVertex]> = [
+    [triangle[0], triangle[1]],
+    [triangle[1], triangle[2]],
+    [triangle[2], triangle[0]],
   ];
   const edge = edges.reduce((longest, candidate) => {
     const currentLength = Math.hypot(candidate[1].x - candidate[0].x, candidate[1].y - candidate[0].y);
     const longestLength = Math.hypot(longest[1].x - longest[0].x, longest[1].y - longest[0].y);
     return currentLength > longestLength ? candidate : longest;
   });
-  const line = subdivideVertexLine(
-    [[edge[0].x, edge[0].y], [edge[1].x, edge[1].y]],
-    granularity,
-  );
+  const dx = edge[1].x - edge[0].x;
+  const dy = edge[1].y - edge[0].y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0)
+    return [];
+  const coordinate = (point: SubdividedVertex): number => ((point.x - edge[0].x) * dx + (point.y - edge[0].y) * dy) / lengthSquared;
+  const cuts = [0, 1];
+  if (granularity >= 2) {
+    const cellSize = EXTENT / granularity;
+    for (const [start, end] of [[edge[0].x, edge[1].x], [edge[0].y, edge[1].y]]) {
+      const minimum = Math.min(start, end);
+      const maximum = Math.max(start, end);
+      for (let cell = Math.floor(minimum / cellSize) + 1; cell * cellSize < maximum; cell++)
+        cuts.push((cell * cellSize - start) / (end - start));
+    }
+    cuts.sort((a, b) => a - b);
+  }
   const result: number[] = [];
-  const opposite = edge[2];
-  for (let i = 1; i < line.length; i++) {
-    const from = edgePointAt(edge[0], edge[1], line[i - 1]);
-    const to = edgePointAt(edge[0], edge[1], line[i]);
-    if (dropOutsideTileX && [from, to, opposite].some(point => point.x < 0 || point.x > EXTENT)) {
+  for (let i = 1; i < cuts.length; i++) {
+    const minimum = cuts[i - 1];
+    const maximum = cuts[i];
+    if (maximum - minimum < 1e-12)
+      continue;
+    let polygon = clipPolygon([...triangle], coordinate, minimum, true);
+    polygon = clipPolygon(polygon, coordinate, maximum, false);
+    for (const point of polygon) {
+      // Match roof intersections on the shared integer tile grid.
+      point.x = Math.round(point.x);
+      point.y = Math.round(point.y);
+    }
+    if (dropOutsideTileX && polygon.some(point => point.x < 0 || point.x > EXTENT)) {
       continue;
     }
-    result.push(addVertex(from), addVertex(to), addVertex(opposite));
+    for (let vertex = 1; vertex + 1 < polygon.length; vertex++) {
+      const [a, b, c] = [polygon[0], polygon[vertex], polygon[vertex + 1]];
+      // Tile-space area is zero; barycentric area identifies real 3D faces
+      // and eliminates duplicate boundary vertices without losing wall height.
+      const area = (b.weights[1] - a.weights[1]) * (c.weights[2] - a.weights[2])
+        - (c.weights[1] - a.weights[1]) * (b.weights[2] - a.weights[2]);
+      if (Math.abs(area) > 1e-12)
+        result.push(addVertex(a), addVertex(b), addVertex(c));
+    }
   }
   return result;
 }

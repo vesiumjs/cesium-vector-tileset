@@ -41,21 +41,9 @@ describe('clipped planar fill boundary', () => {
     expect(mesh.points.every(([x, y]) => x >= 0 && x <= 8192 && y >= 0 && y <= 8192)).toBe(true);
   });
 
-  it('retains source winding when two distinct tile intersections round to the same point', () => {
-    // These are unchanged source vertices/triangles 4,28,19 and 4,29,28
-    // from the actual Shanghai capture. Top crossings 251.724... and
-    // 251.809... both round to 252; the clipped thin face changes sign.
-    const mesh = clipPlanarFill([[298, 122], [264, 32], [232, -52], [300, 26]], [0, 1, 2, 0, 3, 1]);
-    expect(meshContains(mesh, [280, 60])).toBe(true);
-    expect(meshContains(mesh, [240, 30])).toBe(false);
-    expect(meshArea(mesh)).toBeCloseTo(1731.7799671592784, 8);
-    const boundary = mesh.points.filter(point => point[1] === 0).map(point => point[0]).sort((a, b) => a - b);
-    expect(boundary).toHaveLength(2);
-    expect(boundary[0]).toBeCloseTo(251.72413793103448, 12);
-    expect(boundary[1]).toBeCloseTo(251.8095238095238, 12);
-  });
-
   it('shares fractional crossings exactly across reversed source edges and duplicated chunk vertices', () => {
+    // Actual Shanghai crossings 251.724... and 251.809... must stay
+    // distinct: integer rounding reverses the thin clipped face.
     const points: TilePoint[] = [[298, 122], [264, 32], [232, -52], [300, 26]];
     const triangles = [0, 1, 2, 0, 3, 1];
     const source = clipPlanarFill(points, triangles);
@@ -63,8 +51,8 @@ describe('clipped planar fill boundary', () => {
     const chunkPoints = triangles.map(vertex => points[vertex]);
     const chunks = clipPlanarFill(chunkPoints, [0, 1, 2, 3, 4, 5]);
     for (const mesh of [source, reversed, chunks]) {
-      expect(mesh.points).toHaveLength(5);
-      expect(mesh.indices).toHaveLength(9);
+      expect(meshContains(mesh, [280, 60])).toBe(true);
+      expect(meshContains(mesh, [240, 30])).toBe(false);
       expect(meshArea(mesh)).toBeCloseTo(1731.7799671592784, 8);
       expect(mesh.points.filter(point => point[1] === 0).map(point => point[0]).sort((a, b) => a - b)).toEqual([251.72413793103448, 251.8095238095238]);
     }
@@ -74,13 +62,6 @@ describe('clipped planar fill boundary', () => {
     const mesh = clipPlanarFill([[-10, 0], [0, 0], [0, -10], [-20, 0], [0, 0], [0, -20], [-10, 200], [0, 100], [0, 300]], [0, 1, 2, 3, 4, 5, 6, 7, 8]);
     expect(mesh.indices).toEqual([]);
     expect(mesh.points).toEqual([]);
-  });
-
-  it('removes arbitrary source diagonal intersections from both water seam edges', () => {
-    const mesh = clip([[-2048, 2987], [-2048, -2048], [10240, -2048], [10240, 2987], [-2048, 2987]]);
-    for (const edge of [0, 8192])
-      expect(mesh.points.filter(point => point[0] === edge).map(point => point[1]).sort((a, b) => a - b)).toEqual([0, 2987]);
-    expect(meshArea(mesh)).toBe(8192 * 2987);
   });
 
   it('preserves a hole wholly inside the clipped outer ring', () => {

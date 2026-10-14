@@ -117,11 +117,8 @@ export class FillExtrusionBucket extends FillExtrusionBucketRuntime {
 
   addFeature(feature: BucketFeature, geometry: Point[][], index: number, canonical: CanonicalTileID, imagePositions: { [_: string]: ImagePosition }): void {
     const start = this.layoutVertexArray.length;
-    const layer = getPrimaryLayer(this.layers);
-    const roundedCornerDistance = layer.layout.get('fill-extrusion-rounded-corner-distance');
-    const processedGeometry = roundedCornerDistance > 0 ? roundPolygonCorners(geometry, roundedCornerDistance, canonical) : geometry;
 
-    for (const polygon of classifyRings(processedGeometry, EARCUT_MAX_RINGS)) {
+    for (const polygon of classifyRings(geometry, EARCUT_MAX_RINGS)) {
       this.processPolygon(feature, polygon);
     }
 

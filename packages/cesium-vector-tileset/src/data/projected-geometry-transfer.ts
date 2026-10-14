@@ -45,6 +45,7 @@ interface PackedCircleGeometry {
 
 /** The only projected geometry wire shape: a fixed number of owners per bucket. */
 export interface PackedProjectedGeometry {
+  fillPlanar?: PackedFillGeometry;
   fill?: PackedFillGeometry;
   lines?: PackedLineGeometry;
   fillOutlines?: PackedFillOutlines;
@@ -325,6 +326,7 @@ export function serializeProjectedGeometry(geometry: ProjectedBucketGeometry): P
     fill: geometry.fill && projectedStorage(geometry.fill) as PackedFillGeometry | undefined,
     lines: geometry.lines && projectedStorage(geometry.lines) as PackedLineGeometry | undefined,
     fillOutlines: geometry.fillOutlines && projectedStorage(geometry.fillOutlines) as PackedFillOutlines | undefined,
+    fillPlanar: geometry.fillPlanar && projectedStorage(geometry.fillPlanar) as PackedFillGeometry | undefined,
     fillPlanarOutlines: geometry.fillPlanarOutlines && projectedStorage(geometry.fillPlanarOutlines) as PackedFillOutlines | undefined,
     circles: geometry.circles && projectedStorage(geometry.circles) as PackedCircleGeometry | undefined,
   };
@@ -336,6 +338,7 @@ export function restoreProjectedGeometry(packed: PackedProjectedGeometry): Proje
     fill: packed.fill && fillViews(packed.fill),
     lines: packed.lines && lineViews(packed.lines),
     fillOutlines: packed.fillOutlines && outlineViews(packed.fillOutlines),
+    fillPlanar: packed.fillPlanar && fillViews(packed.fillPlanar),
     fillPlanarOutlines: packed.fillPlanarOutlines && outlineViews(packed.fillPlanarOutlines),
     circles: packed.circles && circleViews(packed.circles),
   };

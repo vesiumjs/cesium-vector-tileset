@@ -7,6 +7,12 @@ interface BoundaryEdge {
   to: number;
 }
 
+interface ClippedPolygon {
+  vertexOffset: number;
+  vertexCount: number;
+  holes: number[];
+}
+
 function area(ring: TilePoint[]): number {
   return ring.reduce((sum, point, index) => {
     const next = ring[(index + 1) % ring.length];
@@ -85,7 +91,7 @@ function clipTriangle(triangle: TilePoint[]): TilePoint[] {
  * Retriangulating the compact boundary removes source diagonals' collinear
  * tile-edge intersections, which otherwise produce unmatched raster edges.
  */
-export function clipPlanarFill(points: TilePoint[], triangles: number[]): { points: TilePoint[]; indices: number[] } {
+export function clipPlanarFill(points: TilePoint[], triangles: number[], options: { triangulate?: boolean } = {}): { points: TilePoint[]; indices: number[]; polygons: ClippedPolygon[] } {
   const vertices: TilePoint[] = [];
   const vertexIndices = new Map<string, number>();
   const vertexIndex = (point: TilePoint): number => {
@@ -167,6 +173,7 @@ export function clipPlanarFill(points: TilePoint[], triangles: number[]): { poin
   }
   const output: TilePoint[] = [];
   const indices: number[] = [];
+  const polygons: ClippedPolygon[] = [];
   for (const { ring, holes } of outers) {
     const flattened = [...ring, ...holes.flat()];
     const starts: number[] = [];
@@ -176,13 +183,16 @@ export function clipPlanarFill(points: TilePoint[], triangles: number[]): { poin
       count += hole.length;
     }
     const base = output.length;
-    const triangulated = earcut(flattened.flat(), starts);
     for (const point of flattened)
       output.push(point);
-    for (let index = 0; index < triangulated.length; index += 3)
-      indices.push(base + triangulated[index + 2], base + triangulated[index + 1], base + triangulated[index]);
+    polygons.push({ vertexOffset: base, vertexCount: flattened.length, holes: starts });
+    if (options.triangulate !== false) {
+      const triangulated = earcut(flattened.flat(), starts);
+      for (let index = 0; index < triangulated.length; index += 3)
+        indices.push(base + triangulated[index + 2], base + triangulated[index + 1], base + triangulated[index]);
+    }
   }
   if (output.some(point => point[0] < 0 || point[0] > EXTENT || point[1] < 0 || point[1] > EXTENT))
     throw new TypeError('Planar fill clipping must stay inside its tile');
-  return { points: output, indices };
+  return { points: output, indices, polygons };
 }
