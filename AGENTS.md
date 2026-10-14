@@ -1,57 +1,55 @@
-# 项目定位与实现策略
+# 项目约定
 
-本项目大量使用 MapLibre GL JS 相关代码和设计，结合 Cesium 提供的 Buffer\*Collection、各类 Primitive 等能力混合实现。
+本项目将 MapLibre GL JS 的样式、瓦片与符号处理用于 Cesium，使用原版 Buffer\*Collection、Primitive 和 Worker。修改应以既有行为、真实输入及上游契约为依据。
 
 ## 关键命令
 
 ```bash
-pnpm dev            # Vite 开发服务器
-pnpm test           # vitest run
-pnpm lint:eslint    # eslint --fix
-pnpm lint:tsc       # vue-tsc --build --force
-pnpm build          # 构建 Vite 演示
-pnpm build:ci       # tsdown 构建库、Worker、类型声明及发布文件
+pnpm dev                    # Vite 开发服务器（demo）
+pnpm test                   # vitest run（jsdom，配置见 vitest.config.ts）
+pnpm lint:eslint            # eslint . --fix
+pnpm lint:tsc               # vue-tsc --build --force
+pnpm build                  # 构建 demo
+pnpm build:ci               # tsdown 构建库、Worker、类型声明及发布文件
+pnpm codegen                # 生成样式属性与 struct array
+pnpm generate-unicode-data  # 生成 Unicode 属性表
 ```
 
-修改后先运行 `lint:eslint` → `lint:tsc`，再按实际风险运行相关测试。
+修改后先运行 `lint:eslint` → `lint:tsc`，再按实际风险运行相关测试；脚本细节以 `package.json` 为准。
 
-TypeScript 固定在 `6.0.x`：`vue-tsc` 需要 `typescript/lib/tsc`（TS 7 已移除该子路径），
-`typescript-eslint` 的 peer 上限也是 `<6.1.0`。升级 TS 前先确认两者都已支持。
+生成物 `packages/cesium-vector-tileset/src/**/*.g.ts` 由 `packages/cesium-vector-tileset/build/` 下的生成器维护，勿手改。修改生成器后重跑对应生成脚本，再跑一次 `pnpm lint:eslint`，生成物才会与提交态一致。
 
-样式代码生成（`src/**/*.g.ts`，勿手改）：
+TypeScript 保持 `6.0.x`：`vue-tsc` 依赖 `typescript/lib/tsc`，`@typescript-eslint`（经 `@antfu/eslint-config` 引入）的 peer 上限为 `<6.1.0`。升级前核对两者都已支持。
 
-```bash
-pnpm codegen                # 样式属性 + struct array
-pnpm generate-unicode-data  # Unicode 属性表
-```
+## 工作方式
 
-生成物需跑一次 `pnpm lint:eslint` 才会与提交态一致。
+1. 先定位用户问题及负责它的模块，沿调用链核对公开入口、Worker 消息、资源所有权和已有约束。涉及术语时读取 `CONTEXT.md`；涉及历史渲染差异时读取 `docs/comprehensive-audit.md` 对应记录。
+2. 说明改变哪个行为或消除哪项实际复杂度，然后在负责该行为的模块内完成修改。已有设计在契约成立时继续沿用；推翻设计须指出新的证据或已经改变的需求。
+3. 根据改动风险选择验证方式。完成后说明结果、验证范围及仍然存在的限制；源码修改同步核对受影响的公开导出、调用方和文档。
 
-## 设计与编码约定
+局部修复默认保持其他模块的接口与职责；跨模块重构必须能解释为何局部改动无法解决问题。避免把任务扩展为全仓命名、风格或个人偏好的改写。
 
-- 禁止临时兼容层、猜测式编码、新旧双轨逻辑
-- 文件名使用 `kebab-case`
-- 命名简洁但勿滥简写（`value` 勿 `val`）
-- 单次使用且只转调函数、构造器或读取属性的包装直接内联；独立模块应承载算法、状态、资源生命周期或实际复用的规则。删除接口前核对生产代码、测试、构建脚本和公开导出。
+## 模块与 TypeScript
 
-## 测试
+- 一个模块集中管理实际算法、状态或资源生命周期，向调用方提供小而清楚的接口。共享规则集中在负责它的模块中；只有一个实现、没有实际变化需求的适配层直接内联。
+- 单次使用且仅转调函数、构造器或读取属性的包装直接内联。拆分文件以独立职责和实际复用为依据，不以行数或测试便利为依据。
+- 使用现代 TypeScript 表达真实契约：类型推导、判别联合、`satisfies` 和明确的资源状态。减少 `any`、重复类型声明、强制断言及需要调用方维护的状态组合；类型技巧本身不是重构理由。
+- 外部输入、取消、异步竞争、失效资源和 Worker 消息边界保留必要检查。内部已成立的类型和生命周期约束直接使用；缺少必要数据时明确失败，避免默认零值、静默跳过和猜测式回退掩盖错误。
+- 文件名使用 `kebab-case`，命名表达职责，使用 `value` 等完整常用词。注释解释单位、坐标系、所有权、上游差异及选择原因，不复述代码。
+- 依赖保持原版：不修改 `node_modules`、不创建 `patches`、不添加运行时猴子补丁或复制依赖接口的本地兼容层。上游限制说明事实及影响，在本项目既有职责内处理。
 
-- 测试用于防止真实回归，不为每个小改动默认新增测试。注释、文档、命名、配置常量、简单转调等低风险改动，使用 lint、类型检查或现有验证即可。
-- 新增测试前说明它能发现哪类实际错误；避免照抄实现、断言私有字段布局或穷举等价参数。优先复用已有用例，重复覆盖应合并或删除。
-- 单测保留关键算法边界、异步竞争和资源生命周期；e2e 保留真实用户行为与关键渲染回归，用代表性组合覆盖独立分支，不铺满参数笛卡尔积。
-- 日常修改运行受影响的测试；仅在改动范围或具体风险需要时运行全套。发布工作流只构建、打包和发布，不运行测试。
-- 测试文件放在被测试文件同级的 `__test__/` 目录下
-- Vitest，jsdom 环境，配置文件 `vitest.config.ts`
-- 运行：`pnpm test`
+## 验证与测试取舍
 
-## Agent skills
+**测试不是每次修改的必要项，也不以测试数量或覆盖率作为质量目标。** 选择能证实用户要求的最小验证：静态检查、已有用例、实际运行或临时探针均可。
 
-临时脚本、实验文件放在 `node_modules/.cache/temp/`；测试产物放在 `node_modules/.cache/playwright/`。
+- 默认不新增测试。新增永久测试前，说明它将防止哪种真实且可能再次发生的错误，以及已有验证为何无法发现它；优先扩展或合并已有代表用例。
+- 永久测试只保留有长期价值的算法边界、异步竞争、资源生命周期、关键用户行为和渲染回归。断言可观察结果，避免私有字段布局、常量快照、包装转调、照抄实现和等价参数穷举。
+- 为定位一次问题编写的小测试、诊断脚本和实验探针，在验证完成后从正式测试集合移除；需要保留复现材料时归档到缓存目录，不让它成为日常验证负担。
+- 修改涉及的测试中，删除已被更高层代表验证覆盖的重复测试、失效接口测试和无长期价值的探针。模块接口收敛后替换旧测试，避免新旧两套叠加。
+- 命名、注释、文档、配置常量、简单转调及低风险整理通常只需静态检查。日常验证限受影响范围；全套测试仅在具体跨模块风险或用户明确要求时运行。
+- 性能与画面验证使用代表性实际场景，先校准输入、相机和渲染分支，记录必要原始证据。局部采样不能代替完整场景性能，扩大参数矩阵不能代替定位根因。
+- 发布流程只构建、打包和发布，不运行测试。永久单测放在实现同级 `__test__/`；临时脚本放 `node_modules/.cache/temp/`，运行产物放 `node_modules/.cache/playwright/`。
 
-### Triage labels
+## Demo 与使用文档
 
-The five canonical triage roles use English labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
-
-### Domain docs
-
-Domain terminology lives in `CONTEXT.md` at the repo root.
+Demo（`src/`）的场景/样式约定、截图与性能面板要求，以及 README 的写作范围见 `src/AGENTS.md`。
