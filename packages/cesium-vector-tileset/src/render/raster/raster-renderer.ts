@@ -5,12 +5,14 @@ import type {
 } from 'cesium';
 import type { RasterStyleLayer } from '../../style/style-layer/raster-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
+import type { RasterFade } from '../../tile/tile-pyramid';
 import type { MemoryBudgetVisitor } from '../scene/gpu-memory-budget';
 import type { RetainedSurface } from '../scene/scene-collections';
 import type { RasterPrimitiveGeometry, RasterStyle, RasterTileCoordinate } from './raster-geometry';
-import * as cesium from 'cesium';
+import type { RasterTextureLease, RasterTextureSource } from './raster-textures';
 import {
   BoundingSphere,
+  Cartesian2,
   Cartesian3,
   ComponentDatatype,
   EllipsoidSurfaceAppearance,
@@ -27,12 +29,13 @@ import {
 import { registerDrawBatch } from '../scene/draw-batch';
 import { LayerCollections } from '../scene/layer-collections';
 import { collectionGpuBytes } from '../scene/resource-memory';
+import { RasterCoverage, rasterParentTransform } from './raster-coverage';
 import {
-  RASTER_SURFACE_OFFSET_M,
   rasterGeometryKey,
   rasterPrimitiveGeometry,
   rasterStyle,
 } from './raster-geometry';
+import { RasterTextures } from './raster-textures';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
@@ -53,6 +56,7 @@ interface RasterTileGeometry {
   tileID: TileID;
   layerId: string;
   geometryKey: string;
+  source: object;
   tileCoordinates?: readonly RasterTileCoordinate[];
   flippedWindingOrder: boolean;
   mode?: SceneMode;
@@ -64,7 +68,7 @@ interface StaticRasterEntry extends RasterTileGeometry {
   collection: PrimitiveCollection;
   layer: RasterStyleLayer;
   sourceIdentity: RasterMaterialImage;
-  material: Material;
+  material: RasterImageMaterial;
   width: number;
   height: number;
   resampling: RasterStyle['resampling'];
@@ -84,6 +88,7 @@ interface DynamicRasterBatch {
   key: string;
   sealed: boolean;
   sourceIdentity: RasterMaterialImage;
+  source: object;
   image: TextureSource;
   layer: RasterStyleLayer;
   collection: PrimitiveCollection;
@@ -96,99 +101,103 @@ interface DynamicRasterBatch {
   styleKey: string;
 }
 
-interface TextureHandle {
-  width: number;
-  height: number;
-  sampler: object;
-  copyFrom: (options: { source: TextureSource }) => void;
-}
-
 type MaterialOptions = NonNullable<ConstructorParameters<typeof Material>[0]>;
-type RasterSamplerOptions = Pick<MaterialOptions, 'minificationFilter' | 'magnificationFilter'>;
 
-// Native exports Texture and Sampler, and implements Material.update, without
-// declaring them in Cesium.d.ts. Keep this integration contract local.
-interface CesiumRuntime {
-  Texture: new (options: { context: object; source: TextureSource; sampler: object }) => TextureHandle;
-  Sampler: new (options: RasterSamplerOptions) => object;
-}
-
-const Texture = (cesium as unknown as CesiumRuntime).Texture;
-const Sampler = (cesium as unknown as CesiumRuntime).Sampler;
 declare class _NativeMaterial extends Material {
-  protected _textures: Record<string, TextureHandle>;
-  protected _defaultTexture?: TextureHandle;
   update(context: object): void;
 }
 const RuntimeMaterial = Material as typeof _NativeMaterial;
 
-/** Decoded raster pixels must be available during the material's first update. */
+/** Materials borrow samplers; the texture store owns every physical upload. */
 class RasterImageMaterial extends RuntimeMaterial {
-  private _pendingSource?: TextureSource;
+  private readonly _texturesStore: RasterTextures;
+  private readonly _token: object;
+  private _image: RasterTextureSource;
+  private _lease: RasterTextureLease;
+  private _filter: RasterStyle['resampling'];
+  private _parent?: RasterImageMaterial;
+  private _parentFilter?: RasterStyle['resampling'];
+  private _parentLease?: RasterTextureLease;
+  private _coverageLease?: RasterTextureLease;
+  private readonly _coverage = new RasterCoverage();
+  private readonly _retired: RasterTextureLease[] = [];
 
-  private _texture?: TextureHandle;
-
-  constructor(image: TextureSource, options: MaterialOptions) {
+  constructor(texturesStore: RasterTextures, token: object, image: TextureSource, style: RasterStyle, options: MaterialOptions) {
     super(options);
-    // Native videos upload synchronously and gate frames on readyState.
-    if (!(typeof HTMLVideoElement !== 'undefined' && image instanceof HTMLVideoElement))
-      this._pendingSource = image;
-    this.uniforms.image = image;
+    this._texturesStore = texturesStore;
+    this._token = token;
+    this._image = { type: 'image', image };
+    this._filter = style.resampling;
+    this._lease = texturesStore.retain(token, this._image, this._filter);
   }
 
   override update(context: object): void {
-    if (this._pendingSource) {
-      // Native queues decoded images after consuming its upload queue. Upload
-      // directly so this same update adopts real pixels before any draw. Use
-      // the same Texture defaults (flipY and straight alpha) as Material.
-      this._texture = new Texture({
-        context,
-        source: this._pendingSource,
-        sampler: new Sampler({
-          minificationFilter: this.minificationFilter,
-          magnificationFilter: this.magnificationFilter,
-        }),
-      });
-      this.uniforms.image = this._texture;
-      this._pendingSource = undefined;
-    }
+    const image = this._lease.update(context) ?? Material.DefaultImageId;
+    this.uniforms.image = image;
+    this.uniforms.parentImage = this._parentLease?.update(context) ?? image;
+    this.uniforms.coverage = this._coverageLease?.update(context) ?? Material.DefaultImageId;
     super.update(context);
+    // All active Native sampler maps now point at their replacement. A mix
+    // of zero still leaves the parent sampler active, so release only here.
+    for (const lease of this._retired)
+      lease.release();
+    this._retired.length = 0;
   }
 
-  /** Copy changing pixels into the texture created and adopted by this material. */
-  copyImage(source: TextureSource): void {
-    if (!this._texture)
-      return;
-    const dimensions = sourceDimensions(source);
-    if (dimensions.width !== this._texture.width || dimensions.height !== this._texture.height) {
-      // Native adopts the new uniform Texture and destroys the previous one
-      // in the same material update, before submitting commands.
-      this._pendingSource = source;
-      return;
-    }
-    this._pendingSource = undefined;
-    this._texture.copyFrom({ source });
+  copyImage(image: TextureSource): void {
+    this._image = { type: 'image', image };
+    this._lease.copyImage(this._image);
   }
 
   setResampling(resampling: RasterStyle['resampling']): void {
+    if (resampling === this._filter)
+      return;
+    this._retired.push(this._lease);
+    this._filter = resampling;
+    this._lease = this._texturesStore.retain(this._token, this._image, resampling);
     const nearest = resampling === 'nearest';
     this.minificationFilter = nearest ? TextureMinificationFilter.NEAREST : TextureMinificationFilter.LINEAR;
     this.magnificationFilter = nearest ? TextureMagnificationFilter.NEAREST : TextureMagnificationFilter.LINEAR;
-    const texture = this._textures.image;
-    if (texture && texture !== this._defaultTexture) {
-      texture.sampler = new Sampler({
-        minificationFilter: this.minificationFilter,
-        magnificationFilter: this.magnificationFilter,
-      });
+  }
+
+  setParent(parent?: RasterImageMaterial): void {
+    if (this._parent === parent && this._parentFilter === parent?._filter)
+      return;
+    if (this._parentLease)
+      this._retired.push(this._parentLease);
+    this._parent = parent;
+    this._parentFilter = parent?._filter;
+    this._parentLease = parent && this._texturesStore.retain(parent._token, parent._image, parent._filter);
+  }
+
+  setCoverage(tileID: TileID, children: readonly TileID[]): void {
+    if (!this._coverage.update(tileID, children))
+      return;
+    const source = this._coverage.source;
+    this.uniforms.u_coverage_size = source?.width ?? 0;
+    if (!source) {
+      if (this._coverageLease)
+        this._retired.push(this._coverageLease);
+      this._coverageLease = undefined;
+    }
+    else if (this._coverageLease) {
+      this._coverageLease.copyImage(source);
+    }
+    else {
+      this._coverageLease = this._texturesStore.retain(this._coverage, source, 'nearest');
     }
   }
 
   override destroy(): void {
-    this._pendingSource = undefined;
-    this._texture = undefined;
-    this.uniforms.image = Material.DefaultImageId;
-    // Native Material owns and destroys the adopted texture.
+    // Native destroys only borrowed sampler views. Release the real owners
+    // after all Native sampler maps have gone, including delayed bindings.
     super.destroy();
+    this._lease.release();
+    this._parentLease?.release();
+    this._coverageLease?.release();
+    for (const lease of this._retired)
+      lease.release();
+    this._retired.length = 0;
   }
 }
 
@@ -224,7 +233,16 @@ export const RASTER_MATERIAL_SOURCE = `
 czm_material czm_getMaterial(czm_materialInput materialInput)
 {
     czm_material material = czm_getDefaultMaterial(materialInput);
+    if (u_coverage_size > 0.0) {
+        ivec2 size = ivec2(u_coverage_size);
+        ivec2 cell = clamp(ivec2(floor(materialInput.st * u_coverage_size)), ivec2(0), size - ivec2(1));
+        if (texelFetch(coverage, cell, 0).r > 0.0) discard;
+    }
     vec4 rasterColor = texture(image, materialInput.st);
+    if (u_mix > 0.0) {
+        vec2 parentUV = materialInput.st * u_parent_scale + u_parent_offset;
+        rasterColor = mix(rasterColor, texture(parentImage, parentUV), u_mix);
+    }
 
     vec3 rgb = rasterColor.rgb;
     rgb = vec3(
@@ -328,7 +346,7 @@ function rasterStyleKey(style: RasterStyle): string {
   return `${style.opacity}|${style.brightnessMin}|${style.brightnessMax}|${style.contrast}|${style.saturation}|${style.hueRotate}|${style.resampling}`;
 }
 
-export function rasterMaterial(image: RasterMaterialImage, style: RasterStyle): RasterImageMaterial {
+function rasterMaterial(textures: RasterTextures, token: object, image: RasterMaterialImage, style: RasterStyle): RasterImageMaterial {
   const filter = style.resampling === 'nearest';
   const options: MaterialOptions = {
     translucent: true,
@@ -339,6 +357,12 @@ export function rasterMaterial(image: RasterMaterialImage, style: RasterStyle): 
         image: Material.DefaultImageId,
         opacity: style.opacity,
         u_fade: 1,
+        u_mix: 0,
+        parentImage: Material.DefaultImageId,
+        u_parent_scale: 1,
+        u_parent_offset: new Cartesian2(),
+        coverage: Material.DefaultImageId,
+        u_coverage_size: 0,
         brightnessMin: style.brightnessMin,
         brightnessMax: style.brightnessMax,
         saturationFactor: saturationFactor(style.saturation),
@@ -349,12 +373,11 @@ export function rasterMaterial(image: RasterMaterialImage, style: RasterStyle): 
     },
   };
   const normalizedImage = normalizeTextureData(image as RasterTextureData);
-  return new RasterImageMaterial(normalizedImage, options);
+  return new RasterImageMaterial(textures, token, normalizedImage, style, options);
 }
 
 export function rasterGeometry(
   tileID: TileID,
-  surfaceOffset = RASTER_SURFACE_OFFSET_M,
   tileCoordinates?: readonly RasterTileCoordinate[],
   flippedWindingOrder = false,
   mode?: SceneMode,
@@ -362,7 +385,6 @@ export function rasterGeometry(
   const geometryData: RasterPrimitiveGeometry = rasterPrimitiveGeometry(
     tileID,
     undefined,
-    surfaceOffset,
     tileCoordinates,
     flippedWindingOrder,
     mode,
@@ -393,7 +415,7 @@ export function rasterGeometry(
 
 interface BuiltRasterPrimitive {
   primitive: Primitive;
-  material: Material;
+  material: RasterImageMaterial;
   image: TextureSource;
 }
 
@@ -408,11 +430,11 @@ function rasterAppearance(material: Material): EllipsoidSurfaceAppearance {
 }
 
 function buildRasterPrimitive(
+  textures: RasterTextures,
   tileID: TileID,
   image: RasterMaterialImage,
   layer: RasterStyleLayer,
   tileId = tileID.key,
-  surfaceOffset = RASTER_SURFACE_OFFSET_M,
   tileCoordinates?: readonly RasterTileCoordinate[],
   flippedWindingOrder = false,
   mode?: SceneMode,
@@ -423,10 +445,10 @@ function buildRasterPrimitive(
   }
 
   const normalizedImage = normalizeTextureData(image as RasterTextureData);
-  const material = rasterMaterial(normalizedImage, style);
+  const material = rasterMaterial(textures, normalizedImage, normalizedImage, style);
   const primitive = new Primitive({
     geometryInstances: new GeometryInstance({
-      geometry: rasterGeometry(tileID, surfaceOffset, tileCoordinates, flippedWindingOrder, mode),
+      geometry: rasterGeometry(tileID, tileCoordinates, flippedWindingOrder, mode),
       id: { type: 'raster', tileId, layerId: layer.id } satisfies RasterPrimitiveID,
     }),
     appearance: rasterAppearance(material),
@@ -450,23 +472,30 @@ export interface RasterSourceGeometry {
   flippedWindingOrder?: boolean;
 }
 
-export function rasterSourceInfo(source: unknown): {
+export function rasterSourceInfo(source: object): {
+  identity: object;
   dynamic: boolean;
   tileCoords?: readonly RasterTileCoordinate[];
   flippedWindingOrder?: boolean;
 } {
   const raster = source as RasterSourceGeometry | undefined;
   return {
+    identity: source,
     dynamic: raster?.type === 'canvas' && raster.animate !== false,
     tileCoords: raster?.tileCoords,
     flippedWindingOrder: raster?.flippedWindingOrder,
   };
 }
 
-export class RasterTileRenderer {
-  private readonly _layerCollections = new LayerCollections();
+export interface RasterFrame {
+  source: object;
+  fade?: RasterFade;
+}
 
-  private _layerOffsets = new Map<string, number>();
+export class RasterTileRenderer {
+  private readonly _textures = new RasterTextures();
+
+  private readonly _layerCollections = new LayerCollections();
 
   private _tiles = new Map<string, RasterPrimitiveEntry[]>();
 
@@ -557,10 +586,6 @@ export class RasterTileRenderer {
         }
       }
     }
-    this._layerOffsets = new Map(layers.map((layer, index) => [
-      layer.id,
-      RASTER_SURFACE_OFFSET_M + (layerOrder?.get(layer.id) ?? index) * 0.01,
-    ]));
     return update;
   }
 
@@ -683,6 +708,7 @@ export class RasterTileRenderer {
     tileID: TileID,
     image: RasterMaterialImage | undefined,
     layers: readonly RasterStyleLayer[],
+    source: object,
     dynamic = false,
     tileCoordinates?: readonly RasterTileCoordinate[],
     flippedWindingOrder = false,
@@ -702,7 +728,7 @@ export class RasterTileRenderer {
       && existing.length === layers.length
       && existing.every((entry, index) => entry.layerId === layers[index]?.id
         && (entry.type === 'dynamic' ? dynamic && entry.batch.sourceIdentity === image : !dynamic && entry.sourceIdentity === image)
-        && entry.geometryKey === geometryKey);
+        && entry.geometryKey === geometryKey && entry.source === source);
     if (sameTile) {
       return { removed: [], added, removedMaterials: [] };
     }
@@ -715,6 +741,7 @@ export class RasterTileRenderer {
         tileID,
         image,
         layers,
+        source,
         tileCoordinates,
         flippedWindingOrder,
         mode,
@@ -739,11 +766,11 @@ export class RasterTileRenderer {
         continue;
       }
       const built = buildRasterPrimitive(
+        this._textures,
         tileID,
         normalizedImage,
         layer,
         tileId,
-        this._layerOffsets.get(layer.id) ?? RASTER_SURFACE_OFFSET_M,
         tileCoordinates,
         flippedWindingOrder,
         mode,
@@ -764,6 +791,7 @@ export class RasterTileRenderer {
         tileID,
         layer,
         sourceIdentity: image,
+        source,
         material: built.material,
         width: dimensions.width,
         height: dimensions.height,
@@ -791,6 +819,7 @@ export class RasterTileRenderer {
     tileID: TileID,
     image: RasterMaterialImage,
     layers: readonly RasterStyleLayer[],
+    source: object,
     tileCoordinates: readonly RasterTileCoordinate[] | undefined,
     flippedWindingOrder: boolean,
     mode: SceneMode | undefined,
@@ -818,13 +847,14 @@ export class RasterTileRenderer {
         batches = new Set();
         this._dynamicBatches.set(batchKey, batches);
       }
-      let batch = [...batches].find(candidate => !candidate.sealed && !candidate.primitive?.ready);
+      let batch = [...batches].find(candidate => candidate.source === source && candidate.layer === layer && !candidate.sealed && !candidate.primitive?.ready);
       if (!batch) {
         const style = rasterStyle(layer);
         batch = {
           key: batchKey,
           sealed: false,
           sourceIdentity: image,
+          source,
           image: normalizedImage,
           layer,
           collection,
@@ -838,6 +868,7 @@ export class RasterTileRenderer {
       }
       const entry: DynamicRasterEntry = {
         type: 'dynamic',
+        source,
         batch,
         instanceId: { type: 'raster', tileId, layerId: layer.id },
         show: new ShowGeometryInstanceAttribute(true),
@@ -918,11 +949,10 @@ export class RasterTileRenderer {
 
     const entries = [...batch.entries.values()];
     const style = rasterStyle(batch.layer);
-    const material = rasterMaterial(batch.image, style);
+    const material = rasterMaterial(this._textures, batch, batch.image, style);
     const geometryInstances = entries.map(entry => new GeometryInstance({
       geometry: rasterGeometry(
         entry.tileID,
-        this._layerOffsets.get(entry.layerId) ?? RASTER_SURFACE_OFFSET_M,
         entry.tileCoordinates,
         entry.flippedWindingOrder,
         entry.mode,
@@ -938,7 +968,7 @@ export class RasterTileRenderer {
       compressVertices: true,
       releaseGeometryInstances: true,
     });
-    registerDrawBatch(primitive, { layerId: batch.layer.id, kind: 'raster' });
+    registerDrawBatch(primitive, { layerId: batch.layer.id, sourceId: batch.layer.source, kind: 'raster' });
     primitive.show = style.opacity > 0;
     batch.collection.add(primitive);
     batch.primitive = primitive;
@@ -970,7 +1000,7 @@ export class RasterTileRenderer {
     styleRevision = 0,
     forceStyles = false,
     transitionLayerIds?: ReadonlySet<string>,
-    fadeOpacityOf?: (tileId: string) => number | undefined,
+    frameOf?: (tileId: string) => RasterFrame | undefined,
   ): RasterTileUpdate {
     const removed: Primitive[] = [];
     const added: Primitive[] = [];
@@ -1064,14 +1094,34 @@ export class RasterTileRenderer {
     // built tile a second time in the same frame and re-run its style
     // evaluation.
     const rebuildTiles = new Map<string, StaticRasterEntry[]>();
+    const videos = new Map<HTMLVideoElement, Set<RasterStyle['resampling']>>();
+    const refreshVideo = (entry: RasterPrimitiveEntry): void => {
+      if (entry.type !== 'static' || !(typeof HTMLVideoElement !== 'undefined' && entry.sourceIdentity instanceof HTMLVideoElement)
+        || entry.sourceIdentity.readyState < 2 || !entry.primitive.show) {
+        return;
+      }
+      let filters = videos.get(entry.sourceIdentity);
+      if (!filters) {
+        filters = new Set();
+        videos.set(entry.sourceIdentity, filters);
+      }
+      if (!filters.has(entry.resampling)) {
+        entry.material.copyImage(entry.sourceIdentity);
+        filters.add(entry.resampling);
+      }
+    };
     for (const [tileId, entries] of this._tiles) {
-      const fade = fadeOpacityOf?.(tileId);
-      if (fade !== undefined && fade < 1) {
+      const frame = frameOf?.(tileId);
+      const fade = frame?.fade;
+      if (fade && fade.tileOpacity > 0 && fade.tileOpacity < 1) {
         fading = true;
       }
       for (const entry of entries) {
+        refreshVideo(entry);
+        if (frameOf && frame?.source !== entry.source)
+          continue;
         const material = entry.type === 'static' ? entry.material : entry.batch.material;
-        const target = fade ?? 1;
+        const target = fade?.opacity ?? 1;
         if (material && material.uniforms.u_fade !== target) {
           material.uniforms.u_fade = target;
         }
@@ -1098,14 +1148,56 @@ export class RasterTileRenderer {
       }
     }
 
+    for (const retained of this._retained) {
+      for (const entry of retained.entries)
+        refreshVideo(entry);
+    }
+
     for (const [tileId, entries] of rebuildTiles) {
       const replacement = this._rebuildTile(tileId, entries);
       removed.push(...replacement.removed);
       added.push(...replacement.added);
       removedMaterials.push(...replacement.removedMaterials);
     }
+    this._updateCrossfades(frameOf);
     this._lastStyleRevision = styleRevision;
     return { removed, added, removedMaterials, fading, replacedOwners, textureChanged };
+  }
+
+  /** Bind only this source/style's actual scene-ready generation snapshots. */
+  private _updateCrossfades(frameOf?: (tileId: string) => RasterFrame | undefined): void {
+    const entries = [...this._tiles.values()].flat().filter((entry): entry is StaticRasterEntry => entry.type === 'static');
+    const current = entries.filter(entry => !frameOf || frameOf(entry.tileId)?.source === entry.source);
+    for (const entry of entries) {
+      const frame = frameOf?.(entry.tileId);
+      if (frameOf && frame?.source !== entry.source)
+        continue;
+      const fade = frame?.fade;
+      const parent = fade?.parent && entries.find(candidate => candidate.tileID.key === fade.parent!.key
+        && candidate.source === entry.source && candidate.layer === entry.layer
+        && candidate.styleKey === entry.styleKey && candidate.geometryKey === entry.geometryKey
+        && candidate.primitive.ready && candidate.primitive.show);
+      const transform = parent && entry.primitive.ready && entry.primitive.show
+        ? rasterParentTransform(entry.tileID, parent.tileID)
+        : undefined;
+      const material = entry.material;
+      material.setParent(transform ? parent!.material : undefined);
+      material.uniforms.u_mix = transform ? fade!.mix : 0;
+      if (transform) {
+        material.uniforms.u_parent_scale = transform.scale;
+        material.uniforms.u_parent_offset = transform.offset;
+      }
+    }
+    // Data fallbacks and GPU-held owners outlive their fade descriptor.
+    // Their uncovered region remains visible, while every ready descendant
+    // owns its exact footprint independently of whether it still mixes.
+    for (const entry of current) {
+      const children = current.filter(candidate => candidate.source === entry.source
+        && candidate.layer === entry.layer && candidate.styleKey === entry.styleKey
+        && candidate.geometryKey === entry.geometryKey && candidate.primitive.ready && candidate.primitive.show
+        && rasterParentTransform(candidate.tileID, entry.tileID) !== undefined);
+      entry.material.setCoverage(entry.tileID, children.map(child => child.tileID));
+    }
   }
 
   /**
@@ -1119,6 +1211,7 @@ export class RasterTileRenderer {
       first.tileID,
       first.sourceIdentity,
       entries.map(entry => entry.layer),
+      first.source,
       false,
       first.tileCoordinates,
       first.flippedWindingOrder,

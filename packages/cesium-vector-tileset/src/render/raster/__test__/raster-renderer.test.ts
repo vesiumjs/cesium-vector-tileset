@@ -10,9 +10,42 @@ import { UNBOUNDED_BUDGET } from '../../scene/frame-budget';
 import { collectionGpuBytes } from '../../scene/resource-memory';
 import { SceneCollections } from '../../scene/scene-collections';
 import { TileGeneration } from '../../scene/tile-generation';
+import { RasterCoverage } from '../raster-coverage';
 import { destroyRasterResources, RasterTileRenderer } from '../raster-renderer';
 
-beforeEach(() => vi.stubGlobal('OffscreenCanvas', class {}));
+const textures = vi.hoisted(() => ({ uploads: [] as Array<{ source: object; texture: { isDestroyed: () => boolean }; destroy: ReturnType<typeof vi.fn> }> }));
+
+vi.mock('cesium', async (importOriginal) => {
+  const original = await importOriginal<typeof import('cesium')>();
+  const Texture = (original as unknown as { Texture: { prototype: object } }).Texture;
+  return {
+    ...original,
+    Texture: vi.fn(class {
+      constructor(options: { source: object; width: number; height: number }) {
+        let destroyed = false;
+        const destroy = vi.fn(() => {
+          destroyed = true;
+        });
+        // Replace only GL allocation. Native Material still performs its
+        // real Texture instanceof/adoption/destruction contract.
+        const texture = Object.create(Texture.prototype, {
+          _width: { value: options.width },
+          _height: { value: options.height },
+          copyFrom: { value: vi.fn() },
+          destroy: { value: destroy },
+          isDestroyed: { value: () => destroyed },
+        });
+        textures.uploads.push({ source: options.source, texture, destroy });
+        return texture;
+      }
+    }),
+  };
+});
+
+beforeEach(() => {
+  textures.uploads.length = 0;
+  vi.stubGlobal('OffscreenCanvas', class {});
+});
 afterEach(() => vi.unstubAllGlobals());
 
 function fixture() {
@@ -56,17 +89,153 @@ function publishSurface(scene: SceneCollections, tileId: string, tileID: Oversca
 }
 
 describe('raster resource ownership', () => {
+  it('keeps the sampled parent alive after its owner retires and releases it only after Native adopts the child sampler', () => {
+    const { layer, renderer, image, tileID } = fixture();
+    const childID = tileID.children(13)[0];
+    const childImage = document.createElement('canvas');
+    childImage.width = childImage.height = 64;
+    const context = { defaultTexture: { width: 1, height: 1 } };
+    const updateMaterial = (primitive: ReturnType<RasterTileRenderer['addTile']>['added'][number]) => {
+      (primitive.appearance.material as typeof primitive.appearance.material & { update: (context: object) => void }).update(context);
+    };
+    try {
+      const parent = renderer.addTile('source/parent', tileID, image, [layer], layer).added[0];
+      const child = renderer.addTile('source/child', childID, childImage, [layer], layer).added[0];
+      vi.spyOn(parent, 'ready', 'get').mockReturnValue(true);
+      vi.spyOn(child, 'ready', 'get').mockReturnValue(true);
+      const frame = (id: string) => ({ source: layer, fade: id === 'source/child' ? { opacity: 1, mix: 0.5, tileOpacity: 0.5, parent: tileID } : undefined });
+      renderer.update(0, false, undefined, frame);
+      updateMaterial(parent);
+      updateMaterial(child);
+      const parentSampler = parent.appearance.material.uniforms.image;
+      expect(child.appearance.material.uniforms.parentImage).toBe(parentSampler);
+      const parentUploads = textures.uploads.filter(upload => upload.source === image);
+      expect(parentUploads).toHaveLength(1);
+      destroyRasterResources(renderer.removeTile('source/parent'));
+      expect(parentUploads[0].destroy).not.toHaveBeenCalled();
+      renderer.update(0, false, undefined, frame);
+      expect(child.appearance.material.uniforms.u_mix).toBe(0);
+      expect(parentSampler.isDestroyed()).toBe(false);
+      updateMaterial(child);
+      expect(child.appearance.material.uniforms.parentImage).toBe(child.appearance.material.uniforms.image);
+      expect(parentUploads[0].destroy).toHaveBeenCalledOnce();
+      expect(child.appearance.material.uniforms.image.isDestroyed()).toBe(false);
+    }
+    finally { destroyRasterResources(renderer.clear()); }
+  });
+
+  it('updates decoded video pixels through the renderer once per shared image/filter, including paused seeks', () => {
+    const { layer, renderer, tileID } = fixture();
+    const overlay = new RasterStyleLayer({ id: 'overlay', type: 'raster', source: 'source' }, {});
+    overlay.recalculate(new EvaluationParameters(12), []);
+    renderer.setLayers([layer, overlay]);
+    const video = document.createElement('video');
+    Object.defineProperties(video, {
+      readyState: { value: 2, writable: true },
+      videoWidth: { value: 8 },
+      videoHeight: { value: 4 },
+    });
+    try {
+      const update = renderer.addTile('video', tileID, video, [layer, overlay], layer);
+      const copies = update.added.map(primitive => vi.spyOn(primitive.appearance.material as typeof primitive.appearance.material & { copyImage: (image: HTMLVideoElement) => void }, 'copyImage'));
+      renderer.update();
+      expect(copies.reduce((sum, copy) => sum + copy.mock.calls.length, 0)).toBe(1);
+      video.currentTime = 1;
+      renderer.update();
+      expect(copies.reduce((sum, copy) => sum + copy.mock.calls.length, 0)).toBe(2);
+      Object.assign(video, { readyState: 1 });
+      renderer.update();
+      expect(copies.reduce((sum, copy) => sum + copy.mock.calls.length, 0)).toBe(2);
+    }
+    finally { destroyRasterResources(renderer.clear()); }
+  });
+
+  it('excludes only actual child footprints, regardless of PNG alpha, across mixed descendant depths', () => {
+    const parent = new OverscaledTileID(12, 0, 12, 2048, 1362);
+    const children = parent.children(14);
+    const southEastGrandchild = children[3].children(14)[3];
+    const coverage = new RasterCoverage();
+    expect(coverage.update(parent, [children[0], southEastGrandchild])).toBe(true);
+    expect(coverage.source).toMatchObject({ width: 4, height: 4 });
+    expect([...coverage.source!.data]).toEqual([
+      255,
+      255,
+      0,
+      0,
+      255,
+      255,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      255,
+    ]);
+    expect(coverage.update(parent, [southEastGrandchild, children[0]])).toBe(false);
+    expect(coverage.update(parent.scaledTo(11), [southEastGrandchild, children[0]])).toBe(true);
+    expect(coverage.source).toMatchObject({ width: 8, height: 8 });
+    expect(coverage.update(parent, [])).toBe(true);
+    expect(coverage.source).toBeUndefined();
+  });
+
+  it('mixes one ready child with its parent while leaving the other parent quadrants visible', () => {
+    const { layer, renderer, image, tileID } = fixture();
+    const childID = tileID.children(13)[0];
+    const childImage = document.createElement('canvas');
+    childImage.width = childImage.height = 64;
+    try {
+      const parent = renderer.addTile('source/parent', tileID, image, [layer], layer).added[0];
+      const child = renderer.addTile('source/child', childID, childImage, [layer], layer).added[0];
+      vi.spyOn(parent, 'ready', 'get').mockReturnValue(true);
+      const ready = vi.spyOn(child, 'ready', 'get').mockReturnValue(false);
+      const fade = (id: string) => id === 'source/child'
+        ? { source: layer, fade: { opacity: 1, mix: 0.5, tileOpacity: 0.5, parent: tileID } }
+        : { source: layer, fade: { opacity: 1, mix: 0, tileOpacity: 0.5 } };
+      renderer.update(0, false, undefined, fade);
+      expect(parent.appearance.material.uniforms.u_coverage_size).toBe(0);
+      ready.mockReturnValue(true);
+      renderer.update(0, false, undefined, fade);
+      expect(child.appearance.material.uniforms.u_mix).toBe(0.5);
+      expect(child.appearance.material.uniforms.u_fade).toBe(1);
+      expect(parent.appearance.material.uniforms.u_fade).toBe(1);
+      expect(parent.appearance.material.uniforms.u_coverage_size).toBe(2);
+      expect(child.appearance.material.uniforms.u_parent_scale).toBe(0.5);
+      expect(child.appearance.material.uniforms.u_parent_offset).toMatchObject({ x: 0, y: 0.5 });
+      // A data fallback or held parent still excludes ready descendants after
+      // their crossfade has completed and no fade descriptor pairs them.
+      renderer.update(0, false, undefined, () => ({ source: layer }));
+      expect(child.appearance.material.uniforms.u_mix).toBe(0);
+      expect(parent.appearance.material.uniforms.u_coverage_size).toBe(2);
+      renderer.update(0, false, undefined, fade);
+      renderer.update(0, false, undefined, () => ({ source: {}, fade: { opacity: 0.25, mix: 0.75, tileOpacity: 0.25, parent: tileID } }));
+      expect(child.appearance.material.uniforms.u_mix).toBe(0.5);
+      expect(child.appearance.material.uniforms.u_fade).toBe(1);
+      // An outgoing source retains its complete existing presentation;
+      // current-source fade state cannot mutate or bind its generation.
+      const removed = renderer.removeTile('source/parent');
+      destroyRasterResources(removed);
+      renderer.update(0, false, undefined, fade);
+      expect(child.appearance.material.uniforms.u_mix).toBe(0);
+      expect(child.appearance.material.uniforms.u_fade).toBe(1);
+    }
+    finally { destroyRasterResources(renderer.clear()); }
+  });
+
   it('preserves a ready batch when neighbouring tiles and its texture dimensions change', () => {
     const { layer, renderer, image, tileID } = fixture();
     try {
-      const initial = renderer.addTile('first', tileID, image, [layer], true);
+      const initial = renderer.addTile('first', tileID, image, [layer], layer, true);
       const ready = initial.added[0];
       vi.spyOn(ready, 'ready', 'get').mockReturnValue(true);
-      const neighbour = renderer.addTile('second', tileID, image, [layer], true);
+      const neighbour = renderer.addTile('second', tileID, image, [layer], layer, true);
       expect(neighbour.removed).not.toContain(ready);
       expect(renderer.collections.get(layer.id)!.contains(ready)).toBe(true);
       destroyRasterResources(neighbour);
-      const third = renderer.addTile('third', tileID, image, [layer], true);
+      const third = renderer.addTile('third', tileID, image, [layer], layer, true);
       destroyRasterResources(third);
       const neighbourOwner = third.added[0];
       vi.spyOn(neighbourOwner, 'ready', 'get').mockReturnValue(true);
@@ -106,14 +275,14 @@ describe('raster resource ownership', () => {
     const scene = new SceneCollections(root, () => {}, () => true);
     root.add(renderer.collections.get(layer.id)!);
     try {
-      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], true));
-      destroyRasterResources(renderer.addTile('second', tileID, image, [layer], true));
+      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], layer, true));
+      destroyRasterResources(renderer.addTile('second', tileID, image, [layer], layer, true));
       const nextImage = document.createElement('canvas');
       nextImage.width = image.width;
       nextImage.height = image.height;
-      const first = renderer.addTile('first', tileID, nextImage, [layer], true);
+      const first = renderer.addTile('first', tileID, nextImage, [layer], layer, true);
       scene.applyRasterUpdate(first);
-      const second = renderer.addTile('second', tileID, nextImage, [layer], true);
+      const second = renderer.addTile('second', tileID, nextImage, [layer], layer, true);
       scene.applyRasterUpdate(second);
       scene.flushRemovals();
       expect(first.retained!.visible).toBe(true);
@@ -148,9 +317,9 @@ describe('raster resource ownership', () => {
       const lastImage = document.createElement('canvas');
       lastImage.width = nextImage.width;
       lastImage.height = nextImage.height;
-      const nextFirst = renderer.addTile('first', tileID, lastImage, [layer], true);
+      const nextFirst = renderer.addTile('first', tileID, lastImage, [layer], layer, true);
       scene.applyRasterUpdate(nextFirst);
-      const nextSecond = renderer.addTile('second', tileID, lastImage, [layer], true);
+      const nextSecond = renderer.addTile('second', tileID, lastImage, [layer], layer, true);
       scene.applyRasterUpdate(nextSecond);
       scene.applyRasterUpdate(renderer.removeTile('first'));
       scene.flushRemovals();
@@ -172,13 +341,13 @@ describe('raster resource ownership', () => {
     const { layer, renderer, image, tileID } = fixture();
     const overlay = new RasterStyleLayer({ id: 'overlay', type: 'raster', source: 'source' }, {});
     overlay.recalculate(new EvaluationParameters(12), []);
-    renderer.setLayers([layer, overlay]);
+    renderer.setLayers([layer, overlay], layer);
     const root = new PrimitiveCollection({ destroyPrimitives: false });
     const scene = new SceneCollections(root, () => {}, () => true);
     for (const parent of renderer.collections.values())
       root.add(parent);
     try {
-      const original = renderer.addTile('first', tileID, image, [layer, overlay]);
+      const original = renderer.addTile('first', tileID, image, [layer, overlay], layer);
       const retained = renderer.takeDisplacedTile('first', [])!;
       publishSurface(scene, 'first', tileID, retained, false);
       const clear = { hiddenLayers: new Map<string, ReadonlySet<string>>(), hiddenSymbols: new Set<string>() };
@@ -205,8 +374,8 @@ describe('raster resource ownership', () => {
     root.add(renderer.collections.get(layer.id)!);
     let cancelled: PrimitiveCollection | undefined;
     try {
-      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], true));
-      const shared = renderer.addTile('second', tileID, image, [layer], true);
+      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], layer, true));
+      const shared = renderer.addTile('second', tileID, image, [layer], layer, true);
       destroyRasterResources(shared);
       const primitive = shared.added[0];
       const destroy = vi.spyOn(primitive, 'destroy');
@@ -252,14 +421,14 @@ describe('raster resource ownership', () => {
       return bytes;
     };
     try {
-      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], true));
+      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], layer, true));
       const singletonBytes = memory();
-      destroyRasterResources(renderer.addTile('second', tileID, image, [layer], true));
+      destroyRasterResources(renderer.addTile('second', tileID, image, [layer], layer, true));
       const oldBytes = memory();
       const first = renderer.takeDisplacedTile('first', [])!;
       const second = renderer.takeDisplacedTile('second', [])!;
       expect(memory()).toBe(oldBytes);
-      const successor = renderer.addTile('first', tileID, image, [layer], true);
+      const successor = renderer.addTile('first', tileID, image, [layer], layer, true);
       expect(memory()).toBe(oldBytes + singletonBytes);
       first.setVisible(false);
       first.release();
@@ -278,9 +447,9 @@ describe('raster resource ownership', () => {
     const scene = new SceneCollections(root, () => {}, () => true);
     root.add(renderer.collections.get(layer.id)!);
     try {
-      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], true));
+      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], layer, true));
       const secondTileID = new OverscaledTileID(12, 0, 12, 2049, 1362);
-      const shared = renderer.addTile('second', secondTileID, image, [layer], true);
+      const shared = renderer.addTile('second', secondTileID, image, [layer], layer, true);
       destroyRasterResources(shared);
       const primitive = shared.added[0];
       const destroy = vi.spyOn(primitive, 'destroy');
@@ -327,33 +496,6 @@ describe('raster resource ownership', () => {
     }
   });
 
-  it('keeps both displayed and successor static generations pinned until handoff release', () => {
-    const { layer, renderer, image, tileID } = fixture();
-    const memory = () => {
-      let total = 0;
-      renderer.visitMemoryEntries((_tileId, bytes, pinned) => {
-        expect(pinned).toBe(true);
-        total += bytes;
-      });
-      return total;
-    };
-    try {
-      renderer.addTile('first', tileID, image, [layer]);
-      const originalBytes = memory();
-      const successorImage = document.createElement('canvas');
-      successorImage.width = image.width;
-      successorImage.height = image.height;
-      const successor = renderer.addTile('first', tileID, successorImage, [layer]);
-      expect(renderer.collections.get(layer.id)!.length).toBe(2);
-      expect(memory()).toBe(originalBytes * 2);
-      successor.retained!.release();
-      expect(memory()).toBe(originalBytes);
-      successor.retained!.release();
-      expect(memory()).toBe(originalBytes);
-    }
-    finally { destroyRasterResources(renderer.clear()); }
-  });
-
   it('counts one shared animated texture while preserving all batch geometry bytes', () => {
     const { layer, renderer, image, tileID } = fixture();
     const bytes = () => {
@@ -365,10 +507,10 @@ describe('raster resource ownership', () => {
       return total;
     };
     try {
-      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], true));
+      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], layer, true));
       const initialBytes = bytes();
       const otherTileID = new OverscaledTileID(12, 0, 12, 2049, 1362);
-      const published = renderer.addTile('second', otherTileID, image, [layer], true);
+      const published = renderer.addTile('second', otherTileID, image, [layer], layer, true);
       destroyRasterResources(published);
       const primitive = published.added[0];
       expect(renderer.collections.get(layer.id)!.length).toBe(1);
@@ -387,32 +529,10 @@ describe('raster resource ownership', () => {
     finally { destroyRasterResources(renderer.clear()); }
   });
 
-  it('refreshes a resized animated batch once and preserves a steady batch', () => {
-    const { layer, renderer, image, tileID } = fixture();
-    try {
-      destroyRasterResources(renderer.addTile('first', tileID, image, [layer], true));
-      destroyRasterResources(renderer.addTile('second', tileID, image, [layer], true));
-      const collection = renderer.collections.get(layer.id)!;
-      const original = collection.get(0);
-      expect(renderer.update().added).toEqual([]);
-      expect(renderer.update().added).toEqual([]);
-      expect(collection.get(0)).toBe(original);
-      image.width *= 2;
-      const resized = renderer.update();
-      expect(resized.added).toHaveLength(1);
-      expect(resized.removed).toEqual([original]);
-      destroyRasterResources(resized);
-      expect(original.isDestroyed()).toBe(true);
-      expect(renderer.update().added).toEqual([]);
-      expect(collection.get(0)).toBe(resized.added[0]);
-    }
-    finally { destroyRasterResources(renderer.clear()); }
-  });
-
   it('keeps a displaced parent until its last retained generation is released', () => {
     const { layer, renderer, image, tileID } = fixture();
     try {
-      const published = renderer.addTile('first', tileID, image, [layer]);
+      const published = renderer.addTile('first', tileID, image, [layer], layer);
       const parent = renderer.collections.get(layer.id)!;
       const retained = renderer.takeDisplacedTile('first', [])!;
       // The layer survives in the style but has moved to another render track.

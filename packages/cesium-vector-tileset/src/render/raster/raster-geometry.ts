@@ -1,9 +1,8 @@
 import type { RasterStyleLayer } from '../../style/style-layer/raster-style-layer';
 import type { CanonicalTileID, OverscaledTileID } from '../../tile/tile-id';
-import { Cartesian3, Cartographic, Ellipsoid, SceneMode } from 'cesium';
+import { Cartographic, Ellipsoid, SceneMode } from 'cesium';
 import { EXTENT } from '../../data/extent';
 import { tileLocalToCartographic } from '../geometry/tile-to-ecef';
-import { constantValue } from '../vector/feature-attributes';
 
 type TileID = CanonicalTileID | OverscaledTileID;
 
@@ -39,8 +38,6 @@ export const Z_SUBDIVIDE = 6;
 export const CELLS_PER_EDGE = 4;
 export const GLOBE_CELLS_PER_EDGE = 128;
 export const GLOBE_MIN_CELLS_PER_EDGE = 32;
-/** Small lift used by the Cesium renderer to avoid z-fighting with the globe. */
-export const RASTER_SURFACE_OFFSET_M = 1;
 
 function cellCountForZoom(z: number, mode?: SceneMode): number {
   // Keep the direct helper's historical contract when no frame mode is
@@ -68,18 +65,15 @@ interface RasterGridData {
 
 interface RasterGridEntry {
   ellipsoid: Ellipsoid;
-  /** Grid at surfaceOffset 0, shared by every layer on the tile. */
+  /** Ground grid shared by every layer on the tile. */
   base: RasterGridData;
-  /** Surface offsets applied to the shared base positions, cached per offset. */
-  shifted: Map<number, Float64Array>;
 }
 
 // The ECEF grid depends only on the tile, the frame mode, the source corner
 // quad and the winding order - never on the style layer. Raster layers share
 // one tile's geometry, so recomputing the full 129x129 grid (one Cartographic
 // and one Cartesian3 allocation per vertex at low zoom) per layer per tile
-// wasted most of the build time on identical work. The per-layer surface
-// offset is small and is applied to the shared base positions instead.
+// wasted most of the build time on identical work.
 const rasterGridCache = new WeakMap<CanonicalTileID | OverscaledTileID, Map<string, RasterGridEntry>>();
 
 export function rasterGeometryKey(
@@ -90,22 +84,8 @@ export function rasterGeometryKey(
   return `${flippedWindingOrder ? 'flipped' : 'normal'}:${mode ?? 'legacy'}:${tileCoordinates?.map(point => `${point.x},${point.y}`).join(';') ?? 'tile'}`;
 }
 
-function offsetGridPositions(positions: Float64Array, ellipsoid: Ellipsoid, meters: number): Float64Array {
-  const shifted = positions.slice();
-  const point = new Cartesian3();
-  const normal = new Cartesian3();
-  for (let i = 0; i < shifted.length; i += 3) {
-    Cartesian3.fromElements(shifted[i], shifted[i + 1], shifted[i + 2], point);
-    ellipsoid.geodeticSurfaceNormal(point, normal);
-    shifted[i] += normal.x * meters;
-    shifted[i + 1] += normal.y * meters;
-    shifted[i + 2] += normal.z * meters;
-  }
-  return shifted;
-}
-
 /**
- * Builds the ECEF grid for a canonical tile at surfaceOffset 0. Vertices are
+ * Builds the ground ECEF grid for a canonical tile. Vertices are
  * exact ellipsoid points at the tile's cartographic bounds; the grid is
  * uniformly subdivided when the tile is large on screen (low zoom).
  */
@@ -119,13 +99,17 @@ function buildRasterGrid(
   const canonical = 'canonical' in tileID ? tileID.canonical : tileID;
   const cells = cellCountForZoom(canonical.z, mode);
   const size = cells + 1;
-  const positions = new Float64Array(size * size * 3);
-  const st = new Float32Array(size * size * 2);
-  const indices = new Uint16Array(cells * cells * 6);
   const corners = tileCoordinates?.length === 4
     && tileCoordinates.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))
     ? tileCoordinates
     : undefined;
+  // MapLibre allows pole meshes for tiled raster sources, never source quads.
+  const northPole = tileCoordinates === undefined && mode === SceneMode.SCENE3D && canonical.y === 0;
+  const southPole = tileCoordinates === undefined && mode === SceneMode.SCENE3D && canonical.y === 2 ** canonical.z - 1;
+  const rows = cells + Number(northPole) + Number(southPole);
+  const positions = new Float64Array(size * (rows + 1) * 3);
+  const st = new Float32Array(size * (rows + 1) * 2);
+  const indices = new Uint16Array(cells * rows * 6);
 
   const sourcePoint = (u: number, v: number): RasterTileCoordinate => {
     if (!corners) {
@@ -145,11 +129,16 @@ function buildRasterGrid(
     };
   };
 
-  for (let row = 0; row < size; row++) {
+  for (let row = 0; row <= rows; row++) {
     for (let col = 0; col < size; col++) {
       // Tile rows are uniformly spaced in Web Mercator, not latitude.  The
       // distinction is material for the low-zoom subdivisions near the poles.
-      const point = sourcePoint(col / cells, row / cells);
+      const sourceRow = row - Number(northPole);
+      const point = sourcePoint(col / cells, sourceRow / cells);
+      if (northPole && row === 0)
+        point.y = -32768;
+      if (southPole && row === rows)
+        point.y = 32767;
       const cart = tileLocalToCartographic(
         tileID,
         point.x,
@@ -169,12 +158,13 @@ function buildRasterGrid(
       // own RectangleGeometry (upperLeft, lowerLeft, upperRight) - so the
       // texture is mirrored in V instead, which is exactly what MapLibre's
       // cull-face flip produces for such sources.
-      st[textureOffset + 1] = flippedWindingOrder ? row / cells : 1 - row / cells;
+      const v = Math.max(0, Math.min(1, sourceRow / cells));
+      st[textureOffset + 1] = flippedWindingOrder ? v : 1 - v;
     }
   }
 
   let i = 0;
-  for (let row = 0; row < cells; row++) {
+  for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cells; col++) {
       const a = row * size + col;
       const b = a + 1;
@@ -196,13 +186,12 @@ function buildRasterGrid(
  * Builds the ECEF grid for a canonical tile. Vertices are exact ellipsoid
  * points at the tile's cartographic bounds; the grid is uniformly subdivided
  * when the tile is large on screen (low zoom). The grid is memoized per tile
- * and shared by every raster layer; `surfaceOffset` lifts a copy of the
- * shared positions along the surface normal.
+ * and shared by every raster layer. Style ordering changes draw commands,
+ * never the physical height of ground geometry.
  */
 export function rasterPrimitiveGeometry(
   tileID: TileID,
   ellipsoid: Ellipsoid = Ellipsoid.WGS84,
-  surfaceOffset = 0,
   tileCoordinates?: readonly RasterTileCoordinate[],
   flippedWindingOrder = false,
   mode?: SceneMode,
@@ -213,7 +202,6 @@ export function rasterPrimitiveGeometry(
     entry = {
       ellipsoid,
       base: buildRasterGrid(tileID, ellipsoid, tileCoordinates, flippedWindingOrder, mode),
-      shifted: new Map(),
     };
     let tileCache = rasterGridCache.get(tileID);
     if (!tileCache) {
@@ -222,21 +210,7 @@ export function rasterPrimitiveGeometry(
     }
     tileCache.set(key, entry);
   }
-  if (surfaceOffset === 0) {
-    return { ...entry.base };
-  }
-  let positions = entry.shifted.get(surfaceOffset);
-  if (!positions) {
-    positions = offsetGridPositions(entry.base.positions, ellipsoid, surfaceOffset);
-    entry.shifted.set(surfaceOffset, positions);
-  }
-  return {
-    positions,
-    st: entry.base.st,
-    indices: entry.base.indices,
-    subdivisions: entry.base.subdivisions,
-    gridSize: entry.base.gridSize,
-  };
+  return entry.base;
 }
 
 export interface RasterStyle {
@@ -254,22 +228,19 @@ export interface RasterStyle {
  * (the spec's no-fade policy: raster layer style is uniform per tile).
  */
 export function rasterStyle(layer: RasterStyleLayer): RasterStyle {
-  const paint = layer as unknown as { paint: { get: (property: string) => unknown } };
-  const value = (property: string, fallback: number): number => {
-    const resolved = constantValue(paint, property);
-    return typeof resolved === 'number' && Number.isFinite(resolved) ? resolved : fallback;
-  };
-  const resampling = constantValue(paint, 'resampling') === 'nearest'
-    || constantValue(paint, 'raster-resampling') === 'nearest'
+  // Expressions can produce Infinity; keep finite shader inputs.
+  const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback;
+  const resampling = layer.paint.get('resampling') === 'nearest'
+    || layer.paint.get('raster-resampling') === 'nearest'
     ? 'nearest'
     : 'linear';
   return {
-    opacity: value('raster-opacity', 1),
-    brightnessMin: value('raster-brightness-min', 0),
-    brightnessMax: value('raster-brightness-max', 1),
-    contrast: value('raster-contrast', 0),
-    saturation: value('raster-saturation', 0),
-    hueRotate: value('raster-hue-rotate', 0),
+    opacity: finite(layer.paint.get('raster-opacity'), 1),
+    brightnessMin: finite(layer.paint.get('raster-brightness-min'), 0),
+    brightnessMax: finite(layer.paint.get('raster-brightness-max'), 1),
+    contrast: finite(layer.paint.get('raster-contrast'), 0),
+    saturation: finite(layer.paint.get('raster-saturation'), 0),
+    hueRotate: finite(layer.paint.get('raster-hue-rotate'), 0),
     resampling,
   };
 }
