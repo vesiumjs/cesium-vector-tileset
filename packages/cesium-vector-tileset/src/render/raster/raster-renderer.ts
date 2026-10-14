@@ -175,17 +175,17 @@ class RasterImageMaterial extends RuntimeMaterial {
       return;
     const source = this._coverage.source;
     this.uniforms.u_coverage_size = source?.width ?? 0;
-    if (!source) {
-      if (this._coverageLease)
-        this._retired.push(this._coverageLease);
-      this._coverageLease = undefined;
-    }
-    else if (this._coverageLease) {
+    // Every mask has its own bytes, so the lease covers the material's whole
+    // lifetime: a retired lease frees its record only in Material.update, which
+    // Cesium skips for hidden and not-yet-updated primitives, and the next mask
+    // would find that record still bound to the previous bytes. An empty mask
+    // needs no sampler of its own -- u_coverage_size gates it.
+    if (!source)
+      return;
+    if (this._coverageLease)
       this._coverageLease.copyImage(source);
-    }
-    else {
+    else
       this._coverageLease = this._texturesStore.retain(this._coverage, source, 'nearest');
-    }
   }
 
   override destroy(): void {

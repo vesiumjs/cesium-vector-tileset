@@ -225,6 +225,44 @@ describe('raster resource ownership', () => {
     finally { destroyRasterResources(renderer.clear()); }
   });
 
+  it('keeps one coverage texture while Cesium skips the material between two masks', () => {
+    const { layer, renderer, image, tileID } = fixture();
+    const childA = tileID.children(13)[0];
+    const childB = tileID.children(13)[1];
+    const canvas = () => {
+      const value = document.createElement('canvas');
+      value.width = value.height = 64;
+      return value;
+    };
+    const context = { defaultTexture: { width: 1, height: 1 } };
+    const updateMaterial = (primitive: ReturnType<RasterTileRenderer['addTile']>['added'][number]) => {
+      (primitive.appearance.material as typeof primitive.appearance.material & { update: (context: object) => void }).update(context);
+    };
+    const maskUploads = () => textures.uploads.filter(upload => 'arrayBufferView' in upload.source);
+    try {
+      const parent = renderer.addTile('source/parent', tileID, image, [layer], layer).added[0];
+      const a = renderer.addTile('source/a', childA, canvas(), [layer], layer).added[0];
+      vi.spyOn(parent, 'ready', 'get').mockReturnValue(true);
+      vi.spyOn(a, 'ready', 'get').mockReturnValue(true);
+      renderer.update(0, false, undefined, () => ({ source: layer }));
+      updateMaterial(parent);
+      expect(parent.appearance.material.uniforms.u_coverage_size).toBe(2);
+      // A hidden or first-update-queued primitive reaches Cesium's update
+      // without ever reaching RasterImageMaterial.update.
+      destroyRasterResources(renderer.removeTile('source/a'));
+      renderer.update(0, false, undefined, () => ({ source: layer }));
+      expect(parent.appearance.material.uniforms.u_coverage_size).toBe(0);
+      const b = renderer.addTile('source/b', childB, canvas(), [layer], layer).added[0];
+      vi.spyOn(b, 'ready', 'get').mockReturnValue(true);
+      renderer.update(0, false, undefined, () => ({ source: layer }));
+      expect(parent.appearance.material.uniforms.u_coverage_size).toBe(2);
+      updateMaterial(parent);
+      expect(maskUploads()).toHaveLength(1);
+      expect(maskUploads()[0].destroy).not.toHaveBeenCalled();
+    }
+    finally { destroyRasterResources(renderer.clear()); }
+  });
+
   it('preserves a ready batch when neighbouring tiles and its texture dimensions change', () => {
     const { layer, renderer, image, tileID } = fixture();
     try {
