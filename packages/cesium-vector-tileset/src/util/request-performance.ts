@@ -1,40 +1,33 @@
+let nextMeasurementId = 0;
+
 /**
  * Safe wrapper for the performance resource timing API in web workers with graceful degradation
  * @internal
  */
 export class RequestPerformance {
-  private start: string;
+  private readonly url: string;
 
-  private end: string;
+  private readonly startTime: number;
 
-  private measure: string;
+  private readonly measurementName: string;
 
   constructor(url: string) {
-    this.start = `${url}#start`;
-    this.end = `${url}#end`;
-    this.measure = url;
-
-    performance.mark(this.start);
+    this.url = url;
+    this.startTime = performance.now();
+    this.measurementName = `request-performance:${++nextMeasurementId}`;
   }
 
   finish(): PerformanceEntryList {
-    performance.mark(this.end);
-    let resourceTimingData = performance.getEntriesByName(this.measure);
+    const endTime = performance.now();
+    const resourceTimingData = performance.getEntriesByName(this.url, 'resource');
+    if (resourceTimingData.length)
+      return resourceTimingData;
 
-    // fallback if web worker implementation of perf.getEntriesByName returns empty
-    if (resourceTimingData.length === 0) {
-      performance.measure(this.measure, this.start, this.end);
-      resourceTimingData = performance.getEntriesByName(this.measure);
-
-      performance.clearMeasures(this.measure);
-    }
-
-    // The start/end marks are only consumed by the fallback measure above;
-    // the resource-timing path never reads them. Leaving them in place would
-    // accumulate two marks per request, so always clean them up.
-    performance.clearMarks(this.start);
-    performance.clearMarks(this.end);
-
-    return resourceTimingData;
+    // Numeric timestamps survive another request completing or being canceled.
+    // Each fallback owns its measure; unfinished requests create no timeline entries.
+    const measurement = performance.measure(this.measurementName, { start: this.startTime, end: endTime });
+    performance.clearMeasures(this.measurementName);
+    Object.defineProperty(measurement, 'name', { value: this.url });
+    return [measurement];
   }
 }

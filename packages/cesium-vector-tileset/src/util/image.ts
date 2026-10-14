@@ -25,9 +25,9 @@ function createImage<T extends Partial<ImageDataLike>>(image: T, {
     data = new Uint8Array(width * height * channels);
   }
   else if (data instanceof Uint8ClampedArray) {
-    data = new Uint8Array(data.buffer);
+    data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   }
-  else if (data.length !== width * height * channels) {
+  if (data.length !== width * height * channels) {
     throw new RangeError(`mismatched image size. expected: ${data.length} but got: ${width * height * channels}`);
   }
   image.width = width;
@@ -120,7 +120,7 @@ export class RGBAImage {
       this.data.set(data);
     }
     else if (data instanceof Uint8ClampedArray) {
-      this.data = new Uint8Array(data.buffer);
+      this.data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     }
     else {
       this.data = data;
@@ -199,10 +199,7 @@ export function arrayBufferToImage(data: ArrayBuffer): Promise<HTMLImageElement>
     img.onload = () => {
       resolve(img);
       URL.revokeObjectURL(img.src);
-      // prevent image dataURI memory leak in Safari;
-      // but don't free the image immediately because it might be uploaded in the next frame
       img.onload = null;
-      window.requestAnimationFrame(() => img.src = transparentPngUrl);
     };
     img.onerror = () => reject(new Error('Could not load image. Please make sure to use a supported image type such as PNG or JPEG. Note that SVGs are not supported.'));
     const blob: Blob = new Blob([new Uint8Array(data)], { type: 'image/png' });
